@@ -1,4 +1,8 @@
+<p align="center"><img src="docs/assets/repo-hero.svg" alt="FoilPage：把声音，留在纸上。Windows 本地转写、文稿整理、浏览器扩展与 Agent。" width="100%"></p>
+
 # FoilPage
+
+[使用指南](docs/user-guide.md) · [产品官网](https://foilpage.early-snipe-7202.chatgpt.site) · [源码发行](https://github.com/Ansel-Poiesis/FoilPage-source/releases) · [报告问题](docs/bug-reporting.md)
 
 视频转写、文本整理与本地内容管理。Windows 桌面应用，配套浏览器扩展和 Agent CLI / MCP。
 
@@ -85,6 +89,8 @@ npm run test:ui
 本仓库发布桌面、扩展、Agent、测试和构建源码。官方托管服务由独立服务运营，其服务器实现采用单独的发布安排。源码许可权利由 MPL-2.0 规定，官方账户、模型额度和订阅服务由相应服务条款规定。
 
 分发修改版时，按 MPL 提供受其覆盖文件的对应源码和许可声明。FoilPage 名称与标志的使用遵循 [品牌说明](TRADEMARKS.md)。
+
+相关历史发行与托管服务的关系见[项目范围](docs/project-scope.md)。源码维护与发行的 [OSPS Level 1 核对依据](docs/security-baseline.md) 可公开复核；其范围与维护者自评性质在文中说明。
 
 ## 参与
 

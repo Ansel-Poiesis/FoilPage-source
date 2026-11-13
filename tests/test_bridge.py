@@ -16,6 +16,13 @@ from engine.model_manager import ModelManagerError, ModelSpec, ModelState
 from account_auth_fixtures import grant_account
 
 
+@pytest.mark.parametrize('opened', [True, False])
+def test_author_website_opens_fixed_url(opened):
+    with mock.patch('webbrowser.open', return_value=opened) as browser:
+        assert Bridge.open_author_website(object.__new__(Bridge)) == {'ok': opened}
+    browser.assert_called_once_with('https://keeppoiesis.com/')
+
+
 def test_agent_cannot_write_user_terms_confirmation(tmp_path):
     from engine.settings import SettingsStore
 

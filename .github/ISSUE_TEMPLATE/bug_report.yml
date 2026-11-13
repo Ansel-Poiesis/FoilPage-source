@@ -1,0 +1,29 @@
+# Copyright (c) 2026 Ansel
+# SPDX-License-Identifier: MPL-2.0
+name: 缺陷报告 / Bug report
+description: 用最小复现说明源码客户端问题 / Report a reproducible client issue
+body:
+  - type: markdown
+    attributes:
+      value: "请勿上传密钥、Cookie、完整日志、数据库、订单或私人文稿。安全问题请私密报告。Remove private information; report vulnerabilities privately."
+  - type: input
+    id: version
+    attributes:
+      label: 系统与版本 / System and version
+      description: Windows版本、FoilPage源码提交或发行版本、运行方式
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      description: 使用合成资料或有权公开的最小样本
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望与实际结果 / Expected and actual behavior
+      description: 提供脱敏错误文字，避免完整诊断包
+    validations:
+      required: true
