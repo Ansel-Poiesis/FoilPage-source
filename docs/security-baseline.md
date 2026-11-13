@@ -2,6 +2,8 @@
 
 核对日期：2026-11-13。依据：[OpenSSF OSPS Baseline v2026.08.28](https://baseline.openssf.org/versions/2026-08-28.html)。范围为 [FoilPage-source](project-scope.md) 的公开源码维护和源码发行，相关旧安装包、官网和托管服务单独披露。下表是维护者自评依据，不是独立审计。
 
+已提交 [BadgeApp 项目 16657](https://www.bestpractices.dev/en/projects/16657/baseline-1)，24/24 项为 Met，页面显示 100% 与 Level 1 徽章。自评资料在权利人确认后按 CDLA-Permissive-2.0 发布，源码仍采用 MPL-2.0。
+
 | 控制 | 证据 |
 | --- | --- |
 | OSPS-AC-01.01 | 唯一管理者账号的 GitHub 双重认证已启用；本轮由维护者设置页面核实。 |
@@ -28,5 +30,9 @@
 | OSPS-QA-05.01 | 跟踪源码树没有应用可执行程序、安装器、动态库或字节码缓存；打包输出被忽略。 |
 | OSPS-QA-05.02 | 跟踪的二进制为字体、图标、提示音与合成测试视频，来源和许可见 [第三方说明](../THIRD_PARTY_NOTICES.md)；不含编译的应用或依赖库。 |
 | OSPS-VM-02.01 | [SECURITY.md](../SECURITY.md) 指向已启用的 GitHub 私密漏洞报告，并说明需要的脱敏材料。 |
+
+## 已知依赖告警
+
+2026-11-13 开启 Dependabot 后，GitHub 报告 144 条未关闭的依赖告警，其中 12 条 critical、77 条 high、52 条 medium、3 条 low。此数字包含同一组件在不同依赖清单中的重复报告，不代表独立漏洞总数。涉及 Pillow、Brotli、filelock、fonttools、pytest 和 setuptools；修复版本与合并状态以仓库 Security 页面为准。维护者正在安排升级与回归，当前源码和 v0.1.0 归档不能据本流程自评视作已修复这些问题。
 
 GitHub 安全与访问设置由平台管理，部分依据只有维护者可读。本表不公开凭据、身份验证细节或用户数据。获得公开自评徽章后，应继续维护这些控制；新增发行方式或改变项目范围时需重新核验。

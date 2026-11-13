@@ -19,6 +19,20 @@ fs.mkdirSync(output, {recursive:true});
     await page.addInitScript(require('./ui_fixture.cjs'),{nativeChrome:true});
     await page.goto(pathToFileURL(path.join(root,'app/webview_ui/index.html')).href);
     await page.waitForSelector('.nav-row[data-page="workbench"]');
+    for (const width of [1280,960,640,560]) {
+      await page.setViewportSize({width,height:640});
+      await page.locator('.nav-row[data-page="settings"]').scrollIntoViewIfNeeded();
+      const creditLayout=await page.evaluate(()=>({
+        footer:document.querySelector('#authorCredit').getBoundingClientRect().toJSON(),
+        nav:document.querySelector('#nav').getBoundingClientRect().toJSON(),
+        settings:document.querySelector('.nav-row[data-page="settings"]').getBoundingClientRect().toJSON(),
+        height:innerHeight,
+      }));
+      assert(creditLayout.footer.bottom<=creditLayout.height,'author credit remains inside short windows');
+      assert(creditLayout.nav.bottom<=creditLayout.footer.top,'navigation cannot overlap the author credit');
+      assert(creditLayout.settings.bottom<=creditLayout.footer.top,'settings remains reachable above the credit');
+    }
+    await page.setViewportSize({width:1280,height:800});
     await page.evaluate(()=>switchView('workbench'));
     await page.waitForSelector('.nav-row[aria-current=page]');
     await page.locator('[data-page=workbench]').click();
