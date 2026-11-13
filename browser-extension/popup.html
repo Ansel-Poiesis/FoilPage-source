@@ -1,0 +1,38 @@
+<!-- Copyright (c) 2026 Ansel | SPDX-License-Identifier: MPL-2.0 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FoilPage</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand"><img class="mark" src="icons/icon-32.png" alt=""><div class="brand-copy"><strong>FoilPage</strong><span>FoilPage</span></div></div>
+      <div id="connection" class="connection"><span id="connectionDot"></span><span id="connectionText" role="status" aria-live="polite">正在检查</span></div>
+    </header>
+    <section class="panel">
+      <p id="message" class="message">检查本地服务</p>
+      <p id="versionNote" class="message" style="display:none;opacity:.75"></p>
+      <button id="connect" class="primary" type="button">一键配置 FoilPage</button>
+      <button id="openApp" class="primary" type="button" style="display:none">唤起 FoilPage 并打开连接页</button>
+    </section>
+    <section id="pagePanel" class="page-panel" hidden>
+      <div class="page-head"><strong>当前页面</strong></div>
+      <p id="pageDesc" class="page-desc"></p>
+      <div class="page-actions">
+        <button id="pageDownload" class="page-btn" type="button" title="下载到本机"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4" stroke-linecap="round" stroke-linejoin="round"/></svg>下载</button>
+        <button id="pageTranscribe" class="page-btn page-btn-primary" type="button" title="下载后自动转写"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M7 4h10a2 2 0 0 1 2 2v14H5V6a2 2 0 0 1 2-2Zm2 5h6m-6 4h6m-6 4h3" stroke-linecap="round" stroke-linejoin="round"/></svg>转写</button>
+      </div>
+      <p id="pageState" class="page-state" role="status" aria-live="polite" hidden></p>
+    </section>
+    <section id="jobsPanel" class="jobs-panel" hidden>
+      <div class="jobs-head"><strong>最近任务</strong><button id="refreshJobs" class="icon-button" type="button" aria-label="刷新任务"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5m-4-4a8 8 0 0 1 13-3l2 2M4 17l2 2a8 8 0 0 0 13-3" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+      <div id="jobs" class="jobs"></div>
+    </section>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

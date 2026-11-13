@@ -1,0 +1,87 @@
+/* Copyright (c) 2026 Ansel | SPDX-License-Identifier: MPL-2.0 */
+/* 抖音页按钮：贴合抖音原生播放器控件——透明底、白字、无投影打光，
+   字体沿用站点自身字体栈，不再向页面注入自定义字体。 */
+xg-icon.shengjian-player-control {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 56px !important;
+  min-width: 56px !important;
+  height: 32px !important;
+  margin: 0 2px !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+}
+
+.shengjian-player-button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 4px !important;
+  width: 54px !important;
+  height: 28px !important;
+  padding: 0 3px !important;
+  border: 0 !important;
+  border-radius: 4px !important;
+  background: transparent !important;
+  color: rgb(255 255 255 / 92%) !important;
+  cursor: pointer !important;
+  font-family: inherit !important;
+  font-weight: 600 !important;
+  font-size: 13px !important;
+  line-height: 28px !important;
+  letter-spacing: 0 !important;
+  white-space: nowrap !important;
+  box-shadow: none !important;
+  transition: background-color 120ms ease, color 120ms ease, transform 80ms ease !important;
+}
+
+.shengjian-player-button:hover {
+  background: rgb(255 255 255 / 12%) !important;
+  color: #fff !important;
+}
+
+.shengjian-player-button:active { transform: scale(.94) !important; }
+.shengjian-player-button:disabled { cursor: wait !important; opacity: .58 !important; }
+.shengjian-player-button.is-error { color: #ffb7bd !important; }
+.shengjian-player-button.is-busy .shengjian-player-glyph { animation: shengjian-pulse 720ms ease-in-out infinite alternate; }
+.shengjian-player-glyph { width: 12px !important; text-align: center !important; font-size: 14px !important; }
+
+.xg-right-grid[data-shengjian-grid="true"] {
+  flex-wrap: nowrap !important;
+  overflow: visible !important;
+}
+
+.shengjian-player-host {
+  position: relative !important;
+}
+
+xg-icon.shengjian-floating-control {
+  position: absolute !important;
+  z-index: 2147483000 !important;
+  right: 12px !important;
+  bottom: 12px !important;
+  margin: 0 !important;
+}
+
+xg-icon.shengjian-floating-control.shengjian-download {
+  right: 70px !important;
+}
+
+/* 浮动兜底位没有原生控件行的深色背景，给一层轻底保证可读，仍不带投影。 */
+.shengjian-floating-control .shengjian-player-button {
+  background: rgb(0 0 0 / 38%) !important;
+}
+
+/* 点击反馈已统一走 content.js 的 Shadow DOM 信息窗（毛玻璃卡，对齐桌面端）；
+   本文件不再有页内通知样式。 */
+
+@keyframes shengjian-pulse {
+  from { opacity: .35; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shengjian-player-button { transition: none !important; }
+  .shengjian-player-button.is-busy .shengjian-player-glyph { animation: none !important; }
+}

@@ -1,0 +1,3 @@
+# Independent stdio MCP / CLI runtime; keep ASR and WebView dependencies out.
+mcp==2.3.0
+pywin32==311; platform_system == "Windows"

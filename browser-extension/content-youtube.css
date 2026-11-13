@@ -1,0 +1,189 @@
+/* Copyright (c) 2026 Ansel | SPDX-License-Identifier: MPL-2.0 */
+/* FoilPage YouTube 视频页控件：固定定位的浮动控件簇（按钮 + 反馈 pill 一体）。
+   YouTube 播放器 DOM 会被 SPA 频繁重建且类名无语义，不与站点控件争位，
+   悬浮在播放器右下之上，配色贴合 YouTube 深色界面。 */
+.shengjian-yt-host {
+  position: relative !important;
+  width: 100% !important;
+  min-height: 38px !important;
+  margin: 8px 0 !important;
+  z-index: 2 !important;
+  display: flex !important;
+  flex-direction: row !important;
+  justify-content: flex-end !important;
+  align-items: flex-end !important;
+  gap: 6px !important;
+  font-family: "Roboto", "Segoe UI", Arial, sans-serif !important;
+}
+
+.shengjian-yt-button {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  padding: 7px 14px !important;
+  border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  border-radius: 18px !important;
+  background: rgba(15, 15, 15, 0.88) !important;
+  color: #f1f1f1 !important;
+  font-size: 13px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  pointer-events: auto !important;
+  transition: background 0.15s ease, border-color 0.15s ease !important;
+}
+
+.shengjian-yt-button:hover {
+  background: rgba(36, 36, 36, 0.95) !important;
+  border-color: rgba(255, 255, 255, 0.32) !important;
+}
+
+.shengjian-yt-button.is-busy {
+  opacity: 0.55 !important;
+  cursor: default !important;
+}
+
+.shengjian-yt-glyph {
+  font-size: 14px !important;
+  line-height: 1 !important;
+}
+
+/* 反馈 pill：与 B 站脚本同一状态语言与动效（百分比只留数字/完成勾划入/
+   错误整底变红/入场浮起/淡出下坠），配色贴合 YouTube 深色界面；
+   完成转绿 tint 与 B 站粉底同一「底色变化」语言。 */
+.shengjian-yt-pill {
+  display: none !important;
+  align-items: center !important;
+  padding: 8px 14px !important;
+  border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  border-radius: 18px !important;
+  background: rgba(15, 15, 15, 0.94) !important;
+  color: #f1f1f1 !important;
+  font-size: 13px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  animation: shengjian-yt-pill-in 200ms ease-out !important;
+  transition: opacity 0.4s ease, transform 0.4s ease, background-color 240ms ease, border-color 240ms ease !important;
+}
+
+.shengjian-yt-pill:not(.is-hidden) {
+  display: inline-flex !important;
+}
+
+.shengjian-yt-pill.is-fading {
+  opacity: 0 !important;
+  transform: translateY(6px) !important;
+  pointer-events: none !important;
+}
+
+/* 百分比态只留数字（与 B 站一致，避免「已加入下载 42%」双信息同行）。 */
+.shengjian-yt-pill .sj-text {
+  display: inline-flex !important;
+  white-space: nowrap !important;
+  max-width: 220px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.shengjian-yt-pill.is-percent .sj-text {
+  display: none !important;
+}
+
+/* 错误态：整底变红（与 B 站同一表达，而非仅文字变色）。 */
+.shengjian-yt-pill.is-error {
+  background: rgba(196, 63, 79, 0.92) !important;
+  border-color: rgba(255, 102, 102, 0.45) !important;
+  color: #fff !important;
+}
+
+.shengjian-yt-pill .sj-stage {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+}
+
+.shengjian-yt-pill .sj-num {
+  display: none !important;
+  font-variant-numeric: tabular-nums !important;
+}
+
+.shengjian-yt-pill.is-percent .sj-num {
+  display: inline-flex !important;
+  align-items: baseline !important;
+  gap: 1px !important;
+}
+
+.shengjian-yt-pill.is-percent .sj-num b {
+  font-weight: 600 !important;
+}
+
+.shengjian-yt-pill.is-percent .sj-num i {
+  font-style: normal !important;
+  font-size: 11px !important;
+}
+
+.shengjian-yt-pill .sj-check {
+  display: none !important;
+  width: 15px !important;
+  height: 15px !important;
+}
+
+.shengjian-yt-pill.is-done {
+  background: rgba(62, 220, 132, 0.16) !important;
+  border-color: rgba(61, 220, 132, 0.45) !important;
+}
+
+.shengjian-yt-pill.is-done .sj-num {
+  display: inline-flex !important;
+  animation: shengjian-yt-num-out 300ms ease-in forwards !important;
+}
+
+.shengjian-yt-pill.is-done .sj-check {
+  display: inline-block !important;
+}
+
+/* pathLength=1：dash 起止用 1/1；dashoffset 不能带 !important——
+   important 声明会压过划入动画（B 站 0.12.6 同款教训）。 */
+.shengjian-yt-pill .sj-check path {
+  fill: none !important;
+  stroke: #3ddc84 !important;
+  stroke-width: 1.8 !important;
+  stroke-linecap: round !important;
+  stroke-linejoin: round !important;
+  stroke-dasharray: 1 !important;
+  stroke-dashoffset: 1;
+}
+
+.shengjian-yt-pill.is-done .sj-check path {
+  animation: shengjian-yt-check-in 420ms 120ms cubic-bezier(.2, 1.4, .4, 1) forwards !important;
+}
+
+@keyframes shengjian-yt-pill-in {
+  from { opacity: 0; transform: translateY(6px); }
+}
+
+@keyframes shengjian-yt-num-out {
+  to { opacity: 0; transform: scale(.4); }
+}
+
+@keyframes shengjian-yt-check-in {
+  0% { stroke-dashoffset: 1; transform: scale(.5); opacity: 0; }
+  55% { opacity: 1; }
+  100% { stroke-dashoffset: 0; transform: scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shengjian-yt-button { transition: none !important; }
+  .shengjian-yt-pill { animation: none !important; transition: none !important; }
+  .shengjian-yt-pill.is-done .sj-num { animation: none !important; opacity: 0 !important; }
+  .shengjian-yt-pill.is-done .sj-check path { animation: none !important; stroke-dashoffset: 0 !important; }
+}
+
+/* Terminal copy names the actual outcome; the check supports the text. */
+.shengjian-yt-pill.is-done { background: #e3efe8 !important; color: #28563c !important; border-color: #b8d5c3 !important; }
+.shengjian-yt-pill.is-done .sj-stage { display: inline-flex !important; gap: 7px !important; align-items: center !important; }
+.shengjian-yt-pill.is-done .sj-num { display: none !important; }
+.shengjian-yt-pill.is-done .sj-text { display: inline-flex !important; }
+.shengjian-yt-pill.is-done .sj-check { position: relative !important; inset: auto !important; width: 16px !important; height: 16px !important; transform: none !important; }
+
+.shengjian-yt-pill.is-done .sj-check path { stroke: currentColor !important; }

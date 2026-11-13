@@ -1,0 +1,43 @@
+# Copyright (c) 2026 Ansel
+# SPDX-License-Identifier: MPL-2.0
+name: source-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Source version to publish
+        required: true
+        default: 0.1.0
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ./.github/workflows/gate.yml
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Publish verified source version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, subprocess
+          version = os.environ['SOURCE_VERSION']
+          source = pathlib.Path('app/bridge.py').read_text(encoding='utf-8')
+          assert re.fullmatch(r'\d+\.\d+\.\d+', version)
+          assert f'APP_VERSION = "{version}"' in source
+          notes = pathlib.Path('docs/releases') / f'v{version}.md'
+          assert notes.is_file()
+          subprocess.run(['gh', 'release', 'create', f'v{version}', '--target', os.environ['GITHUB_SHA'],
+                          '--title', f'FoilPage {version}', '--notes-file', str(notes)], check=True)
+          PY

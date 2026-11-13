@@ -1,0 +1,24 @@
+{
+  "name": "foilpage-source",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test:language": "node tests/test_ui_language.cjs",
+    "test": "node build/sync-extension-main.cjs --check && node --test --test-concurrency=1 tests/browser_extension.test.mjs tests/browser_handoff_behavior.test.mjs tests/extension_update_behavior.test.mjs tests/extension_queue_behavior.test.mjs && node --test tests/test_markdown_xss.mjs && node --test tests/test_onboarding.mjs && node --test tests/test_progress.mjs && node --test tests/test_setup_page.mjs && node --test tests/test_subscription_page.mjs && node --test tests/test_theme_contrast.mjs && node --test tests/test_desktop_interactions.mjs && node --test --test-concurrency=1 tests/test_launch_routes.mjs tests/test_video_actions.mjs && node --test --test-concurrency=1 tests/test_agent_setup_guide.mjs tests/test_media_import.mjs tests/test_video_loading.mjs tests/test_extension_update_guidance.mjs && node --test --test-concurrency=1 tests/test_configuration_states.mjs tests/test_library_state.mjs tests/test_page_state.mjs && node --test --test-concurrency=1 tests/test_account_devices.mjs tests/test_buyer_verification.mjs tests/test_account_profile.mjs tests/test_manual_payment.mjs tests/test_alipay_payment.mjs && node --test --test-concurrency=1 tests/test_agent_settings_sync.mjs && node --test --test-concurrency=1 tests/test_release_ui.mjs tests/test_release_settings_inbox.mjs tests/test_video_scan_ui.mjs tests/test_beta_access_ui.mjs tests/test_public_terms.mjs && node --test tests/test_release_copy.mjs",
+    "test:ui": "node tests/ui_product_smoke.cjs && node tests/ui_desktop_accessibility.cjs && node tests/extension_visual_smoke.cjs && node tests/extension_main_browser_smoke.cjs",
+    "test:onboarding": "node --test tests/test_onboarding.mjs",
+    "test:setup": "node --test tests/test_setup_page.mjs",
+    "test:subscription": "node --test --test-concurrency=1 tests/test_subscription_page.mjs tests/test_manual_payment.mjs tests/test_alipay_payment.mjs",
+    "test:quality": "node tests/ui_desktop_accessibility.cjs",
+    "test:ui:audit": "node tests/ui_release_audit.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  },
+  "version": "0.1.0",
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ansel-Poiesis/FoilPage-source.git"
+  }
+}

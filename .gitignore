@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.local-data/
+.ruff_cache/
+.validation/
+.agent-venv/
+.ui-audit-agent-env.tmp.txt
+
+# PyInstaller 构建产物（build/<name>/ 工作目录、dist/ 输出）
+dist/
+dist_installer/
+build/*/
+
+# 支付 Worker 部署状态标记（deploy-production.mjs 写入，release.ps1 门禁读取）
+build/worker-deploy-state.json
+
+# 运行时生成
+library.db
+queue.db
+*.db-wal
+*.db-shm
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+config/settings.local.json
+out/
+out_exe/
+.ui-demo-data/
+_shots_refactor/
+
+# 注：build/*.spec 是我们的源码（打包脚本），不忽略。
+
+# UI 验证截图
+_webview_ui_shots/
+
+# 遗留临时截图
+_test_screen.png
+
+# 公开分发目录（独立 git 仓库，remote -> shengjian），不进入源码仓库
+release_assets/
+
+# Node（UI 冒烟测试本地依赖，不入库）
+node_modules/
+.tmp-ext-profile/
+
+# Local visual review evidence
+.ui-audit/
+
+# Payment credentials and runtime databases belong outside source control.
+.env
+.env.*
+!.env.example
+*.private.env
+payment.db
+payment_service/*.db
+payment_service/cloudflare/build/
+payment_service/cloudflare/.wrangler/
+payment_service/cloudflare/.dev.vars*
+payment_service/cloudflare_probe/.wrangler/

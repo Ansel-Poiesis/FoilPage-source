@@ -1,0 +1,96 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "111",
+  "name": "FoilPage",
+  "version": "0.1.0",
+  "description": "经逐次授权在本机下载当前抖音 / B 站 / YouTube 视频，完成后交给 FoilPage 桌面端转写。",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "storage",
+    "cookies",
+    "downloads",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:18765/*",
+    "https://*.douyin.com/*",
+    "https://douyin.com/*",
+    "https://*.bilibili.com/*",
+    "https://bilibili.com/*",
+    "https://www.youtube.com/*",
+    "https://youtu.be/*",
+    "https://m.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.douyin.com/*",
+        "https://douyin.com/*"
+      ],
+      "js": [
+        "douyin-hosts.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://*.douyin.com/*",
+        "https://douyin.com/*"
+      ],
+      "js": [
+        "content-main.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://*.bilibili.com/*",
+        "https://bilibili.com/*"
+      ],
+      "js": [
+        "content-bili.js"
+      ],
+      "css": [
+        "content-bili.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*",
+        "https://youtu.be/*"
+      ],
+      "js": [
+        "content-youtube.js"
+      ],
+      "css": [
+        "content-youtube.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "添加到 FoilPage",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  }
+}

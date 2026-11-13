@@ -1,0 +1,80 @@
+<!-- Copyright (c) 2026 Ansel | SPDX-License-Identifier: MPL-2.0 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FoilPage</title>
+<meta name="description" content="在本机下载视频、转写声音，整理成可阅读的文字。">
+<link rel="icon" href="assets/foilpage.png">
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/product.css">
+<link rel="stylesheet" href="css/onboarding.css">
+<link rel="stylesheet" href="css/setup.css">
+</head>
+<body data-theme="dark">
+<a class="skip-link" href="#content">跳到主要内容</a>
+<div class="app">
+  <div class="window-drag-region window-drag-edge" aria-hidden="true"></div>
+  <aside class="sidebar" aria-label="FoilPage 主界面导航">
+    <div class="brand window-drag-region" aria-label="FoilPage">
+      <img class="mark" src="assets/foilpage.png" alt="FoilPage 标志">
+      <div class="brand-name"><span class="brand-product">FoilPage</span><span class="brand-ver" hidden id="brandVer">v0.1.0</span></div>
+    </div>
+    <nav class="nav" id="nav" aria-label="主要导航"></nav>
+  </aside>
+  <main class="main">
+    <header class="topbar window-drag-region">
+      <div class="topbar-copy window-drag-region">
+        <h1 class="title" id="pageTitle" tabindex="-1">任务</h1>
+      </div>
+      <div class="actions" id="viewActions"></div>
+      <div id="windowChrome" class="window-chrome" hidden role="group" aria-label="窗口控制">
+        <div class="window-controls">
+          <button id="windowMinimize" class="window-control" type="button" aria-label="最小化" title="最小化"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"/></svg></button>
+          <button id="windowMaximize" class="window-control" type="button" aria-label="最大化" title="最大化"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button>
+          <button id="windowHide" class="window-control window-close" type="button" aria-label="关闭窗口" title="关闭窗口"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+        </div>
+      </div>
+    </header>
+    <div class="content" id="content" tabindex="-1" aria-labelledby="pageTitle">
+      <section class="page active" id="page-workbench"></section>
+      <section class="page" id="page-videos"></section>
+      <section class="page" id="page-library"></section>
+      <section class="page" id="page-faq"></section>
+      <section class="page" id="page-subscription"></section>
+      <section class="page" id="page-settings"></section>
+      <section class="page" id="page-setup"></section>
+      <section class="page" id="page-browser"></section>
+      <section class="page" id="page-links"></section>
+      <section class="page" id="page-import"></section>
+    </div>
+  </main>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<div id="modalRoot"></div>
+<div id="onboardingRoot"></div>
+<script src="js/native-select.js"></script>
+<script src="js/api.js"></script>
+<script src="js/markdown.js"></script>
+<script src="js/icons.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/tools.js"></script>
+<script src="js/setup.js"></script>
+<script src="js/workbench.js"></script>
+<script src="js/library.js"></script>
+<script src="js/videos.js"></script>
+<script src="js/faq-data.js"></script>
+<script src="js/settings.js"></script>
+<script src="vendor/micromodal.min.js"></script>
+<script src="js/terms-metadata.js"></script>
+<script src="js/public-terms.js"></script>
+<script src="js/account-auth.js"></script>
+<script src="js/account-access.js"></script>
+<script src="js/manual-payment.js"></script>
+<script src="js/alipay-payment.js"></script>
+<script src="js/subscription.js"></script>
+<script src="js/onboarding.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

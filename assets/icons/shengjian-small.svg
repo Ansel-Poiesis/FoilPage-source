@@ -1,0 +1,18 @@
+<!-- Copyright (c) 2026 Ansel | SPDX-License-Identifier: MPL-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">FoilPage mark small</title>
+  <desc id="desc">A compact rounded page with a play surface folded into two text lines.</desc>
+  <defs>
+    <clipPath id="page-small">
+      <path d="M100 44h210l158 158v210q0 56-56 56H100q-56 0-56-56V100q0-56 56-56Z"/>
+    </clipPath>
+  </defs>
+  <path fill="#f1e8d4" d="M100 44h210l158 158v210q0 56-56 56H100q-56 0-56-56V100q0-56 56-56Z"/>
+  <g clip-path="url(#page-small)">
+    <path fill="#173f34" d="M100 44h210q24 0 24 24v74L44 432V100q0-56 56-56Z"/>
+    <path fill="#58a77d" d="M44 400 310 138q18-18 36 0l18 18L80 438q-18 18-36 0Z"/>
+    <path fill="#f1e8d4" d="M126 137q0-20 19-9l175 99q20 12 0 24L145 350q-19 11-19-9Z"/>
+    <rect x="226" y="306" width="198" height="42" rx="21" fill="#173f34"/>
+    <rect x="198" y="372" width="198" height="42" rx="21" fill="#173f34"/>
+  </g>
+</svg>

@@ -1,0 +1,26 @@
+# 最小门禁起步（00-待办 #20）：只抓「几乎必有错」的规则，风格偏好不阻断。
+# 刻意不选 E701/E702/E731（紧凑卫语句与 lambda 赋值是本库既有风格），
+# 测试文件的 E402（sys.path 先行）也是惯例。扩规则前先全绿再逐条加。
+target-version = "py311"
+line-length = 120
+
+extend-exclude = [
+  ".venv", ".agent-venv", "node_modules", "dist", "dist_installer", "build",
+  ".ui-audit", ".ui-demo-data", "_webview_ui_shots", "_work", "payment_service/cloudflare/node_modules",
+]
+
+[lint]
+select = [
+  "E9",             # 语法/缩进/IO 等硬错误
+  "F",              # pyflakes：未定义名、未使用导入、重复定义
+  "B015", "B018",   # 无效比较/无用表达式这类几乎必为笔误的 bugbear 子集
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["E402"]      # 测试先修 sys.path 再导入被测模块
+# 跨模块夹具导入 + 同名测试参数是 pytest 惯用模式：参数遮蔽导入名会触发
+# F811，但删掉导入会让夹具解析失败（2026-10-10 的 autofix 事故）。
+"tests/test_agent_integration.py" = ["F811"]
+"tests/test_agent_application_integration.py" = ["F811"]
+"tests/test_agent_beta_card.py" = ["F811"]
+"**/__init__.py" = ["F401"]  # 包导出属再导出语义

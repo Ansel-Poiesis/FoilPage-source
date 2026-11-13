@@ -1,0 +1,30 @@
+# 引擎层依赖（冻结项 §3.3）
+# ============================================================================
+# NVIDIA GPU 推理由 CTranslate2 + CUDA 12/cuDNN 9 提供，不引入 torch。
+# 直接依赖一律用 == 锁定（可复现构建，见 requirements-base.lock.txt 的完整锁）。
+#
+# Windows 发布包会携带 NVIDIA wheels 中的运行 DLL；无 NVIDIA GPU 或运行时
+# 加载失败时，Worker 自动回退 CTranslate2 CPU int8。
+#
+# 安装时使用阿里云镜像（默认 PyPI 在沙箱内 SSL 被拦截）：
+#   pip install -r requirements-base.txt -i https://mirrors.aliyun.com/pypi/simple/
+# 复现完整环境（含传递依赖的精确版本）：
+#   pip install -r requirements-base.lock.txt -i https://mirrors.aliyun.com/pypi/simple/
+# ============================================================================
+faster-whisper==1.2.1
+nvidia-cublas-cu12==12.9.2.10; platform_system == "Windows"
+nvidia-cudnn-cu12==9.25.0.15; platform_system == "Windows"
+imageio-ffmpeg==0.6.0
+opencc-python-reimplemented==0.1.7
+httpx==0.28.1
+# yt-dlp 是对抗平台反爬的前线：版本老化会直接表现为「某平台下载失效」。
+# 升级节拍见 build/check_ytdlp_update.py 与 README「依赖升级节拍」。
+# [default] extra 带来 YouTube 挑战求解器（yt-dlp-ejs）与 pycryptodomex 等
+# 解析依赖；配合 js_runtime_path 设置（推荐 Deno）获得完整 YouTube 支持。
+yt-dlp[default]==2026.10.26
+pillow==12.0.0
+# win32crypt（engine/settings.py 与 agent/client.py 的 DPAPI 保护）无 pip 传递
+# 来源，必须显式声明，否则按锁复现的环境缺 DPAPI。
+pywin32==312; platform_system == "Windows"
+pystray==0.19.5
+pywebview==6.2.1
