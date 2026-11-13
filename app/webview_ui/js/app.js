@@ -399,6 +399,14 @@ function waitForBridge(timeout) {
 async function init() {
   buildNav();
   await waitForBridge();
+  document.getElementById('authorCredit').onclick = async (event) => {
+    if (!AppApi.inWebview) return;
+    event.preventDefault();
+    try {
+      const result = await AppApi.openAuthorWebsite();
+      if (!result?.ok) toast('暂时无法打开网站', 'error');
+    } catch (_) { toast('暂时无法打开网站', 'error'); }
+  };
   try {
     const boot = await AppApi.bootstrap();
     if (boot) {

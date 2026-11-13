@@ -1,0 +1,19 @@
+<!-- Copyright (c) 2026 Ansel | SPDX-License-Identifier: MPL-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+<title id="title">FoilPage — 把声音，留在纸上。</title><desc id="desc">纸张与声音波形组成的绿色产品主视觉。Windows 本地转写、文稿整理、浏览器扩展与 Agent。</desc>
+<defs><pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#b7c7b9" stroke-width=".7"/></pattern><filter id="shadow" x="-30%" y="-30%" width="170%" height="180%"><feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#193d28" flood-opacity=".13"/></filter></defs>
+<rect width="1280" height="640" rx="16" fill="#edf1e9"/><rect width="1280" height="640" rx="16" fill="url(#grid)" opacity=".45"/>
+<g font-family="Segoe UI,Microsoft YaHei,Arial,sans-serif" fill="#173e2a">
+<text x="72" y="80" font-size="15" letter-spacing="3">LOCAL VOICE. LASTING WORDS.</text>
+<text x="68" y="218" font-size="100" font-weight="700" letter-spacing="-5">FoilPage</text>
+<text x="74" y="290" font-size="36" font-weight="600">把声音，留在纸上。</text>
+<text x="76" y="355" font-size="20" fill="#49634f">视频转写 · 文稿整理 · 本地内容管理</text>
+<path d="M76 404h440" stroke="#9db49e"/>
+<text x="76" y="450" font-size="17">Windows / Browser extension / Agent</text>
+<rect x="76" y="486" width="108" height="32" rx="16" fill="#255a3a"/><text x="130" y="508" text-anchor="middle" font-size="13" fill="#fff">MPL-2.0</text>
+<text x="202" y="508" font-size="15" fill="#49634f">公开源码 · 可自行构建</text>
+<text x="76" y="580" font-size="14" fill="#49634f">by Ansel · keeppoiesis.com</text>
+</g>
+<g filter="url(#shadow)" transform="translate(750 80) rotate(7 190 240)"><rect width="344" height="466" fill="#fffdf5"/><path d="M25 45h140M25 70h240" stroke="#d1d9cc" stroke-width="7"/><g stroke="#b8c9b5" stroke-width="2"><path d="M25 123h294M25 158h294M25 193h294M25 228h294M25 263h294M25 298h294M25 333h294M25 368h294M25 403h220"/></g><path d="M25 123h180M25 158h260M25 193h210" stroke="#396548" stroke-width="5"/></g>
+<g filter="url(#shadow)" transform="translate(655 340) rotate(-8 190 75)"><rect width="440" height="140" rx="9" fill="#245239"/><g stroke="#c9e4be" stroke-width="4" stroke-linecap="round"><path d="M36 63v14M51 54v32M66 42v56M81 29v82M96 48v44M111 57v26M126 41v58M141 21v98M156 33v74M171 53v34M186 60v20M201 48v44M216 35v70M231 51v38M246 60v20M261 44v52M276 27v86M291 43v54M306 57v26M321 50v40M336 34v72M351 46v48M366 56v28M381 63v14"/></g></g>
+</svg>

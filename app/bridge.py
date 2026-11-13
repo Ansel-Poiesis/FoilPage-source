@@ -3161,6 +3161,11 @@ class Bridge(AccountBridgeMixin):
             return {'ok': False, 'error': '请选择本地文件夹'}
         return {'ok': True, 'path': value}
 
+    def open_author_website(self) -> dict:
+        """Open the fixed author URL without expanding the release URL allowlist."""
+        import webbrowser
+        return {'ok': bool(webbrowser.open('https://keeppoiesis.com/'))}
+
     def open_url(self, url: str) -> dict:
         from engine.product_events import release_url
         if not release_url(url):

@@ -1,0 +1,7 @@
+# Copyright (c) 2026 Ansel
+# SPDX-License-Identifier: MPL-2.0
+blank_issues_enabled: true
+contact_links:
+  - name: 私密安全报告 / Private vulnerability report
+    url: https://github.com/Ansel-Poiesis/FoilPage-source/security/advisories/new
+    about: 请勿公开可利用细节或私人材料 / Keep exploit details and private data confidential

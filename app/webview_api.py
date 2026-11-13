@@ -10,7 +10,7 @@ from functools import wraps
 # Keep this explicit: a future public Bridge helper must not silently become RPC.
 # The frontend contract test checks these names against js/api.js.
 WEBVIEW_API_METHODS = frozenset({
-    "get_product_notifications", "pick_video_scan_directory", "open_url",
+    "get_product_notifications", "pick_video_scan_directory", "open_url", "open_author_website",
     "account_logout", "activate_subscription_demo", "apply_setup_fixes",
     "pick_gpu_pack",
     "install_gpu_pack",

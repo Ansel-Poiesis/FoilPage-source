@@ -26,6 +26,7 @@ window.AppApi = (() => {
     productNotifications: () => call("get_product_notifications"),
     pickVideoDirectory: () => call("pick_video_scan_directory"),
     openUrl: (url) => call("open_url", url),
+    openAuthorWebsite: () => call("open_author_website"),
     agentActivity: () => call("get_agent_activity"),
     videoScanStatus: () => call("get_video_scan_status"),
     cancelVideoScan: () => call("cancel_video_scan"),
