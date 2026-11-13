@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "111",
   "name": "FoilPage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "经逐次授权在本机下载当前抖音 / B 站 / YouTube 视频，完成后交给 FoilPage 桌面端转写。",
   "icons": {
     "16": "icons/icon-16.png",

@@ -22,7 +22,7 @@ httpx==0.28.1
 # [default] extra 带来 YouTube 挑战求解器（yt-dlp-ejs）与 pycryptodomex 等
 # 解析依赖；配合 js_runtime_path 设置（推荐 Deno）获得完整 YouTube 支持。
 yt-dlp[default]==2026.10.26
-pillow==12.0.0
+pillow==13.0.0
 # win32crypt（engine/settings.py 与 agent/client.py 的 DPAPI 保护）无 pip 传递
 # 来源，必须显式声明，否则按锁复现的环境缺 DPAPI。
 pywin32==312; platform_system == "Windows"

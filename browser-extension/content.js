@@ -6,7 +6,7 @@
   if (window.top !== window) return;
 
   const CONTROL_CLASS = "shengjian-player-control";
-  const EXTENSION_VERSION = "0.1.0";
+  const EXTENSION_VERSION = "0.1.1";
   const CAPTURE_RETRY_GUIDE = "若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。";
   const captureRetryGuides = new Map();
   let syncQueued = false;
