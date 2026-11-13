@@ -1,6 +1,6 @@
 # 构建、测试与打包依赖（冻结项 §3.3）
 pyinstaller==6.21.0
-pytest==9.0.2
+pytest==9.0.3
 ruff==0.17.0
 fonttools==4.59.0
 brotli==1.1.0
