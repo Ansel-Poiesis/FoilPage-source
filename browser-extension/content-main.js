@@ -42,7 +42,7 @@
   // URL 命中 aweme web API 即观察响应，仍由 collectAwemes + 隔离世界白名单过滤。
   const API_HINT = /\/aweme\/v1\/web\/.*(?:aweme\/detail|feed|mix\/aweme|aweme\/(?:post|favorite|listcollection)|item\/detail|\/detail)/i;
   const MAX_ITEMS_PER_MESSAGE = 24;
-  const MAIN_MARK_VERSION = "0.1.0";
+  const MAIN_MARK_VERSION = "0.1.1";
   // 收藏夹弹窗常在信息流批次送达之后才打开：批次送达时刻 URL 还没有
   // modal_id，selectCapturedItems 的选中保护不生效，隔离世界 20 槽档案
   // 可能把目标视频挤出（2026-10-12 实机诊断：media_items=51、

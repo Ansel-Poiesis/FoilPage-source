@@ -3,7 +3,7 @@
 /* FoilPage 应用壳：导航、路由、状态流、Toast、Modal、删除确认、顶栏操作 */
 'use strict';
 
-window.APP_VERSION = "0.1.0";
+window.APP_VERSION = "0.1.1";
 window.BASE_FONT_SIZE = 15;
 
 window.AppState = {
