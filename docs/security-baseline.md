@@ -33,6 +33,8 @@
 
 ## 已知依赖告警
 
-2026-11-13 开启 Dependabot 后，GitHub 报告 144 条未关闭的依赖告警，其中 12 条 critical、77 条 high、52 条 medium、3 条 low。此数字包含同一组件在不同依赖清单中的重复报告，不代表独立漏洞总数。涉及 Pillow、Brotli、filelock、fonttools、pytest 和 setuptools；修复版本与合并状态以仓库 Security 页面为准。维护者正在安排升级与回归，当前源码和 v0.1.0 归档不能据本流程自评视作已修复这些问题。
+2026-11-13 开启 Dependabot 时，GitHub 报告 144 条依赖告警，其中 12 条 critical、77 条 high、52 条 medium、3 条 low。此数字包含同一组件在不同依赖清单中的重复报告，不代表独立漏洞总数。
+
+0.1.1 源码补丁将相关组件更新为 Pillow 13.0.0、Brotli 1.2.1、filelock 4.2.1、setuptools 84.1.0、fonttools 4.60.2 和 pytest 9.0.3；运行哈希锁的其他组件保持原版本。[修补 PR 与检查](https://github.com/Ansel-Poiesis/FoilPage-source/pull/7)公开验证过程，当前告警状态以仓库 Security 页面为准。[0.1.1 发行说明](releases/v0.1.1.md)列出影响位置。旧 v0.1.0 归档保留原有依赖，建议使用修补版。
 
 GitHub 安全与访问设置由平台管理，部分依据只有维护者可读。本表不公开凭据、身份验证细节或用户数据。获得公开自评徽章后，应继续维护这些控制；新增发行方式或改变项目范围时需重新核验。
