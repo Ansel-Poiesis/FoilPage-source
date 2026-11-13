@@ -2,6 +2,8 @@
 
 # FoilPage
 
+[![OpenSSF OSPS Baseline Level 1](https://www.bestpractices.dev/projects/16657/baseline)](https://www.bestpractices.dev/en/projects/16657/baseline-1)
+
 [使用指南](docs/user-guide.md) · [产品官网](https://foilpage.early-snipe-7202.chatgpt.site) · [源码发行](https://github.com/Ansel-Poiesis/FoilPage-source/releases) · [报告问题](docs/bug-reporting.md)
 
 视频转写、文本整理与本地内容管理。Windows 桌面应用，配套浏览器扩展和 Agent CLI / MCP。
@@ -90,7 +92,7 @@ npm run test:ui
 
 分发修改版时，按 MPL 提供受其覆盖文件的对应源码和许可声明。FoilPage 名称与标志的使用遵循 [品牌说明](TRADEMARKS.md)。
 
-相关历史发行与托管服务的关系见[项目范围](docs/project-scope.md)。源码维护与发行的 [OSPS Level 1 核对依据](docs/security-baseline.md) 可公开复核；其范围与维护者自评性质在文中说明。
+相关历史发行与托管服务的关系见[项目范围](docs/project-scope.md)。源码维护与发行的 [OSPS Level 1 核对依据](docs/security-baseline.md) 可公开复核；2026-11-13 已提交 [24 项维护者自评](https://www.bestpractices.dev/en/projects/16657/baseline-1)。徽章限定上述范围，当前依赖告警与维护者自评性质在文中说明。
 
 ## 参与
 

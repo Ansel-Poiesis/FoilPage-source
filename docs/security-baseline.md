@@ -2,6 +2,8 @@
 
 核对日期：2026-11-13。依据：[OpenSSF OSPS Baseline v2026.08.28](https://baseline.openssf.org/versions/2026-08-28.html)。范围为 [FoilPage-source](project-scope.md) 的公开源码维护和源码发行，相关旧安装包、官网和托管服务单独披露。下表是维护者自评依据，不是独立审计。
 
+已提交 [BadgeApp 项目 16657](https://www.bestpractices.dev/en/projects/16657/baseline-1)，24/24 项为 Met，页面显示 100% 与 Level 1 徽章。自评资料在权利人确认后按 CDLA-Permissive-2.0 发布，源码仍采用 MPL-2.0。
+
 | 控制 | 证据 |
 | --- | --- |
 | OSPS-AC-01.01 | 唯一管理者账号的 GitHub 双重认证已启用；本轮由维护者设置页面核实。 |
