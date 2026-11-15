@@ -110,6 +110,7 @@ async function detectCurrentPage() {
       dl.disabled = true;
       tr.disabled = true;
       onPageState("正在提交…");
+      const restore = () => { dl.disabled = false; tr.disabled = false; };
       // 抖音必须带页面捕获的直链：无直链的提交会撞平台签名墙必败。
       // B 站走本地 yt-dlp 轨，不需要这一步。
       const begin = (mediaUrl, playUrl = "", mediaCandidates = []) => chrome.runtime.sendMessage({
@@ -119,8 +120,7 @@ async function detectCurrentPage() {
         playUrl, mediaCandidates, title: $("#pageDesc").textContent,
         transcribe,
       }, (response) => {
-        dl.disabled = false;
-        tr.disabled = false;
+        restore();
         if (chrome.runtime.lastError || !response?.ok) {
           onPageState((response?.message) || (chrome.runtime.lastError?.message) || "提交失败", true);
           return;
@@ -128,11 +128,32 @@ async function detectCurrentPage() {
         onPageState(response.job?.queued ? "已排队，等待 FoilPage" : "已提交下载");
         void loadJobs();
       });
-      if (!isDouyin) { begin(""); return; }
-      const videoId = url.match(/\/video\/(\d{10,24})/)?.[1] || "";
-      chrome.tabs.sendMessage(tab.id, { type: "shengjian-fresh-media", videoId }, (fresh) => {
-        if (chrome.runtime.lastError || !fresh?.ok || String(fresh.videoId || "") !== videoId) { begin(""); return; }
-        begin(fresh.mediaUrl || "", fresh.playUrl || "", fresh.mediaCandidates || []);
+      const startBegin = () => {
+        if (!isDouyin) { begin(""); return; }
+        const videoId = url.match(/\/video\/(\d{10,24})/)?.[1] || "";
+        chrome.tabs.sendMessage(tab.id, { type: "shengjian-fresh-media", videoId }, (fresh) => {
+          if (chrome.runtime.lastError || !fresh?.ok || String(fresh.videoId || "") !== videoId) { begin(""); return; }
+          begin(fresh.mediaUrl || "", fresh.playUrl || "", fresh.mediaCandidates || []);
+        });
+      };
+      // 先生 2026-11-15：弹窗提交补齐与页面入口相同的预检（进行中阻止、
+      // 已完成/近窗失败确认），避免弹窗成为绕过确认的重复提交通道。
+      chrome.runtime.sendMessage({ type: "shengjian-check-existing", url }, (check) => {
+        if (chrome.runtime.lastError || !check?.ok) { startBegin(); return; }
+        if (check.active) {
+          restore();
+          onPageState("该视频正在处理中，无需重复提交（进度见 FoilPage 任务页）");
+          return;
+        }
+        const reasons = [];
+        if (check.done && !transcribe) reasons.push("该视频已下载完成；重新下载将新增一份文件");
+        if (check.recentFailure) reasons.push(`该视频刚失败过（${check.recentFailure.summary}），短时间内反复提交可能加剧平台拦截`);
+        if (reasons.length && !window.confirm(`${reasons.join("；")}。仍要提交吗？`)) {
+          restore();
+          onPageState("已取消提交");
+          return;
+        }
+        startBegin();
       });
     };
     $("#pageDownload").onclick = () => submitPage(false);

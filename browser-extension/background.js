@@ -1653,8 +1653,22 @@ async function submitPageDownload(message) {
   const parsed = new URL(url);
   if (!["douyin.com", "bilibili.com", "b23.tv", "youtube.com", "youtu.be"].some(domain => parsed.hostname === domain || parsed.hostname.endsWith(`.${domain}`))) throw new Error("不支持此视频页面");
   const transcribe = Boolean(message?.transcribe);
-  const existing = [...submissionQueue.values()].find(entry => entry.url === url && entry.transcribe === transcribe && !isTerminalTask(entry.lastJob?.status || entry.status));
-  if (existing) { await flushSubmissionQueue(); return queuedTaskView(existing); }
+  // 先生 2026-11-15：同 URL 的未终态队列身份只保留一条——不再比较转写
+  // 意图（先「下载」后「转写」原来会新建第二条）。未发出的凭据直接并入
+  // 转写旗标；已发出的不动原身份（换旗标重放同凭据会被服务端回执校验拒
+  // 绝），此时放行走新凭据，靠服务端「活跃任务就地补转写旗标」合并。
+  const existing = [...submissionQueue.values()].find(entry => entry.url === url && !isTerminalTask(entry.lastJob?.status || entry.status));
+  if (existing) {
+    const notDispatched = !existing.submitting && !existing.taskId && !existing.submissionAttempted;
+    if (existing.transcribe === transcribe || notDispatched) {
+      if (transcribe && !existing.transcribe && notDispatched) {
+        existing.transcribe = true;
+        await saveSubmissionQueue();
+      }
+      await flushSubmissionQueue();
+      return queuedTaskView(existing);
+    }
+  }
   if ([...submissionQueue.values()].filter(entry => !isTerminalTask(entry.lastJob?.status || entry.status)).length >= 100) throw new Error("后台任务已满，请先完成或取消部分任务");
   const clientId = globalThis.crypto?.randomUUID?.() || `sj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,14)}`;
   const entry = { clientId, url, videoId: videoIdFromPageUrl(url), title:String(message?.title || "").trim().slice(0,240),
@@ -1707,6 +1721,18 @@ async function cancelQueuedTask(taskId) {
   await flushSubmissionQueue();
   return queuedTaskView(entry);
 }
+// 近窗失败摘要（先生 2026-11-15）：确认卡文案由后台统一给，页面脚本不再
+// 各自维护错误码→中文映射。
+function recentFailureSummary(code) {
+  if (code === "douyin_verification_required") return "被抖音校验拦截";
+  if (code === "browser_download_interrupted") return "浏览器下载被平台中断";
+  if (code === "authorization_required") return "平台未接受当前登录态";
+  if (code === "source_rate_limited") return "被平台限流";
+  if (code === "media_forbidden") return "媒体地址被平台拒绝";
+  if (code === "network_error") return "网络错误";
+  return "下载失败";
+}
+
 async function checkExistingDownloads(url) {
   // 提交前预检（先生 2026-10-08）：同视频已有任务时页面先确认再提交。
   // 以桌面任务库为准——扩展自己的队列看不到其他入口（桌面粘贴/弹窗/
@@ -1723,7 +1749,20 @@ async function checkExistingDownloads(url) {
     // 服务端就地补置转写旗标）。
     const activeTranscribing = activeJobs.some((job) => Boolean(job?.options?.transcribe_after_download));
     const done = jobs.some((job) => String(job?.status || "") === "done");
-    return { ok: true, active, done, activeTranscribing };
+    // 先生 2026-11-15：近窗失败确认。实机库里同一抖音 URL 反复点「转写」
+    // 最多积累 7 行失败记录（douyin_verification_required 连拦）——平台拦截
+    // 类失败在短时间内重提只会加剧风控。10 分钟内的最近失败带回页面确认。
+    let recentFailure = null;
+    for (const job of jobs) {
+      if (String(job?.status || "") !== "failed") continue;
+      const at = Date.parse(String(job?.updated_at || job?.requested_at || "")) || 0;
+      if (!recentFailure || at > recentFailure.at) {
+        const code = String(job?.error?.code || "");
+        recentFailure = { at, code, summary: recentFailureSummary(code) };
+      }
+    }
+    if (recentFailure && Date.now() - recentFailure.at > 10 * 60 * 1000) recentFailure = null;
+    return { ok: true, active, done, activeTranscribing, recentFailure };
   } catch {
     return { ok: true, active: false, done: false };
   }
