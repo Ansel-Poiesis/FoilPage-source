@@ -1635,3 +1635,79 @@ def test_media_candidates_reject_link_to_media_outside_staging(tmp_path):
     except OSError:
         pytest.skip("当前 Windows 策略不允许创建文件链接")
     assert YtDlpAdapter._media_candidates(staging, {"filepath": str(linked)}) == []
+
+def test_both_channels_blocked_terminal_error_carries_platform_guidance() -> None:
+    """双通道被平台拒绝的终态错误要带可操作指引（先生 2026-11-15）。
+
+    实机失败主体是「本地解析被抖音校验拦截 → 转浏览器通道 → CDN 403」；
+    终态只留最后一条 Chrome 错误码会让用户误以为再点一次就能成功，反而
+    积累重复失败记录。
+    """
+    with tempfile.TemporaryDirectory(prefix="both_channels_guidance_") as temp:
+        controller = AppController(SettingsStore(base_dir=Path(temp) / "data"))
+        adapter = FakeAdapter()
+        adapter.resolve_error = DownloadAdapterError(
+            "douyin_verification_required", "抖音详情解析被平台的网页校验拦截", retryable=False,
+        )
+        coordinator = DownloadCoordinator(controller, adapter=adapter)
+        coordinator.start()
+        try:
+            created = coordinator.submit(
+                "https://www.douyin.com/video/1234567890",
+                title="双通道被拒",
+                options={"browser_fallback": True, "transcribe_after_download": True},
+            )
+            job_id = created["id"]
+            job = coordinator.get(job_id)
+            deadline = time.monotonic() + 5.0
+            while job["status"] != "awaiting_browser" and time.monotonic() < deadline:
+                time.sleep(0.05)
+                job = coordinator.get(job_id)
+            assert job["status"] == "awaiting_browser", job["status"]
+            # 无会话提示的抖音本地轨在 _run_one 直接抛 authorization_required；
+            # 实机走 yt-dlp 解析时是 douyin_verification_required——两者同属
+            # 本地通道平台拦截码，终态指引判定应覆盖两种形态。
+            history = (job.get("options") or {}).get("failure_history") or []
+            assert any(item.get("code") in {"douyin_verification_required", "authorization_required"}
+                       for item in history)
+
+            # 复现 _resolve_browser_job 在浏览器轮次后的就地参数推进（mode/fallback_stage），
+            # 使下一次浏览器失败落在 resolver 阶段（can_fallback=False 的终态路径）。
+            coordinator.store.transition(
+                job_id, "awaiting_browser",
+                options={**(job.get("options") or {}), "mode": "browser", "fallback_stage": "resolver"},
+            )
+
+            failed = coordinator.record_browser_download_failure(
+                job_id, browser_error="SERVER_FORBIDDEN", bytes_received=0, total_bytes=1000,
+            )
+            assert failed["status"] == "failed"
+            assert "本地解析与浏览器通道都被平台拒绝" in failed["error"]["message"]
+            assert "断开 VPN" in failed["error"]["message"]
+            codes = {item.get("code") for item in failed["error"]["diagnostic"]["failure_history"]}
+            assert codes & {"douyin_verification_required", "authorization_required"}
+            assert "browser_download_interrupted" in codes
+        finally:
+            coordinator.stop()
+            controller.close()
+
+
+def test_both_channels_blocked_requires_evidence_from_both_channels() -> None:
+    """只有单通道证据时不得附加双通道指引（保持既有错误形状）。"""
+    from app.download_coordinator import _both_channels_blocked
+
+    local_only = {"options": {"failure_history": [
+        {"code": "douyin_verification_required", "channel": "local_download"},
+    ]}}
+    assert _both_channels_blocked(local_only, {"code": "browser_download_interrupted", "diagnostic": {}}) is False
+
+    both = {"options": {"failure_history": [
+        {"code": "douyin_verification_required", "channel": "local_download"},
+        {"code": "browser_download_interrupted", "channel": "chrome.downloads", "browser_error": "SERVER_FORBIDDEN"},
+    ]}}
+    assert _both_channels_blocked(both, {"code": "browser_download_interrupted", "diagnostic": {}}) is True
+
+    browser_only_error = {"code": "browser_download_interrupted", "diagnostic": {
+        "channel": "chrome.downloads", "browser_error": "SERVER_FORBIDDEN",
+    }}
+    assert _both_channels_blocked({"options": {}}, browser_only_error) is False

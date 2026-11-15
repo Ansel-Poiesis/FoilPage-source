@@ -73,6 +73,41 @@ DEFAULT_DOWNLOAD_OPTIONS: DownloadOptions = {
     "language": "zh",
 }
 
+# 先生 2026-11-15：两通道终态指引。实机失败主体是「本地解析被平台校验
+# 拦截 → 转浏览器通道 → CDN 403」的链路（实机库 66+62 例）。终态错误要
+# 把两条通道都被平台拒绝讲清楚并给出可操作指引，而不是只留最后一条
+# Chrome 错误码让用户误以为换个按钮就能成功。
+_LOCAL_PLATFORM_BLOCK_CODES = frozenset({
+    "douyin_verification_required", "media_forbidden", "authorization_required", "source_rate_limited",
+})
+_BOTH_CHANNELS_GUIDANCE = (
+    "本地解析与浏览器通道都被平台拒绝。可依次尝试：在 Chrome 打开该视频页确认仍处于"
+    "登录状态，让视频正常播放片刻后重试；若页面要求验证或登录，先完成再重试；断开 VPN"
+    "或代理（国内平台会拒绝境外出口）后重试。短时间内反复重试可能加剧平台拦截。"
+)
+
+
+def _both_channels_blocked(current: dict, error: dict) -> bool:
+    """有界失败历史同时含本地通道平台拦截与浏览器通道 403 时为真。"""
+    history = list((current.get("options") or {}).get("failure_history") or [])
+    diagnostic = error.get("diagnostic") or {}
+    history.append({
+        "code": error.get("code"),
+        "channel": diagnostic.get("channel"),
+        "browser_error": diagnostic.get("browser_error"),
+    })
+    local_blocked = any(
+        isinstance(item, dict)
+        and str(item.get("code") or "") in _LOCAL_PLATFORM_BLOCK_CODES
+        and str(item.get("channel") or "local_download") != "chrome.downloads"
+        for item in history
+    )
+    browser_forbidden = any(
+        isinstance(item, dict) and str(item.get("browser_error") or "") == "SERVER_FORBIDDEN"
+        for item in history
+    )
+    return local_blocked and browser_forbidden
+
 
 def matching_submission_receipt(receipt: DownloadJob, url: str, transcribe: bool, *, allow_any_url: bool = False) -> DownloadJob:
     """A receipt can replay its accepted request, never change its identity."""
@@ -604,6 +639,8 @@ class DownloadCoordinator:
         }
         if can_fallback:
             error["diagnostic"]["fallback_pending"] = "browser" if len(current["options"].get("browser_attempted") or []) < 8 else "resolver"
+        if target_status == "failed" and _both_channels_blocked(current, error):
+            error["message"] = f"{error['message']} {_BOTH_CHANNELS_GUIDANCE}"
         return self.store.transition(
             download_id, target_status, error=error, cancel_requested=False,
             bytes_done=received or 0, bytes_total=total,
@@ -1441,6 +1478,8 @@ class DownloadCoordinator:
                 self.store.transition(download_id, "awaiting_browser", error=error, options=options)
                 self._discard_transient_session(download_id)
                 return
+            if _both_channels_blocked(current, error):
+                error["message"] = f"{error['message']} {_BOTH_CHANNELS_GUIDANCE}"
             self.store.transition(download_id, "failed", error=error, options=failure_options)
 
     @staticmethod

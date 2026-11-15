@@ -649,3 +649,55 @@ test('gallery rebuild after service-worker restart carries the set via fresh-med
   assert.equal(posted.length,1);
   assert.deepEqual(posted[0].body.gallery_images,GALLERY_ROWS,'fresh 响应的 gallery 也要能提交');
 });
+
+// 先生 2026-11-15：同 URL 换意图不再新建队列身份；近窗失败进预检结果。
+// 实机库同一抖音 URL 反复点「转写」积累过 7 行失败记录（douyin_verification_
+// required 连拦），本组用例锁住两个防重复提交的新合同。
+test('same-url transcribe upgrade merges into the pending queue identity before dispatch',async()=>{
+  const f=await harness({online:false});
+  const url='https://www.youtube.com/watch?v=fixture123';
+  const first=await f.submitPageDownload({url,title:'来源标题'});
+  const second=await f.submitPageDownload({url,title:'来源标题',transcribe:true});
+  assert.equal(first.id,second.id,'未派发的同 URL 提交复用同一凭据');
+  assert.equal(f.saved.shengjianSubmissionQueue.length,1);
+  assert.equal(f.saved.shengjianSubmissionQueue[0].transcribe,true);
+  f.setOnline(true);await f.flushSubmissionQueue();await f.settle();
+  const submitted=f.calls.find(c=>c.path==='/v1/downloads');
+  assert.equal(submitted.body.options.transcribe_after_download,true,'合并后的凭据带上转写旗标');
+});
+
+test('transcribe upgrade after dispatch posts a fresh credential instead of mutating the receipt',async()=>{
+  const f=await harness();
+  const url='https://www.youtube.com/watch?v=fixture123';
+  await f.submitPageDownload({url,title:'来源标题'});await f.settle();
+  assert.ok(f.saved.shengjianSubmissionQueue[0].taskId,'首个凭据已派发');
+  await f.submitPageDownload({url,title:'来源标题',transcribe:true});await f.settle();
+  const submits=f.calls.filter(c=>c.path==='/v1/downloads');
+  assert.equal(submits.length,2,'换意图走新凭据让服务端按 URL 活跃任务合并旗标');
+  assert.notEqual(submits[0].body.client_request_id,submits[1].body.client_request_id);
+  assert.equal(submits[0].body.options.transcribe_after_download,false);
+  assert.equal(submits[1].body.options.transcribe_after_download,true);
+});
+
+test('check-existing flags a recent platform-blocked failure for page confirmation',async()=>{
+  const f=await harness({initialJobs:[
+    {id:'aaa000000001',url:URL_A,title:'原视频',status:'failed',progress:1,options:{},
+     error:{code:'douyin_verification_required',message:'拦截'},updated_at:'1970-01-01T00:10:00Z'},
+  ]});
+  const check=await f.message({type:'shengjian-check-existing',url:URL_A});
+  assert.equal(check.ok,true);
+  assert.equal(check.active,false);
+  assert.equal(check.done,false);
+  assert.equal(check.recentFailure.code,'douyin_verification_required');
+  assert.match(check.recentFailure.summary,/抖音校验/);
+});
+
+test('check-existing drops failures older than ten minutes',async()=>{
+  const f=await harness({initialJobs:[
+    {id:'aaa000000001',url:URL_A,title:'原视频',status:'failed',progress:1,options:{},
+     error:{code:'network_error',message:'网络'},updated_at:'1970-01-01T00:00:00Z'},
+  ]});
+  const check=await f.message({type:'shengjian-check-existing',url:URL_A});
+  assert.equal(check.ok,true);
+  assert.equal(check.recentFailure,null,'过期失败不再拦截或确认');
+});

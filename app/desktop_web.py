@@ -11,6 +11,8 @@ import json
 import logging
 import logging.handlers
 import os
+import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -416,6 +418,11 @@ class WebDesktopApp:
             log.exception("套餐到期提醒失败")
 
     def _notification_loop(self) -> None:
+        # 先生 2026-11-15：2026-11-14 08:20 实机 sqlite3.OperationalError
+        # （"database or disk is full"，磁盘实际剩余 399GiB）连续 4 分钟每秒
+        # 刷屏 234 次堆栈。库级瞬时故障改为指数退避（1s→30s，恢复即复位）；
+        # 首次错误附带一行磁盘剩余/库体积诊断，用于区分真满与瞬时锁/配额。
+        db_error_delay = 1.0
         while not self._notification_stop.wait(1.0):
             try:
                 # Serialize database reads with shutdown; the last poll must
@@ -434,8 +441,32 @@ class WebDesktopApp:
                     self._plan_expiry_notice_once()
                 self._notification_events.extend(events)
                 self._notification_events[:] = self._notification_events[-10:]
+                db_error_delay = 1.0
+            except sqlite3.OperationalError as error:
+                if db_error_delay <= 1.0:
+                    log.error(
+                        "任务通知数据库读取失败，开始退避: %s; %s",
+                        error,
+                        self._database_health_snapshot(),
+                    )
+                self._notification_stop.wait(db_error_delay)
+                db_error_delay = min(db_error_delay * 2, 30.0)
             except Exception:
                 log.exception("任务通知检查失败")
+
+    def _database_health_snapshot(self) -> str:
+        """退避首错时的一次性库健康摘要；自身异常不影响退避主流程。"""
+        try:
+            db_path = Path(str(self.controller.settings.get("database_path") or ""))
+            free = shutil.disk_usage(db_path.parent).free if str(db_path) else None
+            size = db_path.stat().st_size if str(db_path) and db_path.exists() else None
+            return (
+                f"disk_free={free / 1024 ** 3:.1f}GiB" if free is not None else "disk_free=unknown"
+            ) + (
+                f", db_size={size / 1024 ** 2:.1f}MiB" if size is not None else ", db_size=unknown"
+            )
+        except Exception:
+            return "disk_free=unknown, db_size=unknown"
 
     def _on_closing(self) -> bool | None:
         """驻留托盘时，关闭窗口仅隐藏；否则允许关闭并清理。"""

@@ -6,7 +6,7 @@
   if (window.top !== window) return;
 
   const CONTROL_CLASS = "shengjian-player-control";
-  const EXTENSION_VERSION = "0.1.1";
+  const EXTENSION_VERSION = "0.1.2";
   const CAPTURE_RETRY_GUIDE = "若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。";
   const captureRetryGuides = new Map();
   let syncQueued = false;
@@ -1165,6 +1165,18 @@
           );
           return;
         }
+        // 先生 2026-11-15：近窗失败确认——10 分钟内失败过的视频重提「下载」
+        // 要先确认（实机曾对同一视频反复提交积累 7 行失败记录）。
+        if (check.recentFailure) {
+          restore();
+          showConfirmWindow(
+            `该视频刚失败过（${check.recentFailure.summary}）`,
+            "短时间内反复提交可能加剧平台拦截。请先按任务页指引处理：刷新本页并让视频播放片刻、确认登录态、必要时断开 VPN，再决定是否重试。",
+            "仍要重新提交",
+            beginSubmission,
+          );
+          return;
+        }
         beginSubmission();
       });
       return;
@@ -1177,6 +1189,18 @@
         return;
       }
       if (check.active) mergedSubmitNotice = true;
+      // 先生 2026-11-15：「转写」同样受近窗失败确认约束——反复点「转写」
+      // 是实机重复提交的主要形态（7 行失败记录全部带转写旗标）。
+      if (check.recentFailure) {
+        restore();
+        showConfirmWindow(
+          `该视频刚失败过（${check.recentFailure.summary}）`,
+          "短时间内反复提交可能加剧平台拦截。请先按任务页指引处理（刷新本页并让视频播放片刻、确认登录态）后再重试转写。",
+          "仍要重新提交",
+          beginSubmission,
+        );
+        return;
+      }
       beginSubmission();
     });
   }

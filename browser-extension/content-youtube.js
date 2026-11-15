@@ -225,25 +225,57 @@
     button.disabled = true;
     button.classList.add("is-busy");
     showPillText("正在提交…");
-    sendRuntimeMessage({
-      type: "shengjian-page-submit",
-      url: canonicalUrl(videoId),
-      title: pageTitle(),
-      transcribe: action === "transcribe",
-    }, (response) => {
+    const restore = () => {
       button.disabled = false;
       button.classList.remove("is-busy");
-      if (videoIdFromLocation() !== videoId) return;
-      if (chrome.runtime.lastError) {
-        showPillText("扩展已更新，请刷新页面后重试", { error: true });
+    };
+    const beginSubmission = () => {
+      showPillText("正在提交…");
+      sendRuntimeMessage({
+        type: "shengjian-page-submit",
+        url: canonicalUrl(videoId),
+        title: pageTitle(),
+        transcribe: action === "transcribe",
+      }, (response) => {
+        restore();
+        if (videoIdFromLocation() !== videoId) return;
+        if (chrome.runtime.lastError) {
+          showPillText("扩展已更新，请刷新页面后重试", { error: true });
+          return;
+        }
+        if (!response?.ok) {
+          if (response?.feedback_sent) return;
+          showPillText(response?.message || "FoilPage 下载任务未能创建", { error: true });
+          return;
+        }
+        // Background sends accepted or offline-queued feedback exactly once.
+      });
+    };
+    // 先生 2026-11-15：YouTube 入口补齐与抖音页相同的提交预检——进行中
+    // 阻止、已完成确认、近窗失败确认。页面脚本没有确认卡组件，用原生 confirm。
+    sendRuntimeMessage({ type: "shengjian-check-existing", url: canonicalUrl(videoId) }, (check) => {
+      if (videoIdFromLocation() !== videoId) { restore(); return; }
+      if (chrome.runtime.lastError || !check?.ok) { beginSubmission(); return; }
+      if (check.active) {
+        restore();
+        showPillText(check.activeTranscribing && action === "transcribe"
+          ? "该视频已在处理中，转写会自动接续（进度见 FoilPage 任务页）"
+          : "该视频正在处理中，无需重复提交（进度见 FoilPage 任务页）");
         return;
       }
-      if (!response?.ok) {
-        if (response?.feedback_sent) return;
-        showPillText(response?.message || "FoilPage 下载任务未能创建", { error: true });
+      const reasons = [];
+      if (check.done && action === "download") {
+        reasons.push("该视频已下载完成；重新下载将新增一份文件（需要文稿请点「转写」）");
+      }
+      if (check.recentFailure) {
+        reasons.push(`该视频刚失败过（${check.recentFailure.summary}），短时间内反复提交可能加剧平台拦截`);
+      }
+      if (reasons.length && !window.confirm(`${reasons.join("；")}。仍要提交吗？`)) {
+        restore();
+        showPillText("已取消提交");
         return;
       }
-      // Background sends accepted or offline-queued feedback exactly once.
+      beginSubmission();
     });
   }
 
