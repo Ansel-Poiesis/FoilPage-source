@@ -24,10 +24,10 @@
 ```powershell
 git clone https://github.com/Ansel-Poiesis/FoilPage-source.git
 cd FoilPage-source
-git checkout v0.1.1
+git checkout v0.1.3
 ```
 
-v0.1.1 提供带依赖安全修补的源码归档。安装器与 GPU 包随各自经过验证的二进制版本发布。
+v0.1.3 起本仓库同时发布源码归档与对应的 Windows 安装器、GPU 包（同一标签，版本一致）。0.1.2 及之前为纯源码归档；历史 1.x 安装版见 [FoilPage-releases](https://github.com/Ansel-Poiesis/FoilPage-releases)（已停发，仅存档）。
 
 ## 从源码运行
 
