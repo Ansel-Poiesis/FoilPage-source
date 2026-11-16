@@ -453,13 +453,15 @@ def test_requeue_interrupted_only_touches_running_rows() -> None:
     store, db_path = _new_store()
     output = tempfile.mkdtemp(prefix="requeue_only_running_")
     try:
-        queued_id = _enqueue(store, "C:/media/a.wav", output)
+        first_id = _enqueue(store, "C:/media/a.wav", output)
+        second_id = _enqueue(store, "C:/media/b.wav", output)
+        # 同秒入队时 claim 顺序按 id 摇号——断言不得依赖具体是谁先被领。
+        claimed = store.claim_next("requeue-worker")
+        assert claimed is not None
+        running_id, queued_id = claimed["id"], second_id if claimed["id"] == first_id else first_id
         assert store.requeue_interrupted(queued_id) is False  # 非 running：无操作
         assert store.get_job(queued_id)["status"] == "queued"
 
-        running_id = _enqueue(store, "C:/media/b.wav", output)
-        claimed = store.claim_next("requeue-worker")
-        assert claimed is not None and claimed["id"] == running_id
         assert store.requeue_interrupted(running_id) is True
         job = store.get_job(running_id)
         assert job["status"] == "queued"
