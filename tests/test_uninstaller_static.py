@@ -47,6 +47,9 @@ def test_data_roots_only_deleted_after_explicit_confirmation() -> None:
     source = _iss()
     assert "DeleteUserData" in source
     assert "不可恢复" in source, "删除用户数据前必须明确警告"
+    # 静默卸载（/VERYSILENT）下 MsgBox 仍会弹窗并无限等待——实装验收实测
+    # 卡死；必须 UninstallSilent() 分流，静默默认保留数据。
+    assert "UninstallSilent()" in source and "DeleteUserData := False" in source
     # DelTree 数据根必须由确认变量守卫；目录链接摘除用 rmdir 而非 DelTree。
     assert "if DeleteUserData then begin" in source
     assert "RemoveDirectoryLink" in source and "rmdir" in source, (
