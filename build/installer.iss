@@ -107,11 +107,16 @@ begin
     KillFoilPageProcesses();
     // 运行时写入的开机自启值（app/startup.py）安装器不跟踪，卸载必须显式删。
     RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'ShengJian');
-    DeleteUserData := (MsgBox(
-      '是否同时删除文稿与设置数据？' + #13#10 + #13#10 +
-      '选择「是」将删除 %LOCALAPPDATA%\FoilPage 与旧版 %LOCALAPPDATA%\VideoToArticle 数据目录（含文稿、任务、下载与设置，不可恢复）。' + #13#10 +
-      '选择「否」保留全部数据，便于以后重装续用。语音模型缓存（%USERPROFILE%\.cache\huggingface，数 GB）两种选择下都不会删除，可手动清理。',
-      mbConfirmation, MB_YESNO) = IDYES);
+    // 先生 2026-11-16：静默卸载（/VERYSILENT）下 MsgBox 仍会弹窗并无限等待
+    // ——实装验收实测卡死。静默模式默认保留数据（等效选「否」）。
+    if UninstallSilent() then
+      DeleteUserData := False
+    else
+      DeleteUserData := (MsgBox(
+        '是否同时删除文稿与设置数据？' + #13#10 + #13#10 +
+        '选择「是」将删除 %LOCALAPPDATA%\FoilPage 与旧版 %LOCALAPPDATA%\VideoToArticle 数据目录（含文稿、任务、下载与设置，不可恢复）。' + #13#10 +
+        '选择「否」保留全部数据，便于以后重装续用。语音模型缓存（%USERPROFILE%\.cache\huggingface，数 GB）两种选择下都不会删除，可手动清理。',
+        mbConfirmation, MB_YESNO) = IDYES);
   end;
   if CurUninstallStep = usPostUninstall then begin
     LegacyRoot := ExpandConstant('{localappdata}') + '\VideoToArticle';
