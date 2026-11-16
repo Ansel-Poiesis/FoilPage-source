@@ -9,7 +9,6 @@ PROVIDER_PRESETS）必须与之逐项一致——本文件用与版本标记检�
 """
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
