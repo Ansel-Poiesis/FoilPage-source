@@ -934,6 +934,34 @@ class QueueStore:
                 recovered.append(row["id"])
         return recovered
 
+    def requeue_interrupted(self, job_id: str) -> bool:
+        """先生 2026-11-16：退出中断的 running 任务直接置回 queued。
+
+        与 recover_stale_jobs 的崩溃回收同语义（不吃尝试次数、清租约字
+        段、进度归零），但由 Worker 在协作取消点主动调用——用户取消仍走
+        cancelled 终态，二者以 cancel_requested 区分。行不存在或已非
+        running 时静默跳过并返回 False。
+        """
+        with self._write_transaction():
+            cursor = self._conn.execute(
+                """
+                UPDATE jobs
+                   SET status='queued', progress=0,
+                       error=:error, updated_at=:now,
+                       worker_id=NULL, claimed_at=NULL, heartbeat_at=NULL
+                 WHERE id=:id AND status='running' AND cancel_requested=0
+                """,
+                {
+                    "error": _error_json({
+                        "code": "worker_shutdown_requeued",
+                        "message": "应用退出中断，任务已重新排队",
+                    }),
+                    "now": _now(),
+                    "id": job_id,
+                },
+            )
+            return cursor.rowcount > 0
+
     def close(self) -> None:
         with self._lock:
             try:

@@ -76,6 +76,47 @@ if ($Uninstall) {
     )
     $record.uninstall_exit_code = $remove.ExitCode
     if ($remove.ExitCode -ne 0) { throw "卸载失败，退出码 $($remove.ExitCode)" }
+
+    # 先生 2026-11-16：卸载残留断言。VERYSILENT 下 MsgBox 数据确认被压
+    # 制（等效"保留数据"），因此断言"数据根仍在 + 其余全清"。
+    $residue = [ordered]@{}
+    foreach ($name in 'FoilPage-Desktop', 'FoilPage-Worker', 'FoilPage-Agent', 'ShengJian-Agent') {
+        $residue["process_$name"] = [bool](Get-Process -Name $name -ErrorAction SilentlyContinue)
+    }
+    $roots = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\FoilPage'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\VideoToArticle')
+    )
+    $rootsExist = @($roots | Where-Object { Test-Path -LiteralPath $_ })
+    $residue.install_roots_remaining = $rootsExist
+    $runValue = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ShengJian' -ErrorAction SilentlyContinue
+    $residue.autostart_value_remaining = [bool]$runValue
+    $classesKeys = @(
+        'HKCU:\Software\Classes\AppUserModelId\Ansel.ShengJian.Desktop',
+        'HKCU:\Software\Classes\shengjian'
+    )
+    $classesExisting = @($classesKeys | Where-Object { Test-Path -LiteralPath $_ })
+    $residue.protocol_keys_remaining = $classesExisting
+    $legacyShim = Join-Path $env:LOCALAPPDATA 'VideoToArticle'
+    if ((Test-Path -LiteralPath $legacyShim) -and ((Get-Item -LiteralPath $legacyShim -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        $residue.legacy_junction_remaining = $true
+    } else {
+        $residue.legacy_junction_remaining = $false
+    }
+    $dataRoot = Join-Path $env:LOCALAPPDATA 'FoilPage'
+    $residue.data_root_kept = (Test-Path -LiteralPath $dataRoot)
+    $record.uninstall_residue = $residue
+    $residue | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'uninstall-residue.json') -Encoding UTF8
+    $violations = @()
+    foreach ($key in @('process_FoilPage-Desktop', 'process_FoilPage-Worker', 'process_FoilPage-Agent', 'process_ShengJian-Agent')) {
+        if ($residue[$key]) { $violations += "进程残留: $key" }
+    }
+    if ($rootsExist.Count -gt 0) { $violations += "安装目录残留: $($rootsExist -join '; ')" }
+    if ($runValue) { $violations += '开机自启值残留: Run\ShengJian' }
+    if ($classesExisting.Count -gt 0) { $violations += "注册表协议键残留: $($classesExisting -join '; ')" }
+    if ($residue.legacy_junction_remaining) { $violations += '旧版 junction 垫片残留: %LOCALAPPDATA%\VideoToArticle' }
+    if (-not $residue.data_root_kept) { $violations += '保留模式下数据根被误删: %LOCALAPPDATA%\FoilPage' }
+    if ($violations.Count -gt 0) { throw "卸载残留断言失败：$($violations -join ' | ')" }
 }
 
 $record.completed_at = (Get-Date).ToString('o')

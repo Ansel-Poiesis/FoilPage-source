@@ -403,11 +403,78 @@ def test_worker_survives_force_deleted_job_before_manifest() -> None:
         _cleanup(store, db_path)
 
 
+
+
+def test_worker_stop_signal_requeues_running_job_without_burning_attempts() -> None:
+    """先生 2026-11-16：退出信号触发的协作取消必须回队而非终态取消。
+
+    硬杀丢租约要等 lease_timeout 回收；协作排干让任务在段边界退出并直接
+    置回 queued（不吃尝试次数），下次启动续跑。用户取消仍走 cancelled
+    终态（test_worker_cooperative_cancel 覆盖）。
+    """
+    store, db_path = _new_store()
+    output = tempfile.mkdtemp(prefix="worker_stop_requeue_")
+    source = "C:/media/stop.wav"
+    started = threading.Event()
+    try:
+        job_id = _enqueue(store, source, output)
+
+        def fake_run(*_args, cancel_check, **_kwargs):
+            started.set()
+            deadline = time.time() + 5
+            while not cancel_check() and time.time() < deadline:
+                time.sleep(0.01)
+            if cancel_check():
+                raise EngineError("cancelled", "作业已取消")
+            return _manifest(job_id, source, output)
+
+        with mock.patch.object(run_engine, "run", side_effect=fake_run):
+            instance = worker.Worker(
+                store, worker_id="stop-requeue-worker", heartbeat_interval=0.05,
+                agent_settings=grant_account({}, Path(db_path).parent),
+            )
+            thread = threading.Thread(target=instance.step)
+            thread.start()
+            assert started.wait(2)
+            attempts_before = store.get_job(job_id)["attempts"]
+            instance._stop = True  # 模拟退出信号：不是用户取消。
+            thread.join(5)
+            assert not thread.is_alive()
+        job = store.get_job(job_id)
+        assert job is not None
+        assert job["status"] == "queued", job
+        assert job["attempts"] == attempts_before, job
+        assert not job["worker_id"], job
+    finally:
+        _cleanup(store, db_path)
+
+
+def test_requeue_interrupted_only_touches_running_rows() -> None:
+    store, db_path = _new_store()
+    output = tempfile.mkdtemp(prefix="requeue_only_running_")
+    try:
+        queued_id = _enqueue(store, "C:/media/a.wav", output)
+        assert store.requeue_interrupted(queued_id) is False  # 非 running：无操作
+        assert store.get_job(queued_id)["status"] == "queued"
+
+        running_id = _enqueue(store, "C:/media/b.wav", output)
+        claimed = store.claim_next("requeue-worker")
+        assert claimed is not None and claimed["id"] == running_id
+        assert store.requeue_interrupted(running_id) is True
+        job = store.get_job(running_id)
+        assert job["status"] == "queued"
+        assert (job.get("error") or {}).get("code") == "worker_shutdown_requeued"
+    finally:
+        _cleanup(store, db_path)
+
+
 if __name__ == "__main__":
     test_worker_uses_job_parameters_unless_overridden()
     test_worker_cooperative_cancel()
     test_worker_survives_force_deleted_job_during_run()
     test_worker_survives_force_deleted_job_before_manifest()
+    test_worker_stop_signal_requeues_running_job_without_burning_attempts()
+    test_requeue_interrupted_only_touches_running_rows()
     test_cancel_race_before_manifest_is_not_marked_done()
     test_retryable_error_respects_max_attempts()
     test_model_cache_and_same_name_output_isolation()

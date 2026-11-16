@@ -150,6 +150,13 @@ class Worker:
             stage_state.update(queue_store._stage_metadata(changes, strict=True))
             self.store.set_stage_metadata(job["id"], stage_state, worker_id=self.worker_id)
 
+        # 先生 2026-11-16：退出排干。停止信号与用户取消同样触发引擎的协作
+        # 取消检查点（ASR 在段边界快速退出），但结果分流：用户取消=终态
+        # cancelled；退出中断=置回 queued（不吃尝试次数，见
+        # QueueStore.requeue_interrupted），下次启动继续处理。
+        def interrupt_check() -> bool:
+            return self._stop or self.store.is_cancel_requested(job["id"])
+
         def persist_progress(value: float) -> None:
             nonlocal last_progress
             value = min(1.0, max(last_progress, float(value)))
@@ -188,7 +195,7 @@ class Worker:
                 self.model_dir or "",
                 job["id"],  # 队列拥有 job_id，回写时与 jobs 行对齐
                 source_title=job.get("source_title", ""),
-                cancel_check=lambda: self.store.is_cancel_requested(job["id"]),
+                cancel_check=interrupt_check,
                 progress=engine_progress,
                 initial_prompt=str(agent_settings.get("asr_initial_prompt") or ""),
                 hotwords=str(agent_settings.get("asr_hotwords") or ""),
@@ -207,7 +214,7 @@ class Worker:
                     manifest = apply_agent_translation(
                         manifest, agent_settings,
                         source_title=job.get("source_title", ""),
-                        cancel_check=lambda: self.store.is_cancel_requested(job["id"]),
+                        cancel_check=interrupt_check,
                     )
                     persist_stages({**queue_store._stage_metadata(manifest), "body_status": "done"})
                     persist_progress(0.98)
@@ -228,7 +235,7 @@ class Worker:
                 from app.agent_service import apply_title_optimization
                 persist_stages({"title_status": "running"})
                 manifest = apply_title_optimization(manifest, agent_settings,
-                    cancel_check=lambda: self.store.is_cancel_requested(job["id"]))
+                    cancel_check=interrupt_check)
                 persist_stages(manifest)
             manifest.update(stage_state)
             if (manifest.get("title_status") == "done" and agent_settings.get("update_title_after_transcribe", True)
@@ -265,6 +272,16 @@ class Worker:
             )
             print(f"[worker] 已取消 {job['id']}", flush=True)
         except EngineError as e:
+            # 先生 2026-11-16：停止信号触发的协作取消不是用户取消——任务
+            # 置回 queued（不吃尝试次数），本次退出即排干、下次启动续跑。
+            if (
+                e.code == "cancelled"
+                and self._stop
+                and not self.store.is_cancel_requested(job["id"])
+                and self.store.requeue_interrupted(job["id"])
+            ):
+                print(f"[worker] 退出中断，任务返回队列 {job['id']}", flush=True)
+                return
             status = "cancelled" if e.code == "cancelled" else classify_error(e.code)
             if status == "retryable" and job.get("attempts", 0) >= job.get("max_attempts", 3):
                 status = "failed"

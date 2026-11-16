@@ -180,6 +180,10 @@ class SettingsStore:
             "heartbeat_seconds": 5.0,
             "lease_timeout_seconds": 300.0,
             "max_attempts": 3,
+            # 先生 2026-11-16：退出时给 Worker 的优雅窗口（秒）。转写任务
+            # 在段边界协作取消后通常能在窗口内排干；超时才硬杀（丢租约靠
+            # lease_timeout 回收）。默认 8，settings.json 可调，无 UI。
+            "worker_stop_timeout": 8,
             "worker_auto_start": True,
             "worker_auto_restart": True,
             "launch_at_startup": False,
@@ -395,6 +399,9 @@ class SettingsStore:
         attempts = settings.get("max_attempts")
         if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 1:
             raise SettingsValidationError("max_attempts 必须是 >= 1 的整数")
+        stop_timeout = settings.get("worker_stop_timeout")
+        if not isinstance(stop_timeout, int) or isinstance(stop_timeout, bool) or not 1 <= stop_timeout <= 60:
+            raise SettingsValidationError("worker_stop_timeout 必须是 1–60 的整数秒")
         # 悬挂任务判失败时限（先生 2026-10-25：默认两小时交给用户设置；
         # 页面采集窗口约两小时，超龄地址必然失效，早判早重试）。
         pending_timeout = settings.get("download_pending_timeout_minutes")
