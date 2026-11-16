@@ -701,3 +701,28 @@ test('check-existing drops failures older than ten minutes',async()=>{
   assert.equal(check.ok,true);
   assert.equal(check.recentFailure,null,'过期失败不再拦截或确认');
 });
+
+
+// 先生 2026-11-16：离线拉起失败感知——协议窗弹错扩展无法感知，20s 未上线
+// 必须给发起页手动指引。
+test('launch attempt notifies manual guidance when desktop never comes online',async()=>{
+  const f=await harness({online:false});
+  await f.message({type:'shengjian-launch-attempt',videoId:'1234567890123456789'});
+  // 触发 20s 监听定时器（夹具收集 setTimeout 不自动跑）。
+  const watcher=f.timers.at(-1);
+  assert.ok(watcher&&watcher.delay===20000,`expect a 20s watcher timer, got ${watcher&&watcher.delay}`);
+  watcher.fn();
+  await f.settle();
+  const failure=f.sent.filter(m=>m.stage==='failure').at(-1);
+  assert.ok(failure,'failure guidance should reach the page');
+  assert.match(String(failure.message||failure.text||''),/手动打开 FoilPage|开始菜单/);
+});
+
+test('launch attempt stays silent when desktop is already online',async()=>{
+  const f=await harness({online:true});
+  await f.message({type:'shengjian-launch-attempt',videoId:'1234567890123456789'});
+  const watcher=f.timers.at(-1);
+  watcher.fn();
+  await f.settle();
+  assert.equal(f.sent.filter(m=>m.stage==='failure').length,0,'online path must not scare the user');
+});

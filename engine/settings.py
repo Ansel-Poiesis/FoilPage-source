@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -34,6 +35,22 @@ _SECRET_PREFIX = "dpapi:v1:"
 # DPAPI 加密落盘的字段清单；导出/诊断脱敏（app.maintenance）必须引用同一份，
 # 两处各自维护曾导致 license_token 明文进备份。
 SECRET_FIELDS = ("agent_api_key", "local_api_token", "license_token", "account_access_token", "account_login_token", "account_pending_login_token", "subscription_verify_key")
+
+# 先生 2026-11-16：BYOK 服务商预设库（单一真源）。UI 下拉、参数校验、视觉
+# 能力判定与配置指南均以此表为准；custom 保留全手填自由（vision=None 表示
+# 沿用启发式判定）。默认模型是可改的建议值，不是能力承诺。
+AGENT_PROVIDER_PRESETS: dict[str, dict[str, object]] = {
+    "mimo":        {"label": "小米 MiMo", "base_url": "https://api.xiaomimimo.com/v1", "model": "mimo-v2.6-flash", "vision": True},
+    "deepseek":    {"label": "DeepSeek", "base_url": "https://api.deepseek.com", "model": "deepseek-chat", "vision": False},
+    "openai":      {"label": "OpenAI", "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "vision": True},
+    "bailian":     {"label": "阿里云百炼", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus", "vision": False},
+    "zhipu":       {"label": "智谱 GLM", "base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4.5-flash", "vision": False},
+    "kimi":        {"label": "Kimi 月之暗面", "base_url": "https://api.moonshot.cn/v1", "model": "kimi-k2-0905-preview", "vision": False},
+    "siliconflow": {"label": "硅基流动", "base_url": "https://api.siliconflow.cn/v1", "model": "Qwen/Qwen2.5-72B-Instruct", "vision": False},
+    "openrouter":  {"label": "OpenRouter", "base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-4o-mini", "vision": True},
+    "ark":         {"label": "火山方舟", "base_url": "https://ark.cn-beijing.volces.com/api/v3", "model": "doubao-seed-1-6-lite-250815", "vision": False},
+    "custom":      {"label": "自定义", "base_url": "", "model": "", "vision": None},
+}
 _SECRET_FIELDS = SECRET_FIELDS
 
 
@@ -433,7 +450,10 @@ class SettingsStore:
             raise SettingsValidationError("重新转写模式无效")
         if settings.get("reorganize_last_level") not in ("", "auto", "light", "balanced", "structured", "rewrite"):
             raise SettingsValidationError("重新转写整理力度无效")
-        if settings.get("agent_hosted_model") not in ("", "qwen-plus", "deepseek-flash"):
+        hosted_model = str(settings.get("agent_hosted_model") or "")
+        # 2026-11-16 目录驱动：合法模型由 /v1/health 目录（UI 选项）与服务端
+        # begin 阶段（model_unavailable）双重把关，这里只做形态约束。
+        if hosted_model and not re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,63}", hosted_model):
             raise SettingsValidationError("托管模型选择无效")
         if settings.get("ui_language") not in ("zh-CN", "en"):
             raise SettingsValidationError("ui_language 必须是 zh-CN 或 en")
@@ -494,8 +514,8 @@ class SettingsStore:
             raise SettingsValidationError("agent_enabled 必须是 bool")
         if settings.get("agent_billing_mode") not in ("byok", "hosted"):
             raise SettingsValidationError("agent_billing_mode 必须是 byok 或 hosted")
-        if settings.get("agent_provider") not in ("mimo", "deepseek", "openai"):
-            raise SettingsValidationError("agent_provider 必须是 mimo、deepseek 或 openai")
+        if settings.get("agent_provider") not in AGENT_PROVIDER_PRESETS:
+            raise SettingsValidationError("agent_provider 必须是预设服务商之一（见 AGENT_PROVIDER_PRESETS）")
         for field in ("agent_base_url", "agent_model", "agent_api_key", "title_model", "title_skill_prompt"):
             if not isinstance(settings.get(field), str):
                 raise SettingsValidationError(f"{field} 必须是字符串")

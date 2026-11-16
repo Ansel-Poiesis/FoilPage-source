@@ -6,7 +6,7 @@
   if (window.top !== window) return;
 
   const CONTROL_CLASS = "shengjian-player-control";
-  const EXTENSION_VERSION = "0.1.4";
+  const EXTENSION_VERSION = "0.1.5";
   const CAPTURE_RETRY_GUIDE = "若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。";
   const captureRetryGuides = new Map();
   let syncQueued = false;
@@ -1250,8 +1250,17 @@
   }
 
   /* 桌面端未连接时的暂存告知＋一键拉起（先生 2026-10-19）。点击后任务已进
-   * 扩展离线队列：拉起 FoilPage→本地服务上线→队列自动提交→回执照常送达。 */
+   * 扩展离线队列：拉起 FoilPage→本地服务上线→队列自动提交→回执照常送达。
+   * 先生 2026-11-16：①协议随品牌统一为 foilpage://（桌面双注册兼容旧名）；
+   * ②同一视频 60s 冷却，防止离线连点反复弹卡；③点启动后请后台监听上线，
+   * 20s 未上线给手动指引——协议处理器缺失时系统弹的是"找不到应用"错误窗，
+   * 扩展自身无法感知，只能靠超时兜底告知。 */
+  const offlineCardShownAt = new Map();
   function showOfflineLaunchCard(videoId) {
+    const key = String(videoId || location.pathname);
+    const now = Date.now();
+    if (now - (offlineCardShownAt.get(key) || 0) < 60000) return;
+    offlineCardShownAt.set(key, now);
     showConfirmWindow(
       "FoilPage 桌面端未连接",
       "任务已暂存到扩展。点「启动 FoilPage」后，恢复连接时会尝试自动提交；应用将以后台方式启动。若仍未开始，请在扩展弹窗查看任务状态。",
@@ -1259,12 +1268,13 @@
       () => {
         try {
           const launcher = document.createElement("a");
-          launcher.href = "shengjian://launch";
+          launcher.href = "foilpage://launch";
           launcher.style.display = "none";
           document.body.appendChild(launcher);
           launcher.click();
           setTimeout(() => launcher.remove(), 1000);
           showToast("正在启动 FoilPage…启动后任务会自动提交；若浏览器询问是否打开 FoilPage，请选择「打开」");
+          sendRuntimeMessage({ type: "shengjian-launch-attempt", videoId: key }, () => {});
         } catch {
           showToast("无法自动启动：请手动打开 FoilPage 桌面端，任务会自动提交", true);
         }

@@ -2440,9 +2440,11 @@ test("repeat transcribe gets instant feedback and fallback start reassures the p
 
 test("offline click shows the launch card instead of silence and video pages never lose controls", async () => {
   const content = await readFile(new URL("../browser-extension/content.js", import.meta.url), "utf8");
-  // ① 桌面未连接：queued 回执必须弹「启动 FoilPage」卡（shengjian:// 协议），不再静默
+  // ① 桌面未连接：queued 回执必须弹「启动 FoilPage」卡（foilpage:// 协议，
+  // 2026-11-16 品牌统一；同视频 60s 冷却防连点弹卡），不再静默
   assert.match(content, /if \(acceptedJob\.queued\) \{\s*showOfflineLaunchCard/);
-  assert.match(content, /shengjian:\/\/launch/);
+  assert.match(content, /foilpage:\/\/launch/);
+  assert.match(content, /offlineCardShownAt/);
   assert.match(content, /FoilPage 桌面端未连接/);
   assert.match(content, /任务已暂存到扩展/);
   assert.match(content, /若仍未开始，请在扩展弹窗查看任务状态/);

@@ -868,6 +868,12 @@ def _vision_capable(settings: Mapping[str, object]) -> bool:
         # (先生 2026-11-02：qwen 别名舰队视觉能力不可靠，文本 DS 兜底 +
         # 专用视觉模型是预期用法). Failing calls degrade gracefully anyway.
         return True
+    # 先生 2026-11-16：视觉能力改查预设表；custom（vision=None）保留
+    # 旧启发式（mimo 船队判定）。
+    from engine.settings import AGENT_PROVIDER_PRESETS
+    preset = AGENT_PROVIDER_PRESETS.get(str(settings.get("agent_provider") or "").casefold())
+    if preset is not None and preset["vision"] is not None:
+        return bool(preset["vision"])
     provider = str(settings.get("agent_provider") or "").casefold()
     model = str(settings.get("agent_model") or "").casefold()
     base = str(settings.get("agent_base_url") or "").casefold()

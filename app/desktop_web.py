@@ -799,10 +799,14 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--geometry", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--webview-ui", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
-    # shengjian:// 协议拉起（2026-10-19）：浏览器一键启动传 URL 作 argv，
-    # 归一为后台静默启动，行为与 --background 完全一致。
+    # 协议拉起（2026-10-19）：浏览器一键启动传 URL 作 argv，归一为后台静默
+    # 启动，行为与 --background 完全一致。2026-11-16 品牌统一：主协议
+    # foilpage://，shengjian:// 保留为存量扩展的兼容别名。
     if argv:
-        argv = ["--background" if str(item).startswith("shengjian://") else item for item in argv]
+        argv = [
+            "--background" if str(item).startswith(("shengjian://", "foilpage://")) else item
+            for item in argv
+        ]
     args = parser.parse_args(argv)
     if args.smoke_preview and (not args.smoke or not args.data_dir):
         parser.error("预览检查须使用 --smoke 和独立 --data-dir")
