@@ -47,20 +47,20 @@ def test_data_roots_only_deleted_after_explicit_confirmation() -> None:
     source = _iss()
     assert "DeleteUserData" in source
     assert "不可恢复" in source, "删除用户数据前必须明确警告"
-    # DelTree 数据根必须由确认变量守卫；junction 摘除用 rmdir 而非 DelTree。
+    # DelTree 数据根必须由确认变量守卫；目录链接摘除用 rmdir 而非 DelTree。
     assert "if DeleteUserData then begin" in source
-    assert "IsJunction" in source and "rmdir" in source, (
-        "junction 垫片必须用 rmdir 摘除——DelTree 会穿进目标删真实数据"
+    assert "RemoveDirectoryLink" in source and "rmdir" in source, (
+        "目录链接必须用 rmdir 摘除——DelTree 会穿进目标删真实数据"
     )
 
 
 def test_junction_shim_removed_even_when_data_is_kept() -> None:
     source = _iss()
-    assert "RemoveJunction(LegacyRoot);" in source
-    # RemoveJunction 调用必须在 DeleteUserData 分支之外（无条件摘除）。
+    assert "RemoveDirectoryLink(LegacyRoot);" in source
+    # 链接摘除调用必须在 DeleteUserData 分支之外（无条件摘除）。
     body = source.split("usPostUninstall then begin", 1)[1]
     guard_pos = body.find("if DeleteUserData then begin")
-    junction_pos = body.find("RemoveJunction(LegacyRoot);")
+    junction_pos = body.find("RemoveDirectoryLink(LegacyRoot);")
     assert 0 < junction_pos < guard_pos, "junction 摘除应先于且独立于数据删除分支"
 
 
