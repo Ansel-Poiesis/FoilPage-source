@@ -19,6 +19,11 @@ def _lifecycle_app() -> desktop_web.WebDesktopApp:
     app.local_api = mock.Mock()
     app.controller = mock.Mock()
     app._window = None
+    app._notification_stop = threading.Event()
+    app._notification_thread = None
+    # 测试默认不布看门狗（避免 30s 后 os._exit 杀掉测试进程）；
+    # 看门狗用例显式置 False 并 monkeypatch os._exit。
+    app._quit_watchdog_armed = True
     return app
 
 
@@ -85,7 +90,8 @@ def test_close_is_idempotent_and_stops_every_owned_component() -> None:
     app._close()
 
     timer.cancel.assert_called_once_with()
-    app.worker.stop.assert_called_once_with(timeout=2)
+    # 2026-11-16：优雅窗口默认从固定 2s 加宽到 worker_stop_timeout（8s）。
+    app.worker.stop.assert_called_once_with(timeout=8)
     tray.stop.assert_called_once_with()
     local_api.stop.assert_called_once_with(timeout=2)
     app.controller.close.assert_called_once_with()
@@ -152,6 +158,78 @@ def test_explicit_worker_stop_does_not_trigger_auto_restart() -> None:
 
     restart.assert_not_called()
     assert states == ["stopped"]
+
+
+
+
+def test_close_uses_configured_worker_stop_timeout() -> None:
+    app = _lifecycle_app()
+    app.controller.settings = {"worker_stop_timeout": 5}
+    app._close()
+    app.worker.stop.assert_called_once_with(timeout=5)
+
+
+def test_close_signals_notification_loop_and_waits_for_it_to_exit() -> None:
+    """先生 2026-11-16：退出先叫停轮询并 join（≤3s）再取锁。
+
+    轮询每秒全程持 _close_lock，数据库抖动时单轮可持锁数秒且立即重入；
+    不先 join，_close 会被反复插队饿死（2026-11-14 磁盘满风暴形态）。
+    """
+    app = _lifecycle_app()
+    app._notification_events = []
+    app._notifications = mock.Mock()
+    app._notifications.update.return_value = []
+    app.bridge = mock.Mock()
+    in_poll = threading.Event()
+    release_poll = threading.Event()
+
+    def blocking_tasks():
+        in_poll.set()
+        release_poll.wait(5)
+        return []
+
+    app.bridge.get_notification_tasks.side_effect = blocking_tasks
+    app.controller.settings = {"task_notifications": True}
+    app.controller.media_action_lock = threading.RLock()
+    app.controller.failed_task_retention = mock.Mock()
+    app._plan_expiry_notice_once = mock.Mock()
+    loop = threading.Thread(target=app._notification_loop, daemon=True)
+    loop.start()
+    assert in_poll.wait(2), "轮询应已进入一次库读"
+    close_done = threading.Event()
+    closer = threading.Thread(target=lambda: (app._close(), close_done.set()), daemon=True)
+    closer.start()
+    # join(3) 到期时阻塞中的轮询仍在（5s 上限），_close 必须继续取锁完成
+    # 收尾——等待有界，不因轮询悬挂而卡死退出。
+    assert close_done.wait(6), "退出不得被持锁轮询无限拖延"
+    release_poll.set()
+    loop.join(3)
+    assert app._closed is True
+    assert not loop.is_alive(), "退出后轮询线程必须已结束"
+    app.worker.stop.assert_called_once_with(timeout=8)
+    # 停止置位后不再开启新的轮询轮次。
+    assert app.bridge.get_notification_tasks.call_count <= 2
+
+
+def test_quit_watchdog_forces_process_exit_when_cleanup_hangs() -> None:
+    """清理链卡死时看门狗兜底强制退出——进程必死、互斥量必释放。"""
+    app = _lifecycle_app()
+    app._quit_watchdog_armed = False
+    block_cleanup = threading.Event()
+    app.worker.stop.side_effect = lambda timeout: block_cleanup.wait(10)
+    forced = threading.Event()
+
+    with (
+        mock.patch.object(desktop_web.os, "_exit", side_effect=lambda code: forced.set()) as exit_mock,
+        mock.patch.object(desktop_web.time, "sleep", side_effect=lambda _seconds: None),
+    ):
+        quit_thread = threading.Thread(target=app._quit, daemon=True)
+        quit_thread.start()
+        assert forced.wait(2), "看门狗应在清理卡死时触发强制退出"
+        block_cleanup.set()
+        quit_thread.join(3)
+        exit_mock.assert_called_once_with(0)
+    assert app._quit_watchdog_armed is True
 
 
 def test_dwm_attributes_are_attempted_independently() -> None:

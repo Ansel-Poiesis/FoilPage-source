@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -59,6 +60,15 @@ class WorkerProcessManager:
         self._stop_requested = False
         self._lock = threading.RLock()
         self._monitor: threading.Thread | None = None
+        # 先生 2026-11-16：守护重启退避与上限。实机日志曾出现 1.18 秒内
+        # "杀掉→重启→再死→再重启"的循环；无退避无上限的守护会把一次环境
+        # 故障（DLL 初始化失败、磁盘满）放大成进程风暴。
+        self._crash_restarts = 0
+        self._started_at = 0.0
+
+    _RESTART_BACKOFF = (2.0, 5.0, 15.0, 60.0)
+    _MAX_CONSECUTIVE_RESTARTS = 5
+    _STABLE_UPTIME_SECONDS = 300.0
 
     @property
     def running(self) -> bool:
@@ -71,35 +81,42 @@ class WorkerProcessManager:
             return self._process.pid if self.running and self._process else None
 
     def start(self) -> bool:
+        """显式启动（应用启动或用户手动）：崩溃计数清零，重新计守护额度。"""
         with self._lock:
             if self.running:
                 return False
             self._stop_requested = False
-            creationflags = 0
-            startupinfo = None
-            if os.name == "nt":
-                # CTRL_BREAK_EVENT requires the child to belong to a console
-                # process group. CREATE_NO_WINDOW makes that signal undeliverable,
-                # so hide the console via STARTUPINFO instead.
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-            self._process = subprocess.Popen(
-                self.command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=creationflags,
-                startupinfo=startupinfo,
-            )
-            self.state_callback("running")
-            self._monitor = threading.Thread(target=self._monitor_loop, daemon=True)
-            self._monitor.start()
-            return True
+            self._crash_restarts = 0
+            return self._spawn_locked()
+
+    def _spawn_locked(self) -> bool:
+        """在已持锁的前提下拉起进程与监控线程；不动退出意图与崩溃计数。"""
+        creationflags = 0
+        startupinfo = None
+        if os.name == "nt":
+            # CTRL_BREAK_EVENT requires the child to belong to a console
+            # process group. CREATE_NO_WINDOW makes that signal undeliverable,
+            # so hide the console via STARTUPINFO instead.
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+        self._process = subprocess.Popen(
+            self.command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
+        )
+        self._started_at = time.monotonic()
+        self.state_callback("running")
+        self._monitor = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._monitor.start()
+        return True
 
     def stop(self, timeout: float = 8.0) -> bool:
         with self._lock:
@@ -153,12 +170,41 @@ class WorkerProcessManager:
             # tray/window shutdown racing with process exit must not resurrect
             # a new worker after ``stop()`` has requested termination.
             should_restart = not expected and self.auto_restart and not self._stop_requested
+            delay = 0.0
+            if should_restart:
+                uptime = time.monotonic() - self._started_at
+                if uptime >= self._STABLE_UPTIME_SECONDS:
+                    # 稳定运行过一段时间：这次崩溃视为新事件，重新计数。
+                    self._crash_restarts = 0
+                if self._crash_restarts >= self._MAX_CONSECUTIVE_RESTARTS:
+                    should_restart = False
+                else:
+                    delay = self._RESTART_BACKOFF[
+                        min(self._crash_restarts, len(self._RESTART_BACKOFF) - 1)
+                    ]
+                    self._crash_restarts += 1
         self.state_callback("stopped" if expected else "crashed")
-        if should_restart:
-            self.log_callback(f"Worker 异常退出 ({code})，正在重启")
-            with self._lock:
-                if not self._stop_requested:
-                    self.start()
+        if not should_restart:
+            cap_reached = (
+                not expected and self.auto_restart
+                and self._crash_restarts >= self._MAX_CONSECUTIVE_RESTARTS
+            )
+            if cap_reached:
+                self.log_callback(
+                    f"Worker 异常退出 ({code})，连续 {self._crash_restarts} 次重启无效，"
+                    "停止自动重启；可在应用中手动启动 Worker"
+                )
+                self.state_callback("disabled")
+            return
+        self.log_callback(
+            f"Worker 异常退出 ({code})，{delay:.0f} 秒后第 {self._crash_restarts} 次重启"
+        )
+        # 退避在锁外等：等待期间收到 stop() 则放弃重启。
+        time.sleep(delay)
+        with self._lock:
+            if self._stop_requested or self.running:
+                return
+            self._spawn_locked()
 
 
 def worker_command(

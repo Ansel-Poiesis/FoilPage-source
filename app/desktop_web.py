@@ -172,7 +172,9 @@ class WebDesktopApp:
         self.local_api: LocalApiServer | None = None
         self._push_timer: threading.Timer | None = None
         self._notification_stop = threading.Event()
+        self._notification_thread: threading.Thread | None = None
         self._notification_events: list[dict] = []
+        self._quit_watchdog_armed = False
         _init_theme = settings.get("theme")
         self._native_theme = "light" if _init_theme == "paper" else "dark"
 
@@ -276,7 +278,8 @@ class WebDesktopApp:
         # 直接调用 evaluate_js 会阻塞（pywebview 等待 GUI 线程），因此延迟到
         # 循环启动后在后台线程再开启 2s 状态推送。
         threading.Thread(target=self._launch_push_timer_later, daemon=True).start()
-        threading.Thread(target=self._notification_loop, daemon=True).start()
+        self._notification_thread = threading.Thread(target=self._notification_loop, daemon=True)
+        self._notification_thread.start()
         threading.Thread(target=self._ci_runner_wakeup_once, daemon=True).start()
         log.info("webview.start entering")
         webview.start(self._fix_native_window, debug=debug)
@@ -428,7 +431,7 @@ class WebDesktopApp:
                 # Serialize database reads with shutdown; the last poll must
                 # finish before controller.close releases its connections.
                 with self._close_lock:
-                    if self._closed:
+                    if self._closed or self._notification_stop.is_set():
                         return
                     events = self._notifications.update(
                         self.bridge.get_notification_tasks(),
@@ -557,8 +560,31 @@ class WebDesktopApp:
         except Exception:
             pass
 
+    def _arm_quit_watchdog(self) -> None:
+        """先生 2026-11-16：退出兜底看门狗（只武装一次）。
+
+        清理链任何一环卡死——_close_lock 被轮询饿死、GUI 线程被长 RPC
+        占住导致 destroy 排队、pystray 非 daemon 托盘线程悬挂——都会让
+        进程僵死并占住 Local\FoilPageDesktop 单例互斥量（2026-08-26 实测
+        点退出后 12 分钟才死，期间无法启动新实例）。看门狗在退出发起
+        30 秒后强制结束进程：必死、互斥量必释放、立即可再启动。
+        """
+        if self._quit_watchdog_armed:
+            return
+        self._quit_watchdog_armed = True
+
+        def _watchdog() -> None:
+            time.sleep(30)
+            logging.getLogger("shengjian.desktop").error(
+                "退出收尾超过 30 秒未完成，看门狗强制结束进程"
+            )
+            os._exit(0)
+
+        threading.Thread(target=_watchdog, name="shengjian-quit-watchdog", daemon=True).start()
+
     def _quit(self) -> None:
         """清理并销毁窗口；可由托盘、桥接或窗口事件重复调用。"""
+        self._arm_quit_watchdog()
         try:
             self._close()
         except Exception:
@@ -584,13 +610,22 @@ class WebDesktopApp:
         threading.Thread(target=self._quit, name="shengjian-quit", daemon=True).start()
 
     def _close(self) -> None:
+        # 先生 2026-11-16：先叫停通知循环并等它退出当前一轮（最多 3s），
+        # 再取 _close_lock。轮询每秒全程持锁做库读与同步，数据库抖动时
+        # 单轮可持锁数秒且立即重入，退出会被反复插队饿死（2026-11-14 磁盘
+        # 满风暴的实测形态）。停止事件置位后循环不再重新取锁，等待上界即
+        # 当前一轮的剩余时长。
+        stop = getattr(self, "_notification_stop", None)
+        if stop is not None:
+            stop.set()
+        notification_thread = getattr(self, "_notification_thread", None)
+        if notification_thread is not None and notification_thread is not threading.current_thread():
+            notification_thread.join(timeout=3)
+        log.info("正在退出，收尾中…")
         with self._close_lock:
             if self._closed:
                 return
             self._closed = True
-            stop = getattr(self, "_notification_stop", None)
-            if stop is not None:
-                stop.set()
             if self._push_timer is not None:
                 self._push_timer.cancel()
                 self._push_timer = None
@@ -599,7 +634,15 @@ class WebDesktopApp:
             local_api = self.local_api
             self.local_api = None
             # Each component must be stopped even if an earlier stop fails.
-            cleanups = [lambda: self.worker.stop(timeout=2)]
+            # 先生 2026-11-16：Worker 优雅窗口从固定 2s 加宽到可配置
+            # worker_stop_timeout（默认 8s）——转写任务在段边界协作取消后
+            # 通常能在窗口内排干，避免硬杀丢租约与落盘。
+            worker_stop_timeout = 8
+            try:
+                worker_stop_timeout = max(1, int(self.controller.settings.get("worker_stop_timeout", 8)))
+            except Exception:
+                pass
+            cleanups = [lambda: self.worker.stop(timeout=worker_stop_timeout)]
             if local_api is not None:
                 cleanups.append(lambda: local_api.stop(timeout=2))
             bridge = getattr(self, "bridge", None)

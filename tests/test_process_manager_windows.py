@@ -99,3 +99,62 @@ Path({str(report)!r}).write_text(json.dumps(result,ensure_ascii=False),encoding=
     assert result["parent_console_before"] == result["parent_console_after"] == 0, result
     assert result["attached_console"] and not result["console_visible"], result
     assert any("[worker] 已停止" in line for line in result["logs"]), result
+
+
+def test_crash_restarts_back_off_then_give_up():
+    """先生 2026-11-16：守护重启必须退避且有上限，不能无限进程风暴。"""
+    import time
+    from app.process_manager import WorkerProcessManager
+
+    states: list[str] = []
+    logs: list[str] = []
+    manager = WorkerProcessManager(
+        [sys.executable, "-c", "pass"],  # 启动即退的假 Worker。
+        state_callback=states.append,
+        log_callback=logs.append,
+        auto_restart=True,
+    )
+    manager._RESTART_BACKOFF = (0.05, 0.05)
+    manager._MAX_CONSECUTIVE_RESTARTS = 3
+    manager._STABLE_UPTIME_SECONDS = 3600.0
+    try:
+        manager.start()
+        deadline = time.time() + 15
+        while time.time() < deadline and "disabled" not in states:
+            time.sleep(0.05)
+        assert "disabled" in states, states
+        # 初次崩溃 + 3 次重启各崩一次 = 4 次 crashed；之后放弃。
+        assert states.count("crashed") == 4, states
+        assert states.count("running") == 4, states
+        assert any("停止自动重启" in line for line in logs), logs
+        assert not manager.running
+    finally:
+        manager.stop(timeout=1)
+
+
+def test_stop_during_backoff_window_aborts_restart():
+    """退避等待期间收到退出意图：不得再复活进程。"""
+    import time
+    from app.process_manager import WorkerProcessManager
+
+    states: list[str] = []
+    manager = WorkerProcessManager(
+        [sys.executable, "-c", "pass"],
+        state_callback=states.append,
+        log_callback=lambda _line: None,
+        auto_restart=True,
+    )
+    manager._RESTART_BACKOFF = (1.0,)
+    manager._MAX_CONSECUTIVE_RESTARTS = 5
+    manager._STABLE_UPTIME_SECONDS = 3600.0
+    try:
+        manager.start()
+        deadline = time.time() + 10
+        while time.time() < deadline and "crashed" not in states:
+            time.sleep(0.02)
+        manager.stop(timeout=1)  # 退避 1s 内下达退出意图。
+        time.sleep(1.5)
+        assert states.count("running") == 1, states
+        assert not manager.running
+    finally:
+        manager.stop(timeout=1)
