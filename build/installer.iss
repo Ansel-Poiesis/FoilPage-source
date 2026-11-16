@@ -1,13 +1,13 @@
 ; Copyright (c) 2026 Ansel
 ; SPDX-License-Identifier: MPL-2.0
-#define AppVersion "0.1.4"
+#define AppVersion "0.1.5"
 #define AppExeName "FoilPage-Desktop.exe"
 
 [Setup]
 AppId={{5F2EE512-3A43-4E61-94D7-F77B76B8D245}
 AppName=FoilPage
 AppVersion={#AppVersion}
-VersionInfoVersion=0.1.4.0
+VersionInfoVersion=0.1.5.0
 AppPublisher=Ansel
 MinVersion=10.0.17763
 DefaultDirName={localappdata}\Programs\FoilPage
@@ -164,8 +164,14 @@ Name: "{autodesktop}\FoilPage"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{a
 Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Ansel.ShengJian.Desktop"; ValueType: string; ValueName: "DisplayName"; ValueData: "FoilPage"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Ansel.ShengJian.Desktop"; ValueType: string; ValueName: "IconUri"; ValueData: "{app}\_internal\assets\icons\foilpage.png"
 Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Ansel.ShengJian.Desktop"; ValueType: dword; ValueName: "ShowInSettings"; ValueData: "1"
-; 先生 2026-10-19：shengjian:// 协议——扩展在桌面端未连接时可一键拉起应用
+; 先生 2026-10-19：协议拉起——扩展在桌面端未连接时可一键启动应用
 ; （后台静默启动；应用参解析见 desktop_web._main 的协议参归一）。
+; 先生 2026-11-16：品牌统一补漏——主协议改为 foilpage://；shengjian://
+; 保留为兼容别名（存量 1.3.x 扩展仍拼旧协议，卸载时两键同删）。
+Root: HKCU; Subkey: "Software\Classes\foilpage"; ValueType: string; ValueName: ""; ValueData: "URL:foilpage protocol"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\foilpage"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\foilpage\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\_internal\assets\icons\foilpage.png"
+Root: HKCU; Subkey: "Software\Classes\foilpage\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" --background"
 Root: HKCU; Subkey: "Software\Classes\shengjian"; ValueType: string; ValueName: ""; ValueData: "URL:shengjian protocol"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\shengjian"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\shengjian\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\_internal\assets\icons\foilpage.png"

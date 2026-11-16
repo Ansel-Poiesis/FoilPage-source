@@ -438,8 +438,11 @@ def test_agent_hosted_model_roundtrip_and_validation() -> None:
         assert saved["agent_hosted_model"] == "deepseek-flash"
         assert SettingsStore(base_dir=Path(temp) / "data").load()["agent_hosted_model"] == "deepseek-flash"
         assert store.update(agent_hosted_model="")["agent_hosted_model"] == ""
+        # 2026-11-16 目录驱动：任意形态合法的小写模型 id 可保存（合法目录由
+        # /v1/health 与服务端 begin 关卡把关）；仅形态非法的值被拒。
+        assert store.update(agent_hosted_model="qwen-turbo")["agent_hosted_model"] == "qwen-turbo"
         with pytest.raises(SettingsValidationError):
-            store.update(agent_hosted_model="deepseek-chat")
+            store.update(agent_hosted_model="Qwen-Plus")
 
 
 def test_github_theme_palette_roundtrips_and_unknown_theme_rejected() -> None:

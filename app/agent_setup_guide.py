@@ -12,7 +12,7 @@ import sys
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
-from engine.settings import default_logs_dir
+from engine.settings import AGENT_PROVIDER_PRESETS, default_logs_dir
 
 
 _IDENTIFIER = re.compile(r"[\w./:-]{1,100}\Z")
@@ -21,7 +21,7 @@ _ENUM_FIELDS = {
     "whisper_model": {"tiny", "base", "small", "medium", "large-v3"},
     "device": {"cpu", "cuda"},
     "agent_billing_mode": {"byok", "hosted"},
-    "agent_provider": {"mimo", "deepseek", "openai"},
+    "agent_provider": set(AGENT_PROVIDER_PRESETS),
     "agent_editing_level": {"light", "balanced", "structured"},
 }
 _BOOL_FIELDS = ("agent_enabled", "title_optimization_enabled", "agent_vision_enabled",

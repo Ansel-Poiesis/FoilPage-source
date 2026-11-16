@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 ACTIVE_STATUSES = {"queued", "running", "retryable", "received", "resolving", "awaiting_browser", "downloading", "imported", "transcribing"}
 TERMINAL_STATUSES = {"done", "failed", "cancelled"}
 
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.1.5"
 RELEASE_CHANNEL = "formal"
 UPDATE_URL = "https://api.github.com/repos/Ansel-Poiesis/FoilPage-source/releases/latest"
 
@@ -774,10 +774,16 @@ class Bridge(AccountBridgeMixin):
             ready = bool(base and relay.get("configured") is True and relay.get("stage_protocol") == "v1")
             paused = result.get("order_review", {}).get("paused") is True
             ready = ready and not paused
-            # 托管模型目录（1.3.12）：服务端 /v1/health 下发的已复核模型，
-            # 驱动设置页托管模型下拉；旧服务端无该字段时仅剩服务端默认。
+            # 托管模型目录（1.3.12；2026-11-16 目录驱动）：服务端 /v1/health
+            # 下发的已复核模型含中文标签与积分倍率，直接驱动设置页下拉——
+            # 服务端加档客户端零改动；旧服务端无 label/multiplier 时优雅降级。
             hosted_models = [
-                {"model": str(item.get("model") or ""), "policy_version": str(item.get("policy_version") or "")}
+                {
+                    "model": str(item.get("model") or ""),
+                    "policy_version": str(item.get("policy_version") or ""),
+                    **({"label": str(item["label"])} if item.get("label") else {}),
+                    **({"cost_multiplier": item["cost_multiplier"]} if isinstance(item.get("cost_multiplier"), (int, float)) else {}),
+                }
                 for item in (relay.get("models") if isinstance(relay.get("models"), list) else [])
                 if isinstance(item, dict) and item.get("model")
             ]
@@ -2542,6 +2548,22 @@ class Bridge(AccountBridgeMixin):
                 old_base = str(self.controller.settings.get("subscription_server_url") or "").strip().rstrip("/")
                 new_base = str(changes.get("subscription_server_url") or "").strip().rstrip("/")
                 clear_account = old_base != new_base
+            # 先生 2026-11-16：与服务端 save_agent_settings 同款密钥安全规则
+            # ——服务商或接口地址变化而未同时提交新 Key 时清空旧 Key，防止
+            # 旧密钥被转发到新端点。预设切换（UI 路径）与 Agent CLI 路径语
+            # 义一致；清空时在返回视图里带 agent_key_cleared 提示。
+            agent_key_cleared = False
+            if changes and ("agent_provider" in changes or "agent_base_url" in changes):
+                old_provider = str(self.controller.settings.get("agent_provider") or "")
+                old_agent_base = str(self.controller.settings.get("agent_base_url") or "").strip().rstrip("/")
+                new_provider = str(changes.get("agent_provider", old_provider) or "")
+                new_agent_base = str(changes.get("agent_base_url", old_agent_base) or "").strip().rstrip("/")
+                key_supplied = bool(str(changes.get("agent_api_key") or "").strip())
+                if key_supplied is False and (
+                    old_provider != new_provider or old_agent_base != new_agent_base
+                ):
+                    changes = {**changes, "agent_api_key": ""}
+                    agent_key_cleared = True
             self.controller.save_settings(changes or {})
             if clear_account:
                 self._clear_account()
@@ -2552,6 +2574,8 @@ class Bridge(AccountBridgeMixin):
             self._sync_native_theme(settings.get("theme", "dark"))
         with self._lock:
             view = self._frontend_settings_view()
+            if agent_key_cleared:
+                view["agent_key_cleared"] = True
             activity = getattr(self.controller, 'agent_activity', None)
             if changes and activity:
                 try:

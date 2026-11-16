@@ -1810,6 +1810,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((error) => sendResponse({ ok: false, message: submissionFailureNotice(error) }));
     return true;
   }
+  if (message?.type === "shengjian-launch-attempt") {
+    // 先生 2026-11-16：离线卡点「启动」后的上线监听。协议处理器缺失/未注
+    // 册时 Windows 会弹"找不到应用"错误窗且扩展无法感知——20s 内桌面仍未
+    // 连上就给发起页一条手动指引，把静默失败变成可操作提示。
+    void (async () => {
+      await new Promise(resolve => setTimeout(resolve, 20000));
+      if (desktopConnectionState === "online") return;
+      try {
+        await request("/v1/downloads?limit=1");
+        return; // 探测成功：桌面其实在线（WS 可能尚未建连）。
+      } catch { /* 仍离线 */ }
+      await notifyTabs(
+        "未能自动启动 FoilPage：请从开始菜单手动打开 FoilPage（刚安装/更新过的话，重启浏览器后再试）。暂存的任务会在连接恢复后自动提交。",
+        true, null, "failure",
+      );
+    })();
+    sendResponse({ ok: true });
+    return true;
+  }
   if (message?.type === "shengjian-check-existing") {
     void checkExistingDownloads(String(message.url || ""))
       .then(result => sendResponse(result))

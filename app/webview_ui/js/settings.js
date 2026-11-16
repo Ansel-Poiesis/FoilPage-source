@@ -110,6 +110,22 @@ window.Settings = (() => {
     { value: "knowledge", label: "知识科普" },
   ];
 
+  // 先生 2026-11-16：BYOK 服务商预设（与 engine/settings.py 的
+  // AGENT_PROVIDER_PRESETS 保持一致，tests/test_provider_presets.py 锁定）。
+  // 切换预设自动带出接口地址与默认模型，仍可手改。
+  const PROVIDER_PRESETS = {
+    mimo:        { label: "小米 MiMo（推荐，支持视觉）", base: "https://api.xiaomimimo.com/v1", model: "mimo-v2.6-flash" },
+    deepseek:    { label: "DeepSeek", base: "https://api.deepseek.com", model: "deepseek-chat" },
+    openai:      { label: "OpenAI（支持视觉）", base: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+    bailian:     { label: "阿里云百炼", base: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
+    zhipu:       { label: "智谱 GLM", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.5-flash" },
+    kimi:        { label: "Kimi 月之暗面", base: "https://api.moonshot.cn/v1", model: "kimi-k2-0905-preview" },
+    siliconflow: { label: "硅基流动", base: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-72B-Instruct" },
+    openrouter:  { label: "OpenRouter（支持视觉）", base: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini" },
+    ark:         { label: "火山方舟", base: "https://ark.cn-beijing.volces.com/api/v3", model: "doubao-seed-1-6-lite-250815" },
+    custom:      { label: "自定义", base: "", model: "" },
+  };
+
   const CUSTOM_PROFILE_TEMPLATE = {
     id: "",
     name: "新的整理策略",
@@ -563,24 +579,39 @@ window.Settings = (() => {
       const controls = document.createElement("div"); controls.className = "hosted-capability";
       const state = valueEl("正在检查托管服务…"); state.id = "hostedAgentState"; state.setAttribute("role","status");
       const check = document.createElement("button"); check.type = "button"; check.className = "btn ghost small"; check.textContent = "检查服务"; check.setAttribute("aria-label","检查托管服务");
-      // 托管模型选择（1.3.12）：选项来自服务端 /v1/health 的已复核目录；
+      // 托管模型选择（1.3.12；2026-11-16 目录驱动）：选项、标签与积分倍率
+      // 全部来自服务端 /v1/health 的已复核目录——服务端加档客户端零改动。
       // 目录不足两个模型或服务未就绪时保持禁用，避免选中不可用模型。
-      const HOSTED_MODEL_LABELS = { "qwen-plus": "qwen-plus（忠实整理，基础积分）", "deepseek-flash": "deepseek-flash（润色优化，3 倍积分）" };
       const hostedModelSelect = selectEl(String(s().agent_hosted_model || ""), [
         { value: "", label: "默认（服务端推荐）" },
       ], (v) => save({ agent_hosted_model: v }), "agent_hosted_model");
       hostedModelSelect.disabled = true;
+      const hostedModelRow = row("托管模型", "按积分计费的托管整理模型", hostedModelSelect);
+      const hostedModelDesc = hostedModelRow.querySelector(".set-hint");
+      const multiplierText = (item) => {
+        const n = Number(item?.cost_multiplier || 1);
+        return n === 1 ? "基础积分" : `${n} 倍积分`;
+      };
       const applyHostedModels = (models) => {
-        const catalog = Array.isArray(models) ? models.map(item => item && item.model).filter(Boolean) : [];
+        const catalog = Array.isArray(models)
+          ? models.filter(item => item && item.model).map(item => ({ model: String(item.model), label: String(item.label || ""), multiplier: item.cost_multiplier }))
+          : [];
         const options = [{ value: "", label: catalog.length ? "默认（服务端推荐）" : "默认（服务端仅此模型）" }];
-        catalog.forEach(id => options.push({ value: id, label: HOSTED_MODEL_LABELS[id] || id }));
+        catalog.forEach(item => options.push({
+          value: item.model,
+          label: item.label ? `${item.label}（${multiplierText(item)}）` : `${item.model}（${multiplierText(item)}）`,
+        }));
         hostedModelSelect.replaceChildren(...options.map(opt => {
           const op = document.createElement("option"); op.value = opt.value; op.textContent = opt.label; return op;
         }));
         const current = String(s().agent_hosted_model || "");
-        hostedModelSelect.value = catalog.includes(current) ? current : "";
+        hostedModelSelect.value = catalog.some(item => item.model === current) ? current : "";
         hostedModelSelect.dataset.initialValue = hostedModelSelect.value;
         hostedModelSelect.disabled = catalog.length < 2 || !relayReady;
+        const selected = catalog.find(item => item.model === hostedModelSelect.value);
+        if (hostedModelDesc) hostedModelDesc.textContent = selected
+          ? `每次整理消耗 ${multiplierText(selected)}（每 2000 字符计 1 次基数）`
+          : "按积分计费的托管整理模型";
       };
       applyHostedModels([]);
       const refresh = async (probe) => {
@@ -602,7 +633,7 @@ window.Settings = (() => {
       agentToggle.disabled = !s().agent_enabled; titleToggle.disabled = !s().title_optimization_enabled;
       check.onclick = () => refresh(true); controls.append(state,check);
       g.appendChild(row("托管服务", "",controls));
-      g.appendChild(row("托管模型", "润色档每次整理消耗 3 倍积分（更重模型）", hostedModelSelect));
+      g.appendChild(hostedModelRow);
       refresh(false);
     }
     const level = selectEl(s().agent_editing_level || "auto", [
@@ -616,19 +647,35 @@ window.Settings = (() => {
     g.appendChild(row("整理力度", "", level));
     g.appendChild(row("记住重新转写选项", "开启后按上次选择执行，关闭后每次确认", toggleEl(
       !!s().reorganize_no_remind, () => save({ reorganize_no_remind: !s().reorganize_no_remind }), "reorganize_no_remind")));
+    // 先生 2026-11-16：预设联动——切换服务商自动带出接口地址与默认模型
+    // （仍可手改）；服务商变化会按服务端安全规则清空旧 Key，需重新填写。
     const provider = selectEl(
       s().agent_provider || "mimo",
-      [
-        { value: "mimo", label: "MiMo 视觉模型（推荐）" },
-        { value: "deepseek", label: "DeepSeek" },
-        { value: "openai", label: "OpenAI 兼容" },
-      ],
-      (v) => save({ agent_provider: v }), "agent_provider"
+      Object.entries(PROVIDER_PRESETS).map(([value, preset]) => ({ value, label: preset.label })),
+      (v) => {
+        const preset = PROVIDER_PRESETS[v];
+        const patch = { agent_provider: v };
+        if (preset && v !== "custom") {
+          if (preset.base) patch.agent_base_url = preset.base;
+          if (preset.model) patch.agent_model = preset.model;
+        }
+        const hadKey = !!String(s().agent_api_key || "").trim();
+        return save(patch).then(settings => {
+          if (settings && AppState.currentView === "settings" && section === "agent") render();
+          if (settings && (settings.agent_key_cleared || hadKey)) {
+            toast("已切换服务商：接口与默认模型已带出，请重新填写 API Key", "error");
+          } else if (settings) {
+            toast(`已应用${preset ? preset.label : ""}预设：接口与默认模型已带出`);
+          }
+          return settings;
+        });
+      },
+      "agent_provider"
     );
-    g.appendChild(row("服务商", "MiMo 可读取视频帧字幕，辅助纠正同音字和专名", provider));
-    const baseUrl = inputEl(s().agent_base_url || "https://api.xiaomimimo.com/v1", (v) => save({ agent_base_url: v }));
+    g.appendChild(row("服务商", "切换预设自动填入接口与模型；MiMo/OpenAI 可读取视频帧字幕辅助纠错", provider));
+    const baseUrl = inputEl(s().agent_base_url || PROVIDER_PRESETS.mimo.base, (v) => save({ agent_base_url: v }));
     g.appendChild(row("接口地址", "", baseUrl));
-    const agentModel = inputEl(s().agent_model || "mimo-v2.5", (v) => save({ agent_model: v }));
+    const agentModel = inputEl(s().agent_model || PROVIDER_PRESETS.mimo.model, (v) => save({ agent_model: v }));
     g.appendChild(row("模型", "", agentModel));
     const apiKey = inputEl(s().agent_api_key || "", (v) => save({ agent_api_key: v }), { password: true });
     apiKey.dataset.tour = "agent-key";
@@ -650,8 +697,8 @@ window.Settings = (() => {
     const visionToggle = toggleEl(!!s().agent_vision_enabled, () => save({ agent_vision_enabled: !s().agent_vision_enabled }), "agent_vision_enabled");
     visionToggle.disabled = hostedMode;
     g.appendChild(row("启用字幕视觉校对", hostedMode ? "托管目前仅支持文本；视觉核对需切换到自带密钥" : "发现视频帧字幕时，优先用画面核对含糊词；无法确认时保留原词并标记待确认", visionToggle));
-    const visionModel = inputEl(s().agent_vision_model || "mimo-v2.5", (v) => save({ agent_vision_model: v }));
-    g.appendChild(row("视觉模型", "MiMo 当前视觉模型建议使用 mimo-v2.5", visionModel));
+    const visionModel = inputEl(s().agent_vision_model || PROVIDER_PRESETS.mimo.model, (v) => save({ agent_vision_model: v }));
+    g.appendChild(row("视觉模型", `留空跟随主模型；建议与主模型同厂商（当前预设建议 ${PROVIDER_PRESETS.mimo.model}）`, visionModel));
     const visionFrames = inputEl(String(s().agent_vision_frame_count || 6), (v) => {
       const n = Number(v);
       if (!Number.isInteger(n) || n < 1 || n > 12) { toast("视觉帧数需为 1-12", "error"); return false; }
@@ -1746,7 +1793,7 @@ window.Settings = (() => {
   function buildAbout() {
     const pane = document.createElement("div");
       let g = group("FoilPage");
-      const version = valueEl("v" + (window.APP_VERSION || "0.1.4"));
+      const version = valueEl("v" + (window.APP_VERSION || "0.1.5"));
       g.appendChild(row("版本", "", version));
       g.appendChild(row("产品", "", valueEl("FoilPage")));
       const updateBtn = document.createElement("button");

@@ -116,6 +116,28 @@ def test_main_closes_app_when_webview_loop_returns() -> None:
     fake_app._close.assert_called_once_with()
 
 
+def test_main_normalizes_foilpage_protocol_launch_to_background() -> None:
+    """2026-11-16 品牌统一：主协议 foilpage://，行为与旧 shengjian:// 一致。"""
+    fake_instance = mock.Mock()
+    fake_app = mock.Mock()
+    fake_app.start.return_value = None
+    captured: dict[str, object] = {}
+
+    def fake_app_factory(**kwargs):
+        captured.update(kwargs)
+        return fake_app
+
+    with (
+        mock.patch.object(desktop_web, "_setup_logging"),
+        mock.patch.object(desktop_web, "SingleInstance", return_value=fake_instance),
+        mock.patch.object(desktop_web, "WebDesktopApp", side_effect=fake_app_factory),
+    ):
+        assert desktop_web._main(["foilpage://launch"]) == 0
+
+    assert captured.get("initially_hidden") is True, "foilpage:// 拉起应归一为后台静默启动"
+    fake_instance.close.assert_called_once_with()
+
+
 def test_main_normalizes_shengjian_protocol_launch_to_background() -> None:
     fake_instance = mock.Mock()
     fake_app = mock.Mock()
