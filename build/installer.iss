@@ -128,6 +128,11 @@ begin
       DelTree(LegacyRoot, True, True, True);
       DelTree(DataRoot, True, True, True);
     end;
+    // 卸载日志只删安装器写过的文件；运行期落进 {app} 的散件（实机验收
+    // 观察到 ui-kit.css 预览文件）会挡住安装根删除。此时产品文件已全部
+    // 卸载、目录归本产品所有，整体清空收尾。
+    if DirExists(ExpandConstant('{app}')) then
+      DelTree(ExpandConstant('{app}'), True, True, True);
     // 转写崩溃残留的临时目录（run_engine 正常路径自清，异常退出时留下）。
     TempDir := GetEnv('TEMP');
     if TempDir <> '' then begin
