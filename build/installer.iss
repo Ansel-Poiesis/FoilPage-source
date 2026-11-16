@@ -69,23 +69,15 @@ begin
   Sleep(2000);
 end;
 
-function IsJunction(const Path: String): Boolean;
-var
-  Attr: Integer;
-begin
-  // FILE_ATTRIBUTE_REPARSE_POINT ($400)：junction/符号链接。junction 必须
-  // 用 rmdir 摘除——DelTree 会穿进目标目录删真实数据。
-  Attr := GetFileAttributes(Path);
-  Result := (Attr <> -1) and ((Attr and $400) <> 0);
-end;
-
-procedure RemoveJunction(const Path: String);
+procedure RemoveDirectoryLink(const Path: String);
 var
   ResultCode: Integer;
 begin
-  if IsJunction(Path) then
-    Exec(ExpandConstant('{cmd}'), '/C rmdir "' + Path + '"', '',
-      SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // junction 垫片用 rmdir 摘除：只删联接或空目录本身，绝不穿进目标删
+  // 真实数据（DelTree 会）；非空真实目录 rmdir 直接失败不动。Inno Pascal
+  // 无文件属性 API，rmdir 的天然语义即判别器。
+  Exec(ExpandConstant('{cmd}'), '/C rmdir "' + Path + '"', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -125,11 +117,10 @@ begin
     LegacyRoot := ExpandConstant('{localappdata}') + '\VideoToArticle';
     DataRoot := ExpandConstant('{localappdata}') + '\FoilPage';
     // junction 垫片无条件摘除（它只是指向新根的链接，1.3.8 迁移的回滚垫
-    // 物，程序已卸载即失去意义）；rmdir 只删链接本身。
-    RemoveJunction(LegacyRoot);
+    // 物，程序已卸载即失去意义）；rmdir 对非空真实旧数据目录无操作。
+    RemoveDirectoryLink(LegacyRoot);
     if DeleteUserData then begin
-      if not IsJunction(LegacyRoot) then
-        DelTree(LegacyRoot, True, True, True);
+      DelTree(LegacyRoot, True, True, True);
       DelTree(DataRoot, True, True, True);
     end;
     // 转写崩溃残留的临时目录（run_engine 正常路径自清，异常退出时留下）。
