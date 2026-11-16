@@ -6,8 +6,8 @@
 
 | 相关代码库与服务 | 用途与状态 |
 | --- | --- |
-| [FoilPage-releases](https://github.com/Ansel-Poiesis/FoilPage-releases) | 旧版安装器、GPU 包、指南及历史入口，沿用独立 1.x 版本序列。历史二进制未通过本轮源码项目的完整许可与供应链审核。 |
-| Ansel-Poiesis/FoilPage（私有） | 源码公开前的开发历史、内部运行证据与独立运营的账户、计费等服务实现。当前客户端开发已迁至本公开仓库。 |
+| [FoilPage-releases](https://github.com/Ansel-Poiesis/FoilPage-releases) | 已停发存档：历史 1.x 安装器、GPU 包与指南。2026-11-16 起安装包随本仓库标签发布；存量 1.x 安装不会自动升级到 0.1.x，需按迁移公告手动安装。 |
+| Ansel-Poiesis/FoilPage（私有） | 已于 2026-11-16 停更冻结：保留源码公开前的开发历史与 payment_service（账户/计费服务工程，托管服务继续独立运行）。客户端开发只在本仓库进行。 |
 | [FoilPage 官网](https://foilpage.early-snipe-7202.chatgpt.site) | 产品介绍、旧安装版入口与浏览器工作区，其网页及账户/媒体代理代码使用独立发布流程。 |
 
 上述相关代码库均未编译进本仓库 v0.1.0 源码归档。官方托管服务是外部运行依赖；源码授权不授予运营资源、账户额度或商标权。
