@@ -103,7 +103,6 @@ Path({str(report)!r}).write_text(json.dumps(result,ensure_ascii=False),encoding=
 
 def test_crash_restarts_back_off_then_give_up():
     """先生 2026-11-16：守护重启必须退避且有上限，不能无限进程风暴。"""
-    import threading
     import time
     from app.process_manager import WorkerProcessManager
 
