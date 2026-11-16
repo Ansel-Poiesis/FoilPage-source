@@ -135,9 +135,9 @@ begin
       DelTree(ExpandConstant('{app}'), True, True, True);
     // 完整卸载后重装会落在默认根 Programs\FoilPage；此时旧根
     // Programs\VideoToArticle（若与 {app} 不同根）成为跨根孤儿——只要
-    // 里面还有本产品骨架（_internalpp），一并清掉，不误删无关目录。
+    // 里面还有本产品骨架（_internal\app），一并清掉，不误删无关目录。
     if (LowerCase(ExpandConstant('{app}')) <> LowerCase(LegacyRoot))
-      and DirExists(LegacyRoot + '\_internalpp') then
+      and DirExists(LegacyRoot + '\_internal\app') then
       DelTree(LegacyRoot, True, True, True);
     // 转写崩溃残留的临时目录（run_engine 正常路径自清，异常退出时留下）。
     TempDir := GetEnv('TEMP');

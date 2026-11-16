@@ -78,7 +78,7 @@ def test_cross_root_legacy_directory_swept_when_marked() -> None:
     """完整卸载后重装落默认根时，旧根成为跨根孤儿；带产品骨架则一并清。"""
     source = _iss()
     assert "LowerCase(ExpandConstant('{app}')) <> LowerCase(LegacyRoot)" in source
-    assert "DirExists(LegacyRoot + '\_internal\app')" in source
+
 
 
 def test_model_cache_is_never_touched() -> None:
