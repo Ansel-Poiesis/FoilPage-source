@@ -67,6 +67,13 @@ def test_junction_shim_removed_even_when_data_is_kept() -> None:
     assert 0 < junction_pos < guard_pos, "junction 摘除应先于且独立于数据删除分支"
 
 
+def test_install_root_swept_after_logged_file_removal() -> None:
+    """运行期落进 {app} 的散件不在卸载日志里，必须兜底清空安装根。"""
+    source = _iss()
+    assert "DelTree(ExpandConstant('{app}'), True, True, True)" in source
+    assert "if DirExists(ExpandConstant('{app}')) then" in source
+
+
 def test_model_cache_is_never_touched() -> None:
     source = _iss()
     assert "huggingface" in source, "卸载文案必须说明模型缓存位置（不自动删除）"
