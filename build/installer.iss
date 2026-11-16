@@ -1,13 +1,13 @@
 ; Copyright (c) 2026 Ansel
 ; SPDX-License-Identifier: MPL-2.0
-#define AppVersion "0.1.3"
+#define AppVersion "0.1.4"
 #define AppExeName "FoilPage-Desktop.exe"
 
 [Setup]
 AppId={{5F2EE512-3A43-4E61-94D7-F77B76B8D245}
 AppName=FoilPage
 AppVersion={#AppVersion}
-VersionInfoVersion=0.1.3.0
+VersionInfoVersion=0.1.4.0
 AppPublisher=Ansel
 MinVersion=10.0.17763
 DefaultDirName={localappdata}\Programs\FoilPage
