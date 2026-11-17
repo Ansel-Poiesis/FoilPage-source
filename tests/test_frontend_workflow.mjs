@@ -117,6 +117,43 @@ test('video links include archived text and choose the latest matching transcrip
   } finally { await page.close(); }
 });
 
+test('linked video remains visible and focused in a long catalog after columns resize', async () => {
+  const page = await open();
+  try {
+    await page.evaluate(() => {
+      __workflowVideos = Array.from({length: 90}, (_, index) => ({
+        id: 'catalog-' + index, title: '合成视频 ' + index, available: true,
+        task_ids: index === 80 ? ['job:one'] : [], source_path: 'C:\\fixture\\' + index + '.mp4',
+      }));
+    });
+    await library(page);
+    await page.locator('#readerVideoLink').click();
+    const target = page.locator('.video-card.is-located[data-video-id=catalog-80]');
+    await target.waitFor();
+    await page.waitForFunction(() => {
+      const card = document.querySelector('.video-card.is-located');
+      const rect = card?.getBoundingClientRect(), grid = document.querySelector('#videoGrid')?.getBoundingClientRect();
+      return rect && grid && rect.top < grid.bottom && rect.bottom > grid.top;
+    });
+    await page.setViewportSize({width: 960, height: 800});
+    await page.waitForFunction(() => document.querySelectorAll('#videoGrid .video-col').length === 2);
+    assert(await target.evaluate(card => {
+      const rect = card.getBoundingClientRect(), grid = card.closest('#videoGrid').getBoundingClientRect();
+      return rect.top < grid.bottom && rect.bottom > grid.top;
+    }), 'the linked video must stay in the visible scroll area after reflow');
+    assert.equal(await page.evaluate(() => document.activeElement?.closest('.video-card')?.dataset.videoId), 'catalog-80');
+    await page.setViewportSize({width: 1280, height: 800});
+    await page.waitForFunction(() => document.querySelectorAll('#videoGrid .video-col').length === 3);
+    assert(await target.evaluate(card => {
+      const rect = card.getBoundingClientRect(), grid = card.closest('#videoGrid').getBoundingClientRect();
+      return rect.top < grid.bottom && rect.bottom > grid.top;
+    }), 'expanding the window must also preserve the linked video');
+    assert(await page.locator('#videoGrid .video-col').evaluateAll(columns => columns.every(column => column.childElementCount > 0)));
+    assert.equal(await page.evaluate(() => document.activeElement?.closest('.video-card')?.dataset.videoId), 'catalog-80');
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
 test('cross-page navigation keeps its target and history through dirty-draft cancellation', async () => {
   const page = await open();
   try {

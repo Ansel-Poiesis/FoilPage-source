@@ -356,24 +356,38 @@ window.Videos = (() => {
     lastGridWidth = inner;
     const count = Math.max(1, Math.min(cardsList.length, Math.floor((inner + gap) / (minCol + gap))));
     const colWidth = (inner - (count - 1) * gap) / count;
+    const previousColumns = [...grid.children].filter(node => node.classList.contains('video-col'));
+    // 等列数缩放由 flex 调整宽度，保留原节点和浏览器的滚动锚点。
+    if (previousColumns.length === count && cardsList.every(card => previousColumns.includes(card.parentElement))) return;
+    const focused = grid.contains(document.activeElement) ? document.activeElement : null;
+    const focusedCard = focused?.closest('.video-card');
+    const gridTop = grid.getBoundingClientRect().top, gridBottom = gridTop + grid.clientHeight;
+    let anchor = null, anchorOffset = 0, nearest = Infinity;
+    for (const card of cardsList) {
+      if (!grid.contains(card)) continue;
+      const rect = card.getBoundingClientRect();
+      if (rect.bottom <= gridTop || rect.top >= gridBottom) continue;
+      const distance = card === focusedCard ? -1 : Math.abs(rect.top - gridTop);
+      if (distance < nearest) { anchor = card; anchorOffset = rect.top - gridTop; nearest = distance; }
+    }
+    const scrollTop = grid.scrollTop;
     const columns = Array.from({length: count}, () => document.createElement("div"));
     columns.forEach(column => column.className = "video-col");
-    const columnOf = new Map(columns.map((column, index) => [column, index]));
     const heights = new Array(count).fill(0);
     cardsList.forEach(card => {
-      // 列归属尽量保持（图片后载/窗口微调不挪卡，悬停与滚动位置稳定），
-      // 只有新卡或所属列被裁掉时才投给最矮列。
-      let index = columnOf.get(card.parentElement);
-      if (index === undefined) {
-        index = 0;
-        for (let i = 1; i < count; i++) if (heights[i] < heights[index]) index = i;
-      }
+      // 首次分列或列数改变时按封面高度分配，等列数缩放已在上方返回。
+      let index = 0;
+      for (let i = 1; i < count; i++) if (heights[i] < heights[index]) index = i;
       columns[index].append(card);
       const image = card.querySelector(".video-cover img");
       const ratio = image?.naturalWidth && image?.naturalHeight ? image.naturalHeight / image.naturalWidth : 9 / 16;
       heights[index] += colWidth * ratio + 24;
     });
     grid.replaceChildren(...columns);
+    // 换列时恢复可见卡片的相对位置，避免整列替换把长列表送回顶部。
+    if (anchor) grid.scrollTop += anchor.getBoundingClientRect().top - grid.getBoundingClientRect().top - anchorOffset;
+    else grid.scrollTop = scrollTop;
+    focused?.focus({preventScroll: true});
   }
   // ResizeObserver 初次 observe 必回调：只能在渲染时挂一次且按宽度变化
   // 门禁，否则初次回调就会挪卡丢焦点。
