@@ -770,10 +770,18 @@ class QueueStore:
                 self._conn.execute("BEGIN IMMEDIATE")
                 row = self._conn.execute(
                     """
-                    SELECT id FROM jobs
-                     WHERE status='queued'
-                       AND cancel_requested=0
-                       AND attempts < max_attempts
+                    WITH queued AS (
+                        SELECT id, attempts, max_attempts, created_at,
+                               CASE WHEN json_valid(error) THEN COALESCE(
+                                   json_extract(error, '$.code')='worker_shutdown_requeued'
+                                   AND COALESCE(json_extract(error, '$.attempt_refunded'), 0)=0,
+                                   0
+                               ) ELSE 0 END AS refund_shutdown
+                          FROM jobs
+                         WHERE status='queued' AND cancel_requested=0
+                    )
+                    SELECT id, attempts, refund_shutdown FROM queued
+                     WHERE attempts - refund_shutdown < max_attempts
                      ORDER BY created_at, id
                      LIMIT 1
                     """
@@ -787,11 +795,13 @@ class QueueStore:
                     UPDATE jobs
                        SET status='running', worker_id=:worker_id,
                            claimed_at=:now, heartbeat_at=:now,
-                           attempts=attempts + 1, updated_at=:now, error=NULL,
+                           attempts=:attempts, updated_at=:now, error=NULL,
                            progress=0
                      WHERE id=:id AND status='queued'
                     """,
-                    {"worker_id": worker_id, "now": now, "id": row["id"]},
+                    {"worker_id": worker_id, "now": now, "id": row["id"],
+                     # Older shutdown rows still include the interrupted claim.
+                     "attempts": max(0, row["attempts"] - row["refund_shutdown"]) + 1},
                 )
                 if cursor.rowcount != 1:
                     raise QueueStateError("原子领取失败")
@@ -934,30 +944,31 @@ class QueueStore:
                 recovered.append(row["id"])
         return recovered
 
-    def requeue_interrupted(self, job_id: str) -> bool:
-        """先生 2026-11-16：退出中断的 running 任务直接置回 queued。
+    def requeue_interrupted(self, job_id: str, *, worker_id: str | None = None) -> bool:
+        """Return an interrupted claim and restore its retry allowance.
 
-        与 recover_stale_jobs 的崩溃回收同语义（不吃尝试次数、清租约字
-        段、进度归零），但由 Worker 在协作取消点主动调用——用户取消仍走
-        cancelled 终态，二者以 cancel_requested 区分。行不存在或已非
-        running 时静默跳过并返回 False。
+        Lease ownership and user-cancel flags guard the state transition.
+        The refund marker also distinguishes these rows from older shutdowns.
         """
         with self._write_transaction():
             cursor = self._conn.execute(
                 """
                 UPDATE jobs
-                   SET status='queued', progress=0,
+                   SET status='queued', progress=0, attempts=MAX(0, attempts - 1),
                        error=:error, updated_at=:now,
                        worker_id=NULL, claimed_at=NULL, heartbeat_at=NULL
                  WHERE id=:id AND status='running' AND cancel_requested=0
+                   AND (:worker_id IS NULL OR worker_id=:worker_id)
                 """,
                 {
                     "error": _error_json({
                         "code": "worker_shutdown_requeued",
                         "message": "应用退出中断，任务已重新排队",
+                        "attempt_refunded": True,
                     }),
                     "now": _now(),
                     "id": job_id,
+                    "worker_id": worker_id,
                 },
             )
             return cursor.rowcount > 0

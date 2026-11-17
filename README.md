@@ -8,7 +8,7 @@
 
 视频转写、文本整理与本地内容管理。Windows 桌面应用，配套浏览器扩展和 Agent CLI / MCP。
 
-源码版本 **0.1.1**，自有源码采用 **MPL-2.0**。
+源码版本 **0.1.5**，自有源码采用 **MPL-2.0**。
 
 ## 功能
 
@@ -24,7 +24,7 @@
 ```powershell
 git clone https://github.com/Ansel-Poiesis/FoilPage-source.git
 cd FoilPage-source
-git checkout v0.1.3
+git checkout v0.1.5
 ```
 
 v0.1.3 起本仓库同时发布源码归档与对应的 Windows 安装器、GPU 包（同一标签，版本一致）。0.1.2 及之前为纯源码归档；历史 1.x 安装版见 [FoilPage-releases](https://github.com/Ansel-Poiesis/FoilPage-releases)（已停发，仅存档）。

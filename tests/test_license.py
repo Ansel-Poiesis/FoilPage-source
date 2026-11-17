@@ -141,6 +141,42 @@ def test_eddsa_license_expiry_and_device_binding() -> None:
     assert verify_license(bound, signing_key=pub_b64, device_id="device-a")["device_id"] == "device-a"
 
 
+def test_repeated_eddsa_checks_reuse_signature_and_recheck_current_claims(monkeypatch):
+    import base64
+    import json
+    from unittest.mock import Mock
+
+    from engine import ed25519
+    from engine import license as license_module
+
+    seed = ed25519.generate_seed()
+    public_key = base64.b64encode(ed25519.public_key(seed)).decode("ascii")
+    token = sign_license({"sub": "cache-fixture", "device_id": "device-a", "exp": 2000,
+                          "entitlements": ["transcribe"]},
+                         signing_key=base64.b64encode(seed).decode("ascii"), alg="EdDSA")
+    verifier = Mock(wraps=ed25519.verify)
+    monkeypatch.setattr(ed25519, "verify", verifier)
+
+    first = verify_license(token, signing_key=public_key, device_id="device-a", now=1000)
+    first["entitlements"].clear()
+    assert verify_license(token, signing_key=public_key, device_id="device-a", now=1001)["entitlements"] == ["transcribe"]
+    with pytest.raises(LicenseError, match="已过期"):
+        verify_license(token, signing_key=public_key, device_id="device-a", now=2000)
+    with pytest.raises(LicenseError, match="当前设备"):
+        verify_license(token, signing_key=public_key, device_id="device-b", now=1000)
+    assert verifier.call_count == 1
+    assert license_module._verify_eddsa_signature.cache_info().maxsize == 64
+
+    wrong_key = base64.b64encode(ed25519.public_key(ed25519.generate_seed())).decode("ascii")
+    with pytest.raises(LicenseError, match="签名无效"):
+        verify_license(token, signing_key=wrong_key, now=1000)
+    head, body, signature = token.split(".")
+    tampered_body = base64.urlsafe_b64encode(json.dumps({"sub": "forged", "exp": 9999}).encode()).rstrip(b"=").decode("ascii")
+    with pytest.raises(LicenseError, match="签名无效"):
+        verify_license(f"{head}.{tampered_body}.{signature}", signing_key=public_key, now=1000)
+
+
+
 def test_production_status_rejects_expired_or_forged_local_entitlements():
     from engine.subscription import status
     state = status({"subscription_plan":"advanced", "subscription_active":True,

@@ -85,3 +85,10 @@ def test_model_cache_is_never_touched() -> None:
     source = _iss()
     assert "huggingface" in source, "卸载文案必须说明模型缓存位置（不自动删除）"
     assert "DelTree" not in source.split("huggingface", 1)[1].split("\n", 1)[0]
+
+
+def test_vm_certification_uses_the_current_worker_binary() -> None:
+    root = ISS.parents[1]
+    certification = (root / "build/vm-certify.ps1").read_text(encoding="utf-8")
+    assert "worker\\FoilPage-Worker.exe" in certification
+    assert "worker\\VideoToArticle-Worker.exe" not in certification

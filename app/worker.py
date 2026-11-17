@@ -24,6 +24,7 @@ import signal
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Mapping
 
@@ -123,7 +124,9 @@ class Worker:
         heartbeat.start()
         last_progress = 0.0
         agent_settings = copy.deepcopy(self.settings_store.load() if self.settings_store else self.agent_settings)
-        agent_settings["_agent_operation_id"] = f"{job['id']}:{job.get('attempts', 1)}"
+        # A resumed run needs a fresh hosted operation even when its retry
+        # allowance was restored after a graceful shutdown.
+        agent_settings["_agent_operation_id"] = uuid.uuid4().hex
         # TASK-8.24：重新转写可按单任务覆盖 Agent 整理开关（None=沿用全局）。
         body_override = job.get("body_enabled_override")
         if isinstance(body_override, bool):
@@ -278,7 +281,7 @@ class Worker:
                 e.code == "cancelled"
                 and self._stop
                 and not self.store.is_cancel_requested(job["id"])
-                and self.store.requeue_interrupted(job["id"])
+                and self.store.requeue_interrupted(job["id"], worker_id=self.worker_id)
             ):
                 print(f"[worker] 退出中断，任务返回队列 {job['id']}", flush=True)
                 return

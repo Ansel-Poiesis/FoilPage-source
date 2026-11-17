@@ -20,6 +20,7 @@ import json
 import math
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any, Mapping
 
 from engine import ed25519
@@ -32,6 +33,18 @@ SUPPORTED_ALGS = (LOCAL_ALG, PRODUCTION_ALG)
 
 class LicenseError(RuntimeError):
     pass
+
+
+@lru_cache(maxsize=64)
+def _verify_eddsa_signature(public_key: bytes, message: bytes, signature: bytes) -> None:
+    """Reuse successful immutable signature checks across frequent local polls.
+
+    Claims are decoded and checked on every verify_license call. Expiry, device,
+    account and session decisions therefore continue to use their current values.
+    Successful signature checks enter the bounded cache. Invalid ones raise.
+    """
+    if not ed25519.verify(public_key, message, signature):
+        raise LicenseError("许可证签名无效")
 
 
 def _b64encode(raw: bytes) -> str:
@@ -133,8 +146,7 @@ def verify_license(
             public = _b64decode(str(signing_key))
         except (ValueError, TypeError) as exc:
             raise LicenseError("EdDSA 公钥不是合法 base64") from exc
-        if not ed25519.verify(public, signing_input, actual):
-            raise LicenseError("许可证签名无效")
+        _verify_eddsa_signature(public, signing_input, actual)
     exp = payload.get("exp")
     if expected_alg == PRODUCTION_ALG and exp is None:
         raise LicenseError("生产许可证缺少过期时间")

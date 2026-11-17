@@ -15,6 +15,129 @@ async function open(){const page=await browser.newPage({viewport:{width:1280,hei
   await page.addInitScript(()=>{const original=__MOCK__.get_settings;window.__externalReads=[];window.__externalSnapshot=null;__MOCK__.get_settings=()=>{__externalReads.push('read');return __externalSnapshot?{...original(),...__externalSnapshot}:original();};});
   await page.goto(pathToFileURL(path.join(root,'app/webview_ui/index.html')).href);await page.waitForSelector('.nav-row[aria-current=page]');await page.locator('[data-page=settings]').click();await page.locator('.sitem[data-section=agent]').click();return page;}
 async function push(page,revision,changes={}){await page.evaluate(({revision,changes})=>{__externalSnapshot={agent_settings_revision:revision,...changes};window.__onState({agent_settings_revision:revision});},{revision,changes});await page.waitForFunction(revision=>AppState.settings.agent_settings_revision===revision,revision);}
+
+async function prepareProviderSettings(page) {
+  await page.evaluate(() => {
+    Object.assign(AppState.settings, __MOCK__.save_settings({
+      agent_provider: 'mimo', agent_base_url: 'https://api.xiaomimimo.com/v1',
+      agent_api_key: 'synthetic-old-key',
+    }));
+    const original = __MOCK__.save_settings;
+    __MOCK__.save_settings = changes => {
+      const previous = __MOCK__.get_settings();
+      const changedProvider = Object.hasOwn(changes, 'agent_provider') && changes.agent_provider !== previous.agent_provider;
+      const changedEndpoint = Object.hasOwn(changes, 'agent_base_url') && changes.agent_base_url !== previous.agent_base_url;
+      const cleared = (changedProvider || changedEndpoint) && !changes.agent_api_key;
+      const saved = original(cleared ? {...changes, agent_api_key: ''} : changes);
+      return {...saved, agent_key_cleared: cleared};
+    };
+    Settings.render();
+    document.querySelectorAll('#settingsPane details').forEach(node => { node.open = true; });
+  });
+}
+
+test('hosted catalog preserves every multiplier and updates the selected cost hint', async () => {
+  const page = await open();
+  try {
+    await page.evaluate(async () => {
+      __MOCK__.get_subscription_status = () => ({hosted_agent_ready: true, hosted_agent_models: [
+        {model: 'qwen-turbo', cost_multiplier: 0.5},
+        {model: 'qwen-plus', label: '忠实整理', cost_multiplier: 1},
+        {model: 'deepseek-flash', cost_multiplier: 3},
+        {model: 'qwen-max', cost_multiplier: 5},
+      ]});
+      await Settings.save({agent_billing_mode: 'hosted', agent_hosted_model: 'qwen-max'}, false);
+      Settings.render();
+    });
+    const model = page.getByRole('combobox', {name: '托管模型', exact: true});
+    await model.locator('option[value="qwen-max"]').waitFor({state: 'attached'});
+    assert.deepEqual(await model.locator('option').allTextContents(), [
+      '默认（服务端推荐）', 'qwen-turbo（0.5 倍积分）', '忠实整理（基础积分）',
+      'deepseek-flash（3 倍积分）', 'qwen-max（5 倍积分）',
+    ]);
+    const row = model.locator('..').locator('..');
+    assert.match(await row.innerText(), /每次整理消耗 5 倍积分/);
+    await model.selectOption('qwen-turbo');
+    await page.waitForFunction(() => AppState.settings.agent_hosted_model === 'qwen-turbo');
+    assert.match(await row.innerText(), /每次整理消耗 0\.5 倍积分/);
+    await page.setViewportSize({width: 560, height: 500});
+    await page.evaluate(() => { AppState.settings.font_scale = 1.3; applyFontScale(); });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
+test('provider changes synchronize the cleared key into state and the password control', async () => {
+  const page = await open();
+  try {
+    await prepareProviderSettings(page);
+    await page.getByRole('combobox', {name: '服务商', exact: true}).selectOption('deepseek');
+    await page.waitForFunction(() => AppState.settings.agent_provider === 'deepseek');
+    assert.equal(await page.evaluate(() => AppState.settings.agent_api_key), '');
+    assert.equal(await page.locator('[data-tour="agent-key"]').inputValue(), '');
+    assert.equal(await page.evaluate(() => Object.hasOwn(AppState.settings, 'agent_key_cleared')), false);
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
+test('manual endpoint changes clear the stale key control and explain the required action', async () => {
+  const page = await open();
+  try {
+    await prepareProviderSettings(page);
+    const endpoint = page.getByRole('textbox', {name: '接口地址', exact: true});
+    await endpoint.fill('https://new.example.invalid/v1');
+    await endpoint.press('Enter');
+    await page.waitForFunction(() => AppState.settings.agent_base_url === 'https://new.example.invalid/v1');
+    assert.equal(await page.evaluate(() => AppState.settings.agent_api_key), '');
+    assert.equal(await page.locator('[data-tour="agent-key"]').inputValue(), '');
+    assert.match(await page.locator('.toast').innerText(), /API Key.*清空.*重新填写/);
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
+test('a queued new key is preserved across the preceding endpoint-clear response', async () => {
+  const page = await open();
+  try {
+    await prepareProviderSettings(page);
+    await page.evaluate(() => {
+      window.__endpointSave = Settings.save({agent_base_url: 'https://new.example.invalid/v1'}, false);
+      window.__newKeySave = Settings.save({agent_api_key: 'synthetic-new-key'}, false);
+    });
+    await page.evaluate(() => Promise.all([__endpointSave, __newKeySave]));
+    assert.equal(await page.evaluate(() => AppState.settings.agent_api_key), 'synthetic-new-key');
+    assert.equal(await page.evaluate(() => __MOCK__.get_settings().agent_api_key), 'synthetic-new-key');
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
+test('an unsaved new key survives endpoint confirmation and can be submitted afterwards', async () => {
+  const page = await open();
+  try {
+    await prepareProviderSettings(page);
+    await page.evaluate(() => {
+      const original = __MOCK__.save_settings;
+      __MOCK__.save_settings = changes => {
+        const saved = original(changes);
+        return changes.agent_base_url
+          ? new Promise(resolve => { window.__confirmEndpoint = () => resolve(saved); })
+          : saved;
+      };
+    });
+    const endpoint = page.getByRole('textbox', {name: '接口地址', exact: true});
+    await endpoint.fill('https://new.example.invalid/v1');
+    await endpoint.press('Enter');
+    await page.waitForFunction(() => typeof __confirmEndpoint === 'function');
+    const key = page.locator('[data-tour="agent-key"]');
+    await key.fill('synthetic-draft-key');
+    await page.evaluate(() => __confirmEndpoint());
+    await page.waitForFunction(() => AppState.settings.agent_api_key === '');
+    assert.equal(await key.inputValue(), 'synthetic-draft-key');
+    await key.press('Enter');
+    await page.waitForFunction(() => AppState.settings.agent_api_key === 'synthetic-draft-key');
+    assert.equal(await page.evaluate(() => __MOCK__.get_settings().agent_api_key), 'synthetic-draft-key');
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
 test('same or malformed revision does not read settings, while a changed revision updates clean controls once',async()=>{
   const page=await open();try{const baseline=await page.evaluate(()=>__externalReads.length);await page.evaluate(initial=>{__onState({agent_settings_revision:initial});__onState({agent_settings_revision:'x'});},initial);assert.equal(await page.evaluate(()=>__externalReads.length),baseline);
     await push(page,next,{agent_model:'agent-new-model'});assert.equal(await page.getByRole('textbox',{name:'模型',exact:true}).inputValue(),'agent-new-model');

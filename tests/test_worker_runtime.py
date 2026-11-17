@@ -443,7 +443,7 @@ def test_worker_stop_signal_requeues_running_job_without_burning_attempts() -> N
         job = store.get_job(job_id)
         assert job is not None
         assert job["status"] == "queued", job
-        assert job["attempts"] == attempts_before, job
+        assert job["attempts"] == attempts_before - 1, job
         assert not job["worker_id"], job
     finally:
         _cleanup(store, db_path)
@@ -466,6 +466,98 @@ def test_requeue_interrupted_only_touches_running_rows() -> None:
         job = store.get_job(running_id)
         assert job["status"] == "queued"
         assert (job.get("error") or {}).get("code") == "worker_shutdown_requeued"
+    finally:
+        _cleanup(store, db_path)
+
+
+@pytest.mark.parametrize("max_attempts", [1, 3])
+def test_repeated_shutdowns_preserve_the_transient_failure_budget(max_attempts) -> None:
+    store, db_path = _new_store()
+    output = tempfile.mkdtemp(prefix="worker_shutdown_budget_")
+    try:
+        job_id = _enqueue(store, "C:/media/interrupted.wav", output, max_attempts=max_attempts)
+        settings = grant_account({}, Path(db_path).parent)
+        for _ in range(2):
+            instance = worker.Worker(store, worker_id="shutdown-worker", agent_settings=settings)
+
+            def stop_engine(*_args, **_kwargs):
+                instance._stop = True
+                raise EngineError("cancelled", "应用退出")
+
+            with mock.patch.object(run_engine, "run", side_effect=stop_engine):
+                assert instance.step()
+            assert store.get_job(job_id)["status"] == "queued"
+            assert store.get_job(job_id)["attempts"] == 0
+
+        with mock.patch.object(run_engine, "run", side_effect=EngineError("model_load_failed", "temporary")):
+            assert worker.Worker(store, worker_id="resumed-worker", agent_settings=settings).step()
+        result = store.get_job(job_id)
+        assert result["attempts"] == 1
+        assert result["status"] == ("failed" if max_attempts == 1 else "retryable")
+    finally:
+        _cleanup(store, db_path)
+
+
+def test_shutdown_requeue_respects_lease_owner_and_user_cancel() -> None:
+    store, db_path = _new_store()
+    output = tempfile.mkdtemp(prefix="worker_shutdown_owner_")
+    try:
+        job_id = _enqueue(store, "C:/media/owned.wav", output)
+        store.claim_next("current-worker")
+        assert store.requeue_interrupted(job_id, worker_id="former-worker") is False
+        assert store.get_job(job_id)["attempts"] == 1
+        store.request_cancel(job_id)
+        assert store.requeue_interrupted(job_id, worker_id="current-worker") is False
+        assert store.get_job(job_id)["cancel_requested"] is True
+    finally:
+        _cleanup(store, db_path)
+
+
+def test_resumed_ai_stages_use_fresh_operations_after_attempt_refunds() -> None:
+    store, db_path = _new_store()
+    output = tempfile.mkdtemp(prefix="worker_shutdown_operations_")
+    source = "C:/media/ai-resume.wav"
+    operations = []
+    try:
+        job_id = _enqueue(store, source, output)
+        settings = grant_account({"agent_enabled": True, "title_optimization_enabled": True}, Path(db_path).parent)
+
+        def translate(manifest, effective_settings, **_kwargs):
+            operations.append(effective_settings["_agent_operation_id"])
+            return manifest
+
+        for _ in range(2):
+            instance = worker.Worker(store, worker_id="resumed-ai-worker", agent_settings=settings)
+
+            def stop_title(*_args, **_kwargs):
+                instance._stop = True
+                raise EngineError("cancelled", "应用退出")
+
+            with mock.patch.object(run_engine, "run", return_value=_manifest(job_id, source, output)), \
+                    mock.patch("app.agent_service.apply_agent_translation", side_effect=translate), \
+                    mock.patch("app.agent_service.apply_title_optimization", side_effect=stop_title):
+                assert instance.step()
+            assert store.get_job(job_id)["status"] == "queued"
+            assert store.get_job(job_id)["attempts"] == 0
+        assert len(operations) == 2 and len(set(operations)) == 2
+    finally:
+        _cleanup(store, db_path)
+
+
+def test_legacy_exhausted_shutdown_row_can_be_claimed_and_refunded_once() -> None:
+    store, db_path = _new_store()
+    output = tempfile.mkdtemp(prefix="worker_legacy_shutdown_")
+    try:
+        job_id = _enqueue(store, "C:/media/legacy.wav", output, max_attempts=3)
+        with store._conn:
+            store._conn.execute("UPDATE jobs SET attempts=3,error=? WHERE id=?",
+                                (json.dumps({"code": "worker_shutdown_requeued"}), job_id))
+        claimed = store.claim_next("upgraded-worker")
+        assert claimed is not None and claimed["id"] == job_id
+        assert claimed["attempts"] == 3
+        assert store.requeue_interrupted(job_id, worker_id="upgraded-worker")
+        assert store.get_job(job_id)["attempts"] == 2
+        assert store.claim_next("upgraded-worker")["attempts"] == 3
     finally:
         _cleanup(store, db_path)
 

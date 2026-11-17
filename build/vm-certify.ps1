@@ -45,7 +45,7 @@ if ($install.ExitCode -ne 0) { throw "安装失败，退出码 $($install.ExitCo
 
 $appDir = Join-Path $env:LOCALAPPDATA 'Programs\FoilPage'
 $desktop = Join-Path $appDir 'FoilPage-Desktop.exe'
-$worker = Join-Path $appDir 'worker\VideoToArticle-Worker.exe'
+$worker = Join-Path $appDir 'worker\FoilPage-Worker.exe'
 foreach ($required in ($desktop, $worker)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "安装文件缺失: $required"

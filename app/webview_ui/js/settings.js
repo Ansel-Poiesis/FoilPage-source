@@ -150,6 +150,9 @@ window.Settings = (() => {
   function save(changes, feedback) {
     const revision = ++saveRevision, patch = {...changes}, origin = AppState.currentView, owner = section;
     Object.keys(patch).forEach(key => fieldRevisions.set(key, revision));
+    if (Object.hasOwn(patch, "agent_provider") || Object.hasOwn(patch, "agent_base_url")) {
+      if (!Object.hasOwn(patch, "agent_api_key")) fieldRevisions.set("agent_api_key", revision);
+    }
     const visible = () => AppState.currentView === origin && (origin !== "settings" || section === owner);
     const request = saveQueue.then(async () => {
       try {
@@ -158,8 +161,11 @@ window.Settings = (() => {
         const previousServer = s().subscription_server_url, previousKey = s().subscription_license_public_key;
         const settings = await AppApi.saveSettings(patch);
         if (!settings || settings.ok === false || Object.keys(patch).some(key => !Object.hasOwn(settings, key))) throw new Error(settings?.error || "未收到保存确认，请重试");
+        const keyCleared = settings.agent_key_cleared === true;
+        if (keyCleared && settings.agent_api_key !== "") throw new Error("未收到密钥清空确认，请重试");
         const confirmed = {};
         Object.keys(patch).forEach(key => { if (fieldRevisions.get(key) === revision) confirmed[key] = settings[key]; });
+        if (keyCleared && fieldRevisions.get("agent_api_key") === revision) confirmed.agent_api_key = "";
         const sameAccount = context() === accountContext && s().account_access === access;
         AppState.settings = {...AppState.settings, ...confirmed};
         if(typeof settings.agent_settings_revision==='string' && /^[a-f0-9]{64}$/.test(settings.agent_settings_revision))AppState.settings.agent_settings_revision=settings.agent_settings_revision;
@@ -172,8 +178,11 @@ window.Settings = (() => {
         applyTheme();
         if (typeof applyFontScale === "function") applyFontScale();
         if (typeof applyMotion === "function") applyMotion();
-        if (feedback !== false && visible()) toast("设置已保存");
-        return AppState.settings;
+        if (feedback !== false && visible()) {
+          if (keyCleared) toast("旧 API Key 已清空，请重新填写", "error");
+          else toast("设置已保存");
+        }
+        return keyCleared ? {...AppState.settings, agent_key_cleared: true} : AppState.settings;
       } catch (e) {
         if (visible()) toast("保存失败：" + (e?.message || "请重试"), "error");
         applyTheme(); if (typeof applyFontScale === "function") applyFontScale();
@@ -582,9 +591,13 @@ window.Settings = (() => {
       // 托管模型选择（1.3.12；2026-11-16 目录驱动）：选项、标签与积分倍率
       // 全部来自服务端 /v1/health 的已复核目录——服务端加档客户端零改动。
       // 目录不足两个模型或服务未就绪时保持禁用，避免选中不可用模型。
+      let hostedCatalog = [];
       const hostedModelSelect = selectEl(String(s().agent_hosted_model || ""), [
         { value: "", label: "默认（服务端推荐）" },
-      ], (v) => save({ agent_hosted_model: v }), "agent_hosted_model");
+      ], (v) => save({ agent_hosted_model: v }).then(settings => {
+        if (settings) updateHostedModelDescription();
+        return settings;
+      }), "agent_hosted_model");
       hostedModelSelect.disabled = true;
       const hostedModelRow = row("托管模型", "按积分计费的托管整理模型", hostedModelSelect);
       const hostedModelDesc = hostedModelRow.querySelector(".set-hint");
@@ -592,12 +605,18 @@ window.Settings = (() => {
         const n = Number(item?.cost_multiplier || 1);
         return n === 1 ? "基础积分" : `${n} 倍积分`;
       };
+      const updateHostedModelDescription = () => {
+        const selected = hostedCatalog.find(item => item.model === hostedModelSelect.value);
+        if (hostedModelDesc) hostedModelDesc.textContent = selected
+          ? `每次整理消耗 ${multiplierText(selected)}（每 2000 字符计 1 次基数）`
+          : "按积分计费的托管整理模型";
+      };
       const applyHostedModels = (models) => {
-        const catalog = Array.isArray(models)
-          ? models.filter(item => item && item.model).map(item => ({ model: String(item.model), label: String(item.label || ""), multiplier: item.cost_multiplier }))
+        hostedCatalog = Array.isArray(models)
+          ? models.filter(item => item && item.model).map(item => ({ model: String(item.model), label: String(item.label || ""), cost_multiplier: item.cost_multiplier }))
           : [];
-        const options = [{ value: "", label: catalog.length ? "默认（服务端推荐）" : "默认（服务端仅此模型）" }];
-        catalog.forEach(item => options.push({
+        const options = [{ value: "", label: hostedCatalog.length ? "默认（服务端推荐）" : "默认（服务端仅此模型）" }];
+        hostedCatalog.forEach(item => options.push({
           value: item.model,
           label: item.label ? `${item.label}（${multiplierText(item)}）` : `${item.model}（${multiplierText(item)}）`,
         }));
@@ -605,13 +624,10 @@ window.Settings = (() => {
           const op = document.createElement("option"); op.value = opt.value; op.textContent = opt.label; return op;
         }));
         const current = String(s().agent_hosted_model || "");
-        hostedModelSelect.value = catalog.some(item => item.model === current) ? current : "";
+        hostedModelSelect.value = hostedCatalog.some(item => item.model === current) ? current : "";
         hostedModelSelect.dataset.initialValue = hostedModelSelect.value;
-        hostedModelSelect.disabled = catalog.length < 2 || !relayReady;
-        const selected = catalog.find(item => item.model === hostedModelSelect.value);
-        if (hostedModelDesc) hostedModelDesc.textContent = selected
-          ? `每次整理消耗 ${multiplierText(selected)}（每 2000 字符计 1 次基数）`
-          : "按积分计费的托管整理模型";
+        hostedModelSelect.disabled = hostedCatalog.length < 2 || !relayReady;
+        updateHostedModelDescription();
       };
       applyHostedModels([]);
       const refresh = async (probe) => {
@@ -659,13 +675,12 @@ window.Settings = (() => {
           if (preset.base) patch.agent_base_url = preset.base;
           if (preset.model) patch.agent_model = preset.model;
         }
-        const hadKey = !!String(s().agent_api_key || "").trim();
-        return save(patch).then(settings => {
+        return save(patch, false).then(settings => {
           if (settings && AppState.currentView === "settings" && section === "agent") render();
-          if (settings && (settings.agent_key_cleared || hadKey)) {
-            toast("已切换服务商：接口与默认模型已带出，请重新填写 API Key", "error");
+          if (settings?.agent_key_cleared) {
+            toast("已切换服务商，旧 API Key 已清空，请重新填写", "error");
           } else if (settings) {
-            toast(`已应用${preset ? preset.label : ""}预设：接口与默认模型已带出`);
+            toast(v === "custom" ? "已切换为自定义服务商" : `已应用${preset ? preset.label : ""}预设，接口与默认模型已带出`);
           }
           return settings;
         });
@@ -673,7 +688,10 @@ window.Settings = (() => {
       "agent_provider"
     );
     g.appendChild(row("服务商", "切换预设自动填入接口与模型；MiMo/OpenAI 可读取视频帧字幕辅助纠错", provider));
-    const baseUrl = inputEl(s().agent_base_url || PROVIDER_PRESETS.mimo.base, (v) => save({ agent_base_url: v }));
+    const baseUrl = inputEl(s().agent_base_url || PROVIDER_PRESETS.mimo.base, (v) => save({ agent_base_url: v }).then(settings => {
+      if (settings?.agent_key_cleared && inSection("agent")) render();
+      return settings;
+    }));
     g.appendChild(row("接口地址", "", baseUrl));
     const agentModel = inputEl(s().agent_model || PROVIDER_PRESETS.mimo.model, (v) => save({ agent_model: v }));
     g.appendChild(row("模型", "", agentModel));
