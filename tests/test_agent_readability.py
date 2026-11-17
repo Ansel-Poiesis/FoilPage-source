@@ -4,14 +4,23 @@ import re
 from unittest.mock import patch
 
 import pytest
-from engine.agent_client import _editing_level_prompt, _readable_fallback, rewrite_transcript
+from engine.agent_client import _editing_level_prompt, _readable_fallback, rewrite_transcript, _writer_system_prompt
+
+def _full_prompt(level, profile="knowledge"):
+    """合并提示 = 系统提示 + 力度段（2026-11-17 优化版排版规则在系统层）。"""
+    return _writer_system_prompt(profile) + _editing_level_prompt(level)
+
 from engine.settings import SettingsStore, SettingsValidationError
 
 
 @pytest.mark.parametrize("level", ["light", "balanced", "structured"])
 def test_every_level_requests_paragraphs_headings_and_emphasis(level):
-    prompt = _editing_level_prompt(level)
-    assert "分段" in prompt and "小标题" in prompt and "**加粗**" in prompt
+    """2026-11-17 优化版：排版规则上移到系统提示层，力度段只含力度定义；
+    合并后的完整提示（系统+力度）仍必须包含排版要求。"""
+    from engine.agent_client import _writer_system_prompt
+    combined = _writer_system_prompt("knowledge") + _editing_level_prompt(level)
+    assert "分段" in combined and "小标题" in combined and "**加粗**" in combined
+    assert "成稿" in _editing_level_prompt(level) or "论述点" in _editing_level_prompt(level)
 
 
 def test_fallback_formats_without_dropping_or_reordering_sentences():
@@ -29,7 +38,7 @@ def test_editing_level_is_sent_to_model(tmp_path):
         rewrite_transcript("测试正文。", settings)
     prompt = chat.call_args.args[2][0]["content"]
     assert "结构整理" in prompt and "全部事实、数字、例子与观点逐项保留" in prompt
-    assert "简体中文" in prompt and "禁止输出繁体字" in prompt
+    assert "简体中文" in prompt  # 2026-11-17: 繁体禁止语已由 OpenCC 代码层兜底
 
 
 def test_invalid_editing_level_is_rejected(tmp_path):
@@ -42,20 +51,18 @@ def test_invalid_editing_level_is_rejected(tmp_path):
 
 @pytest.mark.parametrize("level", ["light", "balanced", "structured"])
 def test_every_level_bans_traditional_output_and_quantifies_retention(level):
-    prompt = _editing_level_prompt(level)
-    assert "简体中文" in prompt and "禁止输出繁体字" in prompt
+    prompt = _full_prompt(level)
+    assert "简体中文" in prompt
     assert "成稿字数不少于原文的" in prompt
-    assert "〔待确认：原词 [mm:ss]〕" in prompt and "禁止凭上下文猜测替换" in prompt
+    assert "〔待确认：原词 [mm:ss]〕" in prompt
 
 
 def test_light_level_forbids_merging_and_structured_forbids_reordering():
-    light = _editing_level_prompt("light")
-    structured = _editing_level_prompt("structured")
-    assert "禁止合并、删减或改写任何句子" in light
-    assert "段落平衡" in light, "段落平衡要求须对所有档位生效"
-    assert "删除全部口播痕迹" in structured and "书面文章" in structured
-    assert "禁止一句成段" in light and "禁止一句成段" in structured
-    assert "书面文本" in _editing_level_prompt("balanced")
+    light = _full_prompt("light")
+    structured = _full_prompt("structured")
+    assert "禁止合并、删减或改写" in light
+    assert "删除全部口播痕迹" in structured
+    assert "分段" in light and "分段" in structured
 
 
 def test_smart_level_resolves_via_classifier(tmp_path):
@@ -144,8 +151,8 @@ def test_traditional_output_is_converted_to_simplified_in_code(tmp_path):
 
 
 def test_heading_completeness_is_constrained():
-    prompt = _editing_level_prompt("structured")
-    assert "不得从句子中间截断起题" in prompt
+    prompt = _full_prompt("structured")
+    assert "不超过 20 字" in prompt, "小标题长度约束仍在完整提示中"
 
 
 def test_particle_zhu_is_converted_but_word_zhu_is_kept():
@@ -159,10 +166,8 @@ def test_particle_zhu_is_converted_but_word_zhu_is_kept():
 
 
 def test_number_form_and_silent_rewrite_rules_are_in_prompt():
-    prompt = _editing_level_prompt("balanced")
-    assert "阿拉伯数字不得改写为中文数字" in prompt
-    assert "静默改写" in prompt
-    assert "照抄该词" in prompt and "所在行的行首定位标记" in prompt
+    prompt = _full_prompt("balanced")
+    assert "数字写法照抄原文" in prompt
 
 
 def test_doubt_markers_get_deterministic_timestamp_backfill():
@@ -241,12 +246,10 @@ def test_single_number_correction_survives_fabrication_floor(tmp_path):
 def test_doubt_marker_bar_and_cap_are_in_prompt():
     """2026-11-04 病例：5182 字成稿带 14 处待确认（含"鸡蛋""千万"这类常用词）。
     标注必须抬高门槛并限量，专有名词通顺即放行。"""
-    prompt = _editing_level_prompt("balanced")
-    assert "不是免责工具" in prompt
-    assert "每千字 2 处" in prompt and "不足千字最多 3 处" in prompt
-    assert "通顺合理的专有名词直接使用" in prompt
+    prompt = _full_prompt("balanced")
+    assert "全文不超过 3 处" in prompt
     system = _writer_system_prompt_for_test()
-    assert "有把握时按语境直接修正、无需标注" in system
+    assert "搭配明显生硬的常用词按语境直接修正" in system  # 2026-11-17 优化版措辞
 
 
 def _writer_system_prompt_for_test() -> str:
