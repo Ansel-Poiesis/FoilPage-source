@@ -72,6 +72,8 @@
 
 0.1.5 本机应用位于 `C:/Users/mingc/AppData/Local/Programs/FoilPage`。本轮样式位于 [product.css](C:/Ansel_Work/B-软件开发/FoilPage-视频的二向箔/FoilPage-source/app/webview_ui/css/product.css)，对应检查位于 [test_video_actions.mjs](C:/Ansel_Work/B-软件开发/FoilPage-视频的二向箔/FoilPage-source/tests/test_video_actions.mjs)。视频定位补丁与本轮封面样式已经同步到安装资源；截图验收快照与本机 30 个 HTML/CSS/JS 资源逐文件 SHA256 一致。后两次视频补丁的回执在 `.ui-audit/task-5520/retry-install-20261118/` 与 `retry-cover-install-20261118/`，本轮样式备份及指纹在 `screenshot-css-install-20261118/`。
 
+上述 30 个资源的指纹比对发生在截图记录生成时。其后并行会话同步了侧栏与任务详情设计，更新四个资源；只读复查确认本轮封面规则及视频定位补丁仍在。截图集对本轮冻结版本收口，并行设计沿自身任务保留验收，不以旧快照覆盖其安装资源。
+
 ### 使用与状态
 
 截图集支持按页面、主题、尺寸和功能搜索，点击可查看原图。前端七项改进及本机资源同步完成，验收按先生本轮指定的截图方式收口。本轮没有发布安装包或推送公开发行。
