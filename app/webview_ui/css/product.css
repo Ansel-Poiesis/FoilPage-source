@@ -985,3 +985,7 @@ input.ctrl[aria-invalid="true"], .set-input[aria-invalid="true"] { border-color:
   #videoSearch { max-width:none; }
   .video-filters button { padding-inline:8px; }
 }
+
+@media (max-width:640px), (max-height:600px) {
+  .video-cover img { max-height:max(144px,calc(100dvh - 244px)); }
+}
