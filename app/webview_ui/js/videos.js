@@ -8,6 +8,8 @@ window.Videos = (() => {
   let scanTimer = null, scanGeneration = 0;
   const deleting = new Set();
   let currentItems = new Map();
+  let query = '', availability = 'all', savedScroll = 0, pendingContext = null;
+  let catalogLoaded = false;
   const playIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg>';
   function mediaUrl(value) {
     if (typeof value !== "string") return "";
@@ -177,6 +179,16 @@ window.Videos = (() => {
       {label:"打开所在位置",icon:'<path d="M3 7h7l2 2h9v10H3z"/><path d="M3 7V5h7l2 2"/>',disabled:item.available !== true,run:()=>openLocation(item)},
       {label:item.delete_label || "删除",icon:'<path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/>',disabled:item.deletable !== true || deleting.has(item.id),danger:true,run:()=>confirmDelete(item)},
     ];
+    const taskIds = Array.isArray(item.task_ids) ? item.task_ids : [];
+    const visibleTasks = taskIds.filter(id => AppState.tasks.some(task => task.task_id === id));
+    if (taskIds.some(id => id.startsWith('job:'))) actions.splice(1, 0, {
+      label: '查看转写结果', icon: '<path d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5"/>',
+      run: () => MaterialNavigation.go('library', {taskIds: taskIds.filter(id => id.startsWith('job:'))}),
+    });
+    if (visibleTasks.length) actions.splice(1, 0, {
+      label: '在任务中定位', icon: '<path d="M9 6h11M9 12h11M9 18h11M3 6h1M3 12h1M3 18h1"/>',
+      run: () => MaterialNavigation.go('workbench', {taskIds: visibleTasks}),
+    });
     actions.forEach(action => {
       const button = document.createElement("button"); button.type = "button"; button.className = "ctx-item" + (action.danger ? " danger" : ""); button.setAttribute("role","menuitem"); button.disabled = action.disabled;
       button.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+action.icon+'</svg>';
@@ -251,7 +263,13 @@ window.Videos = (() => {
     const allCards = () => [...grid.querySelectorAll('.video-card')];
     const oldIndex = allCards().indexOf(previous), scroll = grid.scrollTop;
     closeMenu(); grid.replaceChildren();
+    grid.classList.toggle('is-missing-list', availability === 'missing');
     if (!items.length) {
+      if (currentItems.size && (query || availability !== 'all')) {
+        grid.innerHTML = '<div class="empty"><div class="big">没有匹配的视频</div><div class="sub">调整关键词或切换可用性筛选。</div><button class="btn small" type="button">查看全部视频</button></div>';
+        grid.querySelector('button').onclick = resetFilters;
+        return;
+      }
       grid.innerHTML = '<div class="empty"><span class="empty-symbol" aria-hidden="true">'+playIcon+'</span><div class="big">视频会留在这里</div><div class="sub">下载完成后，点击封面即可播放。</div><div class="empty-actions"><button class="btn primary small" type="button">下载视频</button></div></div>';
       grid.querySelector("button").onclick = () => switchView("links");
       return;
@@ -306,9 +324,14 @@ window.Videos = (() => {
       meta.append(source,date);
       if (time) { const length = document.createElement("span"); length.textContent = time; meta.append(length); }
       info.append(title,meta);
+      if (item.available !== true && item.source_path) {
+        const path = document.createElement('div'); path.className = 'video-path';
+        path.textContent = item.source_path; path.title = item.source_path; info.append(path);
+      }
       wrap.append(button, more, info); card.append(wrap); built.push(card);
     });
-    layoutMasonry(grid, built);
+    if (availability === 'missing') { masonryCards = []; grid.append(...built); }
+    else layoutMasonry(grid, built);
     watchGrid(grid);
     grid.scrollTop = scroll;
     if (focusId) {
@@ -367,10 +390,42 @@ window.Videos = (() => {
     const safeItems = items.filter(item => item && typeof item.id === "string");
     currentItems = new Map(safeItems.map(item=>[item.id,item]));
     if (activePlayer && currentItems.get(activePlayer.id)?.available !== true) stopPlayer();
-    const key = JSON.stringify(safeItems);
-    if (key !== lastItemsKey || !document.querySelector('#videoGrid > *')) { lastItemsKey = key; cards(safeItems); }
+    const term = query.trim().toLocaleLowerCase();
+    const filtered = safeItems.filter(item => (!term || String(item.title || '').toLocaleLowerCase().includes(term))
+      && (availability === 'all' || (item.available === true) === (availability === 'available')));
+    const key = JSON.stringify([safeItems, query, availability]);
+    if (key !== lastItemsKey || !document.querySelector('#videoGrid > *')) { lastItemsKey = key; cards(filtered); }
     const missing = safeItems.filter(item => item.available !== true).length;
-    setStatus(safeItems.length ? safeItems.length + ' 个视频' + (missing ? '，' + missing + ' 个位置待恢复' : '') : "暂无视频");
+    const counts = {all: safeItems.length, available: safeItems.length - missing, missing};
+    document.querySelectorAll('[data-video-filter]').forEach(button => {
+      button.setAttribute('aria-pressed', String(button.dataset.videoFilter === availability));
+      button.querySelector('span').textContent = counts[button.dataset.videoFilter];
+    });
+    setStatus(safeItems.length ? (query || availability !== 'all' ? '显示 ' + filtered.length + ' / ' : '')
+      + safeItems.length + ' 个视频' + (missing ? '，' + missing + ' 个位置待恢复' : '') : "暂无视频");
+    if (pendingContext) {
+      const target = pendingContext;
+      pendingContext = null;
+      const grid = document.getElementById('videoGrid');
+      grid.scrollTop = target.scrollTop || 0;
+      if (target.videoId) {
+        const card = [...grid.querySelectorAll('.video-card')].find(node => node.dataset.videoId === target.videoId);
+        if (card) {
+          card.classList.add('is-located'); card.scrollIntoView({block: 'center'});
+          (card.querySelector('.video-cover:not(:disabled)') || card.querySelector('.video-menu-trigger')).focus({preventScroll: true});
+        } else toast('该视频记录已移除，请刷新列表', 'error');
+      }
+    }
+  }
+  function resetFilters() {
+    query = ''; availability = 'all'; savedScroll = 0; pendingContext = null;
+    document.getElementById('videoSearch').value = '';
+    applyItems([...currentItems.values()]);
+    document.getElementById('videoGrid').scrollTop = 0;
+  }
+  function snapshot() {
+    savedScroll = document.getElementById('videoGrid')?.scrollTop || 0;
+    return {query, availability, scrollTop: savedScroll};
   }
   function listState(message, failed = false) {
     const node = document.getElementById('videosReadState');
@@ -399,6 +454,7 @@ window.Videos = (() => {
         return;
       }
       listState('');
+      catalogLoaded = true;
       applyItems(result.items);
       scanStatus(result.scan); followScan(result.scan);
     } catch (_) {
@@ -408,8 +464,11 @@ window.Videos = (() => {
       }
     }
   }
-  function render() {
+  function render(context) {
     const host = document.getElementById("page-videos");
+    if (context?.videoId) { query = ''; availability = 'all'; }
+    else if (context) { query = context.query || ''; availability = context.availability || 'all'; }
+    pendingContext = context || {scrollTop: savedScroll};
     closeMenu(); stopPlayer(); stopScanPoll();
     if (!pageObserver) {
       pageObserver = new MutationObserver(() => {
@@ -418,7 +477,22 @@ window.Videos = (() => {
       pageObserver.observe(host,{attributes:true,attributeFilter:["class"]});
     }
     currentItems = new Map(); lastItemsKey = '';
+    catalogLoaded = false;
     host.innerHTML = '<div class="videos-layout"><div class="videos-toolbar"><span id="videosStatus" class="videos-status" role="status" aria-live="polite"></span></div><div class="videos-content"><div id="videoGrid" class="video-grid" aria-label="已下载的视频"></div><div id="videosReadState" class="media-read-state" role="status" aria-live="polite" hidden><span class="media-read-symbol" aria-hidden="true">'+playIcon+'</span><h2>正在读取视频</h2><p>正在整理本地视频与封面</p><button class="btn small" type="button" hidden>重新读取</button></div></div></div>';
+    const toolbar = host.querySelector('.videos-toolbar');
+    toolbar.insertAdjacentHTML('afterbegin', '<div class="video-browse-tools"><input id="videoSearch" type="search" placeholder="搜索视频标题" aria-label="搜索视频标题" spellcheck="false"><div class="video-filters" role="group" aria-label="视频可用性"><button type="button" data-video-filter="all">全部 <span></span></button><button type="button" data-video-filter="available">可播放 <span></span></button><button type="button" data-video-filter="missing">位置待恢复 <span></span></button></div></div>');
+    const search = document.getElementById('videoSearch'); search.value = query;
+    search.oninput = () => {
+      query = search.value; pendingContext = null;
+      if (catalogLoaded) applyItems([...currentItems.values()]); document.getElementById('videoGrid').scrollTop = 0;
+    };
+    toolbar.querySelectorAll('[data-video-filter]').forEach(button => {
+      button.setAttribute('aria-pressed', String(button.dataset.videoFilter === availability));
+      button.onclick = () => {
+        availability = button.dataset.videoFilter; pendingContext = null;
+        if (catalogLoaded) applyItems([...currentItems.values()]); document.getElementById('videoGrid').scrollTop = 0;
+      };
+    });
     // 刷新按钮上移顶栏：位于「视频」标题右侧的动作区（先生 2026-10-25）。
     const actions = document.getElementById("viewActions");
     actions.replaceChildren();
@@ -443,5 +517,5 @@ window.Videos = (() => {
     const key = (AppState.tasks || []).map(task => [task.task_id,task.status,task.display_title,task.downloaded_path].join("|")).join(";");
     if (key !== lastTaskKey) { lastTaskKey = key; refresh(); }
   }
-  return {render,refreshLight};
+  return {render,refreshLight,snapshot};
 })();

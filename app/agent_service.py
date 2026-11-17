@@ -146,6 +146,7 @@ def batch_apply_agent_translation(
     """
     done = skipped = failed = 0
     errors: list[str] = []
+    failed_ids: list[str] = []
     for job_id in job_ids:
         settlements = []
         try:
@@ -207,18 +208,20 @@ def batch_apply_agent_translation(
                 Worker._delete_downloaded_source(job.get("source_path", ""), settings)
             if body_failed or updated.get("title_status") == "skipped":
                 failed += 1
+                failed_ids.append(job_id)
                 if len(errors) < 10:
                     errors.append(f"{job_id}: {body_failed or 'TitleIncomplete'}")
             else:
                 done += 1
         except Exception as exc:  # 单条失败不回滚整批
             failed += 1
+            failed_ids.append(job_id)
             if len(errors) < 10:
                 errors.append(f"{job_id}: {type(exc).__name__}")
         finally:
             if settlements:
                 settle_agent_stages(settlements, success=False)
-    return {"done": done, "skipped": skipped, "failed": failed, "errors": errors}
+    return {"done": done, "skipped": skipped, "failed": failed, "errors": errors, "failed_ids": failed_ids}
 
 
 def _write_manifest_file(manifest: Manifest) -> None:

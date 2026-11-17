@@ -7,10 +7,20 @@ window.Library = (() => {
   let docsRequest = 0, readerRequest = 0, tagRequest = 0, pageObserver = null;
   const pendingSaves = new Set(), deleting = new Set();
   let menuEvents = null;
+  const readingStorageKey = 'foilpage.readerState.v1';
+  let reading = {selectedId: null, documents: {}};
+  try {
+    const saved = JSON.parse(localStorage.getItem(readingStorageKey));
+    if (saved && typeof saved.documents === 'object' && saved.documents && !Array.isArray(saved.documents)) reading = saved;
+  } catch (_) { /* Reading remains available when browser storage is unavailable. */ }
+  let renderedReading = null, saveReadingTimer = null, savedContext = null, targetIds = null;
+  let readingFrame = 0;
+  let readerObserver = null;
+  const readingSignatures = new WeakMap();
   let state = {
     query: "",
     tagFilter: "",
-    selectedId: null,
+    selectedId: typeof reading.selectedId === 'string' ? reading.selectedId : null,
     tab: "final",
     docs: [],
     readerText: "",
@@ -18,13 +28,89 @@ window.Library = (() => {
     readerTruncated: false,
     editing: false,
     readerReady: false,
+    comparing: false,
     // TASK-8.24 翻译视图：off=原文；replace=原文页内替换；segments=逐段对照；
     // page=整页译文。数据懒取自 get_reader(tab=translation)。
     translationView: "off",
     translationData: null,
-    translationFetching: false,
   };
   let translationTimer = null, translationTarget = "", translationViewTask = "";
+  let translationViewRequest = 0;
+
+  function writeReadingState() {
+    clearTimeout(saveReadingTimer);
+    try { localStorage.setItem(readingStorageKey, JSON.stringify(reading)); } catch (_) { /* Session navigation still works. */ }
+  }
+
+  function textSignature(text) {
+    let value = 2166136261;
+    for (const character of text) value = Math.imul(value ^ character.codePointAt(0), 16777619);
+    return value >>> 0;
+  }
+
+  function blockSignature(block) {
+    if (!readingSignatures.has(block)) readingSignatures.set(block, textSignature(block.textContent));
+    return readingSignatures.get(block);
+  }
+
+  function saveReadingPosition() {
+    const body = document.getElementById('readerBody');
+    if (!body?.clientHeight || AppState.currentView !== 'library' || !renderedReading || state.editing || state.comparing
+        || body.clientWidth !== renderedReading.width) return;
+    const blocks = body.children;
+    const top = body.getBoundingClientRect().top;
+    let low = 0, high = blocks.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (blocks[middle].getBoundingClientRect().bottom <= top + 1) low = middle + 1;
+      else high = middle;
+    }
+    const index = Math.min(low, blocks.length - 1), block = blocks[index];
+    const record = reading.documents[renderedReading.id] || {};
+    const positions = record.positions || {};
+    if (block) {
+      const bounds = block.getBoundingClientRect();
+      positions[renderedReading.tab + '/' + renderedReading.translationView] = {
+        index, signature: blockSignature(block),
+        offset: (top - bounds.top) / Math.max(1, bounds.height),
+        ratio: body.scrollTop / Math.max(1, body.scrollHeight - body.clientHeight),
+      };
+    }
+    reading.documents[renderedReading.id] = {...record, tab: renderedReading.tab, translationView: renderedReading.translationView, positions};
+    reading.selectedId = renderedReading.id;
+    reading.open = true;
+    clearTimeout(saveReadingTimer); saveReadingTimer = setTimeout(writeReadingState, 200);
+  }
+
+  function restoreReadingPosition(taskId) {
+    const body = document.getElementById('readerBody');
+    renderedReading = {id: taskId, tab: state.tab, translationView: state.translationView, width: body.clientWidth};
+    const position = reading.documents[taskId]?.positions?.[state.tab + '/' + state.translationView];
+    body.scrollTop = 0;
+    if (position) {
+      const blocks = [...body.children];
+      let block = blocks[position.index];
+      if (block && blockSignature(block) !== position.signature) {
+        block = blocks.find(node => blockSignature(node) === position.signature);
+      }
+      body.scrollTop = block
+        ? block.getBoundingClientRect().top - body.getBoundingClientRect().top + position.offset * block.getBoundingClientRect().height
+        : (Number(position.ratio) || 0) * (body.scrollHeight - body.clientHeight);
+    }
+    saveReadingPosition();
+  }
+
+  function chooseDocument(doc) {
+    targetIds = null;
+    state.selectedId = doc.task_id;
+    const saved = reading.documents[doc.task_id];
+    const tabs = {final: doc.has_final, raw: doc.has_raw, source: !!doc.source_path};
+    state.tab = tabs[saved?.tab] ? saved.tab : doc.has_final ? 'final' : doc.has_raw ? 'raw' : 'source';
+    state.translationView = doc.has_translation && ['off', 'replace', 'segments', 'page'].includes(saved?.translationView) ? saved.translationView : 'off';
+    translationViewTask = doc.task_id;
+  }
+
+  window.addEventListener('pagehide', () => { saveReadingPosition(); writeReadingState(); });
 
   const ICONS = {
     copy: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
@@ -50,6 +136,7 @@ window.Library = (() => {
       ConfirmDiscard.run({onDiscard: () => { state.editing = false; ++readerRequest; closeContextMenu(); onLeave?.(); }});
       return false;
     }
+    saveReadingPosition(); writeReadingState();
     ++docsRequest; ++readerRequest; closeContextMenu();
     return true;
   }
@@ -134,6 +221,7 @@ window.Library = (() => {
 
   function clearFilters() {
     discardBefore(() => {
+      targetIds = null;
       state.query = ''; state.tagFilter = '';
       const query = document.getElementById('libSearch'), tags = document.getElementById('libTagFilter');
       if (query) query.value = ''; if (tags) tags.value = '';
@@ -238,6 +326,7 @@ window.Library = (() => {
             <div class="reader-actions">
               <button class="icon-btn" id="copyReaderBtn" title="复制 Markdown" aria-label="复制 Markdown" disabled>${ICONS.copy}</button>
               <button class="icon-btn" id="editReaderBtn" title="编辑 Markdown" aria-label="编辑 Markdown" disabled>${ICONS.edit}</button>
+              <button class="btn ghost small reader-compare-toggle" id="compareReaderBtn" type="button" aria-pressed="false" disabled>查看改动</button>
               <button class="icon-btn is-save" id="saveReaderBtn" title="保存修改" aria-label="保存修改" hidden>${ICONS.save}</button>
               <button class="icon-btn is-cancel" id="cancelReaderBtn" title="放弃修改" aria-label="放弃修改" hidden>${ICONS.close}</button>
               <button class="icon-btn" id="subtitleBtn" title="导出字幕" aria-label="导出字幕">${ICONS.subtitles}</button>
@@ -245,19 +334,39 @@ window.Library = (() => {
               <button class="icon-btn danger" id="deleteBtn" title="删除文本" aria-label="删除文本">${AppIcons('trash')}</button>
             </div>
           </div>
+          <div class="reader-links" id="readerLinks" hidden><button class="btn ghost small" id="readerTaskLink" type="button">查看任务</button><button class="btn ghost small" id="readerVideoLink" type="button">在视频库定位</button></div>
           <div class="reader-tags" id="readerTags"></div>
           <div class="reader-body" id="readerBody">
             <div class="reader-empty"><div class="big">选择一篇文本</div></div>
           </div>
         </div>
       </div>`;
+    document.getElementById('libSearch').value = state.query;
+    document.getElementById('readerBody').addEventListener('scroll', () => {
+      if (readingFrame) return;
+      readingFrame = requestAnimationFrame(() => { readingFrame = 0; saveReadingPosition(); });
+    }, {passive: true});
+    readerObserver?.disconnect();
+    readerObserver = new ResizeObserver(() => {
+      const body = document.getElementById('readerBody');
+      if (body?.clientHeight && renderedReading && !state.editing && !state.comparing
+          && body.clientWidth !== renderedReading.width) restoreReadingPosition(renderedReading.id);
+    });
+    readerObserver.observe(document.getElementById('readerBody'));
+    document.getElementById('compareReaderBtn').onclick = () => discardBefore(() => {
+      if (state.comparing) loadReader(state.selectedId, false);
+      else loadComparison();
+    });
     document.getElementById("libSearch").oninput = (e) => {
       const query = e.target.value.trim();
       if (hasDraft()) e.target.value = state.query;
-      discardBefore(() => { state.query = query; e.target.value = query; loadDocs(); });
+      discardBefore(() => { targetIds = null; state.query = query; e.target.value = query; loadDocs(); });
     };
     document.getElementById("deleteBtn").onclick = deleteCurrent;
-    document.getElementById('readerBack').onclick = () => host.querySelector('.lib').classList.remove('reading');
+    document.getElementById('readerBack').onclick = () => {
+      saveReadingPosition(); host.querySelector('.lib').classList.remove('reading');
+      reading.open = false; writeReadingState();
+    };
     document.getElementById("subtitleBtn").onclick = showSubtitleMenu;
     document.getElementById("openBtn").onclick = openReaderFile;
     document.getElementById("copyReaderBtn").onclick = copyReaderText;
@@ -272,7 +381,7 @@ window.Library = (() => {
       readerBodyEl.oncontextmenu = (e) => {
         if (e.target.closest(".reader-editor")) return;
         const sel = String(window.getSelection ? window.getSelection() : "");
-        if (!state.readerReady || state.editing) return;
+        if (!state.readerReady || state.editing || state.comparing) return;
         e.preventDefault();
         showReaderCopyMenu(e.clientX, e.clientY, sel.trim() ? sel : "");
       };
@@ -280,7 +389,7 @@ window.Library = (() => {
     document.getElementById("libTagFilter").onchange = (e) => {
       const filter = e.target.value;
       if (hasDraft()) e.target.value = state.tagFilter;
-      discardBefore(() => { state.tagFilter = filter; e.target.value = filter; loadDocs(); });
+      discardBefore(() => { targetIds = null; state.tagFilter = filter; e.target.value = filter; loadDocs(); });
     };
     document.getElementById("libSearch").value = state.query;
     document.getElementById('libResetFilters').onclick = clearFilters;
@@ -521,8 +630,7 @@ window.Library = (() => {
       document.querySelector('#page-library .lib')?.classList.add('reading');
       if (state.selectedId === doc.task_id && (state.editing || state.readerReady)) return;
       discardBefore(() => {
-        state.selectedId = doc.task_id;
-        state.tab = doc.has_final ? "final" : doc.has_raw ? "raw" : "source";
+        saveReadingPosition(); chooseDocument(doc);
         renderDocs(); loadReader(doc.task_id, true);
       });
     };
@@ -596,6 +704,16 @@ window.Library = (() => {
     const fingerprint = arr => JSON.stringify(arr.map(d => [d.task_id,d.title,d.status,d.updated_at,d.tags,d.has_final,d.has_raw,d.source_path,d.has_translation,d.translation_lang]));
     if (light && fingerprint(docs) === fingerprint(state.docs)) return;
     state.docs = docs;
+    if (targetIds) {
+      const target = docs.find(doc => targetIds.includes(doc.task_id));
+      if (target) chooseDocument(target);
+      else {
+        state.selectedId = null; state.readerReady = false;
+        renderDocList(); renderTabs(null); updateReaderActions();
+        document.getElementById('readerBody').innerHTML = '<div class="reader-empty" role="status"><div class="big">关联文本暂不可用</div><p>转写尚未产出文本，或文稿已经移除。</p></div>';
+        return;
+      }
+    }
     // 文档指纹更新（如翻译完成后 has_translation 置位）时同步译文控制条。
     renderTranslationTabs();
     const present = docs.some(d => d.task_id === state.selectedId);
@@ -610,8 +728,9 @@ window.Library = (() => {
     }
     const needReader = !present || !state.readerReady;
     if (!present) {
-      state.selectedId = docs[0].task_id;
-      state.tab = docs[0].has_final ? 'final' : docs[0].has_raw ? 'raw' : 'source';
+      chooseDocument(docs[0]);
+    } else if (!state.readerReady && !state.editing) {
+      chooseDocument(docs.find(doc => doc.task_id === state.selectedId));
     }
     renderDocList();
     if (needReader && !state.editing) loadReader(state.selectedId, true);
@@ -640,7 +759,7 @@ window.Library = (() => {
     const host = document.getElementById("readerTransTabs");
     if (!host) return;
     const doc = currentDoc();
-    const available = !!doc?.has_translation && state.tab !== "source" && state.readerReady;
+    const available = !!doc?.has_translation && state.tab !== "source" && state.readerReady && !state.comparing;
     host.hidden = !available;
     if (!available) { host.innerHTML = ""; return; }
     host.innerHTML = "";
@@ -660,10 +779,10 @@ window.Library = (() => {
     const doc = currentDoc();
     if (!doc || !doc.has_translation) return false;
     if (state.translationData && state.translationData.task_id === state.selectedId) return true;
-    if (state.translationFetching) return false;
-    state.translationFetching = true;
+    const serial = readerRequest;
     try {
       const data = await AppApi.reader(state.selectedId, "translation");
+      if (serial !== readerRequest || state.selectedId !== doc.task_id || AppState.currentView !== 'library') return false;
       if (!data || !data.ok) { toast((data && data.error) || "译文不可用", "error"); return false; }
       if (state.selectedId !== doc.task_id) return false;
       state.translationData = {
@@ -674,8 +793,10 @@ window.Library = (() => {
         direction: String(data.direction || ""),
       };
       return true;
-    } catch (_) { toast("译文读取失败", "error"); return false; }
-    finally { state.translationFetching = false; }
+    } catch (_) {
+      if (serial === readerRequest && state.selectedId === doc.task_id) toast("译文读取失败", "error");
+      return false;
+    }
   }
 
   function renderTranslationBody() {
@@ -720,7 +841,10 @@ window.Library = (() => {
   }
 
   async function setTranslationView(view) {
+    const viewRequest = ++translationViewRequest;
     if (view === state.translationView) return;
+    saveReadingPosition();
+    const serial = readerRequest, taskId = state.selectedId;
     if (view === "off") {
       state.translationView = "off";
       renderTranslationTabs(); updateReaderActions();
@@ -728,11 +852,13 @@ window.Library = (() => {
       return;
     }
     if (!(await ensureTranslationData())) return;
+    if (viewRequest !== translationViewRequest || serial !== readerRequest || taskId !== state.selectedId || AppState.currentView !== 'library' || state.comparing) return;
     state.translationView = view;
     translationViewTask = state.selectedId;
     state.editing = false;
     renderTranslationTabs(); updateReaderActions();
     renderTranslationBody();
+    restoreReadingPosition(taskId);
   }
 
   function startTranslationPoll(taskId, desiredView) {
@@ -882,6 +1008,8 @@ window.Library = (() => {
   async function loadReader(taskId, rebuildTabs) {
     const body = document.getElementById("readerBody");
     if (!body) return;
+    saveReadingPosition(); renderedReading = null;
+    state.comparing = false; body.classList.remove('is-comparing');
     const requestedTab = state.tab, serial = ++readerRequest;
     state.editing = false; state.readerReady = false;
     state.readerText = "";
@@ -922,11 +1050,16 @@ window.Library = (() => {
         state.readerTruncated = !!data.truncated;
         body.innerHTML = Markdown.render(data.text);
       }
+      await document.fonts.ready;
+      if (serial !== readerRequest || taskId !== state.selectedId || AppState.currentView !== 'library') return;
       updateReaderActions(state.tab);
       renderTranslationTabs();
       if (state.translationView !== "off" && state.tab !== "source") {
-        await setTranslationView(state.translationView);
+        const desired = state.translationView; state.translationView = 'off';
+        await setTranslationView(desired);
       }
+      if (serial !== readerRequest || taskId !== state.selectedId || AppState.currentView !== 'library') return;
+      restoreReadingPosition(taskId); renderReaderLinks();
       if (rebuildTabs) {
         const doc = state.docs.find((d) => d.task_id === taskId);
         renderTabs(doc);
@@ -946,14 +1079,23 @@ window.Library = (() => {
     const cancel = document.getElementById("cancelReaderBtn");
     const ready = state.readerReady && !!state.selectedId;
     const inTranslation = state.translationView !== "off";
-    const editable = ready && (tab || state.tab) !== "source" && !state.readerTruncated && !inTranslation;
+    const editable = ready && (tab || state.tab) !== "source" && !state.readerTruncated && !inTranslation && !state.comparing;
     for (const id of ['subtitleBtn','openBtn','deleteBtn']) {
       const button = document.getElementById(id); if (button) button.disabled = !ready;
     }
-    if (copy) copy.disabled = !ready || state.editing;
+    if (copy) copy.disabled = !ready || state.editing || state.comparing;
     if (edit) edit.disabled = !editable || state.editing;
     if (save) { save.hidden = !state.editing; save.disabled = pendingSaves.has(state.selectedId + "@" + state.tab); }
     if (cancel) cancel.hidden = !state.editing;
+    const compare = document.getElementById('compareReaderBtn');
+    if (compare) {
+      const doc = currentDoc();
+      compare.disabled = !state.comparing && (!ready || !doc?.has_final || !doc?.has_raw);
+      compare.textContent = state.comparing ? '返回阅读' : '查看改动';
+      compare.setAttribute('aria-pressed', String(state.comparing));
+      compare.title = doc?.has_final && doc?.has_raw ? '对照原稿与整理稿' : '需要同时存在原稿和整理稿';
+    }
+    renderReaderLinks();
   }
 
   function copyReaderText() {
@@ -966,7 +1108,9 @@ window.Library = (() => {
   }
 
   function beginEditing() {
-    if (!state.readerReady || !state.selectedId || state.tab === "source" || state.readerTruncated) return;
+    if (!state.readerReady || !state.selectedId || state.tab === "source" || state.readerTruncated || state.comparing) return;
+    saveReadingPosition();
+    renderedReading = null;
     const body = document.getElementById("readerBody");
     if (!body) return;
     state.editing = true;
@@ -1051,10 +1195,94 @@ window.Library = (() => {
     if (AppState.currentView === 'library') await loadDocs(true);
   }
 
-  async function render() {
+  function renderReaderLinks() {
+    const doc = currentDoc(), host = document.getElementById('readerLinks');
+    host.hidden = !doc || !state.readerReady;
+    if (!doc) return;
+    const task = document.getElementById('readerTaskLink');
+    task.disabled = !AppState.tasks.some(item => item.task_id === doc.task_id);
+    task.title = task.disabled ? '该任务已归档或移除，文本仍可阅读' : '在任务列表定位这份转写';
+    task.onclick = () => MaterialNavigation.go('workbench', {taskIds: [doc.task_id]});
+    const video = document.getElementById('readerVideoLink');
+    video.hidden = !MaterialNavigation.isVideo(doc.source_path);
+    video.onclick = () => MaterialNavigation.openVideo(doc.task_id, video);
+  }
+
+  async function loadComparison() {
+    saveReadingPosition(); renderedReading = null;
+    const taskId = state.selectedId, serial = ++readerRequest;
+    const body = document.getElementById('readerBody');
+    state.comparing = true; state.editing = false;
+    body.classList.add('is-comparing');
+    body.innerHTML = '<div class="reader-empty" role="status"><div class="big">正在对照原稿与整理稿</div></div>';
+    updateReaderActions(); renderTranslationTabs();
+    try {
+      const [raw, final] = await Promise.all([AppApi.reader(taskId, 'raw'), AppApi.reader(taskId, 'final')]);
+      if (serial !== readerRequest || taskId !== state.selectedId || AppState.currentView !== 'library' || !state.comparing) return;
+      if (!raw?.ok || !final?.ok) throw new Error(raw?.error || final?.error || '文稿暂不可用');
+      const groups = TextDiff.compare(raw.text || '', final.text || '');
+      body.innerHTML = '<div class="reader-diff"><div class="diff-summary" role="status"></div><div class="diff-head" aria-hidden="true"><span>原稿</span><span>整理稿</span></div><div class="diff-groups"></div><button class="btn ghost small diff-more" type="button" hidden>继续显示</button></div>';
+      const box = body.querySelector('.diff-groups'), more = body.querySelector('.diff-more');
+      const counts = {added: 0, removed: 0, changed: 0};
+      groups.forEach(group => { if (group.kind !== 'same') ++counts[group.kind]; });
+      const summary = body.querySelector('.diff-summary');
+      summary.textContent = counts.added || counts.removed || counts.changed
+        ? `新增 ${counts.added} 组 · 删减 ${counts.removed} 组 · 调整 ${counts.changed} 组`
+        : '原稿与整理稿内容一致';
+      if (raw.truncated || final.truncated) summary.textContent += ' · 当前仅对照已读取的部分文稿';
+      let rendered = 0;
+      const appendGroups = () => {
+        const chunk = groups.slice(rendered, rendered + 80);
+        chunk.forEach(group => {
+          const row = document.createElement('section'); row.className = 'diff-row diff-' + group.kind;
+          const label = {same: '相同', added: '新增', removed: '删减', changed: '调整'}[group.kind];
+          row.setAttribute('aria-label', label);
+          for (const side of ['before', 'after']) {
+            const cell = document.createElement('div'); cell.className = 'diff-cell';
+            const heading = document.createElement('span'); heading.className = 'diff-cell-label';
+            heading.textContent = (side === 'before' ? '原稿' : '整理稿') + ' · ' + label;
+            const text = document.createElement('div'); text.textContent = group[side].join('\n\n') || '—';
+            cell.append(heading, text); row.append(cell);
+          }
+          box.append(row);
+        });
+        rendered += chunk.length;
+        more.hidden = rendered >= groups.length;
+        more.textContent = '继续显示，剩余 ' + (groups.length - rendered) + ' 组';
+      };
+      more.onclick = appendGroups; appendGroups(); body.scrollTop = 0;
+    } catch (error) {
+      if (serial !== readerRequest || taskId !== state.selectedId || AppState.currentView !== 'library' || !state.comparing) return;
+      body.innerHTML = '<div class="reader-empty" role="alert"><div class="big">对照读取失败</div><p></p><button class="btn small" type="button">重新读取</button></div>';
+      body.querySelector('p').textContent = error.message;
+      body.querySelector('button').onclick = loadComparison;
+    }
+  }
+
+  function snapshot() {
+    saveReadingPosition();
+    reading.open = Boolean(document.getElementById('readerBody')?.clientHeight);
+    writeReadingState();
+    savedContext = {query: state.query, tagFilter: state.tagFilter, selectedId: state.selectedId,
+      listScroll: document.getElementById('docList')?.scrollTop || 0,
+      reading: reading.open};
+    return savedContext;
+  }
+
+  async function render(context = savedContext) {
     if (state.editing && document.querySelector('#readerBody .reader-editor')) { await refreshLight(); return; }
+    renderedReading = null; state.comparing = false;
+    if (context?.taskIds) {
+      targetIds = context.taskIds; state.query = ''; state.tagFilter = '';
+    } else if (context) {
+      targetIds = null; state.query = context.query || ''; state.tagFilter = context.tagFilter || '';
+      state.selectedId = context.selectedId;
+    }
     state.readerReady = false;
     buildLayout(); updateReaderActions();
+    if (context?.taskIds || context?.reading || (!context && reading.selectedId && reading.open !== false)) {
+      document.querySelector('#page-library .lib').classList.add('reading');
+    }
     if (!pageObserver) {
       const host = document.getElementById('page-library');
       pageObserver = new MutationObserver(() => {
@@ -1063,7 +1291,9 @@ window.Library = (() => {
       pageObserver.observe(host,{attributes:true,attributeFilter:['class']});
     }
     await loadDocs();
+    if (context?.taskIds || context?.reading) document.querySelector('#page-library .lib')?.classList.add('reading');
+    if (context?.listScroll) document.getElementById('docList').scrollTop = context.listScroll;
   }
 
-  return { render, refreshLight, canLeave };
+  return { render, refreshLight, canLeave, snapshot, currentTaskId: () => state.selectedId };
 })();

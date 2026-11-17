@@ -239,6 +239,40 @@ def _row(kind, task_id, status="done", **extra):
     return row
 
 
+def test_video_links_preserve_archived_and_repeated_transcriptions_without_title_matching(tmp_path):
+    first = tmp_path / "first" / "same.mp4"
+    second = tmp_path / "second" / "same.mp4"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"first synthetic media")
+    second.write_bytes(b"second synthetic media")
+    bridge, controller, _ = make_bridge()
+    controller.video_catalog = mock.Mock()
+    controller.video_catalog.request_scan.return_value = {"running": False}
+    controller.queue.list_jobs.return_value = [
+        {"id": "archived", "source_path": str(first), "status": "done", "archived": True},
+        {"id": "repeated", "source_path": str(first.parent / ".." / "first" / "same.mp4"), "status": "done"},
+    ]
+    controller.downloads.list.return_value = [
+        {"id": "download", "media_id": "first", "job_id": "archived", "status": "done", "title": "same"},
+    ]
+    controller.media.list_media.return_value = [
+        {"id": "first", "source_path": str(first), "filename": "same.mp4"},
+        {"id": "second", "source_path": str(second), "filename": "same.mp4"},
+    ]
+    bridge._media_preview = mock.Mock()
+    bridge._media_preview.urls.return_value = {}
+    videos = bridge.get_downloaded_videos()["items"]
+    assert set(videos[0]["task_ids"]) == {"job:archived", "job:repeated", "dl:download"}
+    assert videos[1]["task_ids"] == []
+    first.unlink()
+    missing = bridge.get_downloaded_videos()["items"][0]
+    assert missing["available"] is False
+    assert missing["source_path"] == str(first)
+    assert set(missing["task_ids"]) == set(videos[0]["task_ids"])
+    controller.queue.enqueue.assert_not_called()
+
+
 # ---------------- GPU 加速包（先生 2026-10-08 拆包） ----------------
 import zipfile
 

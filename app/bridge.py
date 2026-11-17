@@ -807,6 +807,25 @@ class Bridge(AccountBridgeMixin):
         with self._lock:
             all_downloads = self.controller.downloads.list(limit=100000)
             jobs = self.controller.queue.list_jobs()
+            # Resolve each source once, matching queue source identity while
+            # keeping linked archived jobs available to the reader navigation.
+            source_keys: dict[str, Path | str] = {}
+            jobs_by_source: dict[Path | str, list[str]] = {}
+            for job in jobs:
+                source = job["source_path"]
+                if source not in source_keys:
+                    try:
+                        source_keys[source] = Path(source).resolve()
+                    except (OSError, RuntimeError, ValueError):
+                        source_keys[source] = source
+                jobs_by_source.setdefault(source_keys[source], []).append(f"job:{job['id']}")
+            downloads_by_media: dict[str, list[str]] = {}
+            for row in all_downloads:
+                if row.get("media_id"):
+                    links = downloads_by_media.setdefault(row["media_id"], [])
+                    links.append(f"dl:{row['id']}")
+                    if row.get("job_id"):
+                        links.append(f"job:{row['job_id']}")
             excluded = [row['source_path'] for row in jobs
                         if row['status'] in {'queued', 'running', 'retryable'}]
             excluded += [row.get('downloaded_path') for row in all_downloads
@@ -816,6 +835,14 @@ class Bridge(AccountBridgeMixin):
             items = []
             for media in self.controller.media.list_media(media_type="video"):
                 download = downloads.get(media["id"], {})
+                source = media["source_path"]
+                if source not in source_keys:
+                    try:
+                        source_keys[source] = Path(source).resolve()
+                    except (OSError, RuntimeError, ValueError):
+                        source_keys[source] = source
+                task_ids = list(dict.fromkeys(jobs_by_source.get(source_keys[source], [])
+                                             + downloads_by_media.get(media["id"], [])))
                 available = Path(media["source_path"]).is_file()
                 try:
                     urls = self._preview_server().urls(media["id"]) if available else {}
@@ -826,6 +853,7 @@ class Bridge(AccountBridgeMixin):
                               "source": download.get("platform") or "本地导入", "source_url": download.get("url") or "",
                               "downloaded_at": download.get("updated_at") or media.get("created_at"),
                               "duration_seconds": media.get("duration_sec"), "available": available,
+                              "source_path": source, "task_ids": task_ids,
                               "thumbnail_url": urls.get("thumbnail_url", ""), **action})
             return {"ok": True, "items": items, "total": len(items), "scan": scan}
 
@@ -1947,18 +1975,22 @@ class Bridge(AccountBridgeMixin):
                 return {"ok": False, "error": "请先在设置 - 整理与转译中配置 API Key"}
             if not jobs:
                 return {"ok": False, "error": "没有可整理的已完成任务"}
+            run_id = secrets.token_hex(12)
             self._batch_agent = {
                 "running": True,
+                "run_id": run_id,
+                "task_ids": [f"job:{job_id}" for job_id in jobs],
                 "done": 0,
                 "skipped": 0,
                 "failed": 0,
                 "errors": [],
+                "failed_ids": [],
                 "message": f"批量整理已开始，共 {len(jobs)} 项",
             }
         threading.Thread(
             target=self._batch_agent_worker, args=(jobs, settings), daemon=True
         ).start()
-        return {"ok": True, "started": True, "count": len(jobs)}
+        return {"ok": True, "started": True, "count": len(jobs), "run_id": run_id}
 
     def get_batch_agent_status(self) -> dict:
         with self._lock:
@@ -1979,7 +2011,7 @@ class Bridge(AccountBridgeMixin):
                 delete_source=True,
             )
         except Exception as exc:  # 整批失败兜底，保证状态可读
-            result = {"done": 0, "skipped": 0, "failed": len(job_ids), "errors": [str(exc)]}
+            result = {"done": 0, "skipped": 0, "failed": len(job_ids), "errors": [str(exc)], "failed_ids": job_ids}
         with self._lock:
             self._batch_agent.update(
                 running=False,
@@ -1987,6 +2019,7 @@ class Bridge(AccountBridgeMixin):
                 skipped=int(result.get("skipped") or 0),
                 failed=int(result.get("failed") or 0),
                 errors=list(result.get("errors") or [])[:10],
+                failed_ids=[f"job:{job_id}" for job_id in result.get("failed_ids", [])],
                 message=(
                     f"批量整理完成：成功 {result.get('done', 0)}，"
                     f"跳过 {result.get('skipped', 0)}，失败 {result.get('failed', 0)}"

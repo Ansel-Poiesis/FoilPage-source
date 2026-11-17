@@ -71,7 +71,7 @@ fs.mkdirSync(output, {recursive:true});
       AppState.tasks[1].display_title='从声音到文字：保留访谈原话、例子与限定条件，让一篇完整的长记录清晰可读';
       applyTheme(); Workbench.render();
     });
-    const compactActions=await page.locator('#inspector .actions button').evaluateAll(buttons=>buttons.map(button=>{
+    const compactActions=await page.locator('#inspector .actions button').evaluateAll(buttons=>buttons.filter(button=>button.getClientRects().length).map(button=>{
       const rect=button.getBoundingClientRect();
       return !!document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)?.closest('.actions');
     }));
@@ -143,6 +143,7 @@ fs.mkdirSync(output, {recursive:true});
       await page.locator('.job-open').first().click();
       await page.screenshot({animations:'disabled',path:path.join(output,`tasks-selected-${width}.png`)});
       await page.locator('.nav-row[data-page="library"]').click();
+      if(width<=1000 && await page.locator('#readerBack').isVisible()) await page.locator('#readerBack').click();
       await page.waitForSelector('.doc-open');
       await page.locator('.doc-open').first().focus();
       await page.keyboard.press('Enter');

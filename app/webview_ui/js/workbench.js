@@ -6,9 +6,17 @@
 window.Workbench = (() => {
   const FILTERS = ["全部", "处理中", "需处理", "已完成"];
   const ACTIVE = ["queued", "running", "retryable", "received", "resolving", "awaiting_browser", "downloading", "imported", "transcribing"];
-  const NEED = ["failed", "retryable", "awaiting_browser", "received", "resolving"];
+  const PROCESSING = ACTIVE.filter(status => !['retryable', 'awaiting_browser'].includes(status));
+  const NEED = ["failed", "retryable", "awaiting_browser"];
   const TERMINAL = ["done", "failed", "cancelled"];
   let rangeBaseline = null, rangeAnchor = null, visibleSelectionKey = "", tasksRequest = 0;
+  let savedContext = null;
+  const receiptStorageKey = 'foilpage.batchReceipt.v1';
+  let batchReceipt = null, batchTimer = null, batchChecking = false, batchStarting = false, batchSubmitting = false;
+  try {
+    const saved = JSON.parse(localStorage.getItem(receiptStorageKey));
+    if (saved && Array.isArray(saved.taskIds)) batchReceipt = saved;
+  } catch (_) { /* The in-session receipt remains available without storage. */ }
 
   /* TASK-8.17 平台封面：会话级缓存（本地预览服务器的 token 地址），按任务
      懒取；cover_path 变化（重试后重下）会重新取。 */
@@ -108,7 +116,7 @@ window.Workbench = (() => {
     const f = AppState.filter;
     let rows;
     if (f === "全部") rows = tasks;
-    else if (f === "处理中") rows = tasks.filter((t) => ACTIVE.includes(t.status));
+    else if (f === "处理中") rows = tasks.filter((t) => PROCESSING.includes(t.status));
     else if (f === "需处理") rows = tasks.filter((t) => NEED.includes(t.status));
     else if (f === "已完成") rows = tasks.filter((t) => t.status === "done");
     else rows = tasks;
@@ -118,7 +126,7 @@ window.Workbench = (() => {
   function countFor(filter) {
     const tasks = AppState.tasks || [];
     if (filter === "全部") return tasks.length;
-    if (filter === "处理中") return tasks.filter((t) => ACTIVE.includes(t.status)).length;
+    if (filter === "处理中") return tasks.filter((t) => PROCESSING.includes(t.status)).length;
     if (filter === "需处理") return tasks.filter((t) => NEED.includes(t.status)).length;
     if (filter === "已完成") return tasks.filter((t) => t.status === "done").length;
     return 0;
@@ -210,12 +218,12 @@ window.Workbench = (() => {
   function renderMultiInspector(host) {
     const sel = selectedTasks();
     const count = AppState.selected.size;
-    const activeN = sel.filter((t) => ACTIVE.includes(t.status)).length;
+    const activeN = sel.filter((t) => PROCESSING.includes(t.status)).length;
     const doneN = sel.filter((t) => t.status === "done").length;
     const failedN = sel.filter((t) => ["failed", "cancelled"].includes(t.status)).length;
-    const canRetry = sel.some((t) => TERMINAL.includes(t.status));
-    const canCancel = activeN > 0;
-    const canAgent = doneN > 0;
+    const canRetry = sel.some((t) => TERMINAL.includes(t.status) || t.status === 'retryable');
+    const canCancel = sel.some(task => ACTIVE.includes(task.status));
+    const canAgent = sel.some(task => task.kind === 'transcription' && task.status === 'done');
     host.innerHTML = `
       <div class="inspector">
         <div class="t">已选 ${count} 项</div>
@@ -232,39 +240,53 @@ window.Workbench = (() => {
       b.disabled = disabled;
       b.onclick = () => fn();
       actions.appendChild(b);
+      return b;
     };
-    addBtn("重试/重新转写", "ghost small", !canRetry, () => {
-      const ids = [...AppState.selected];
+    const retryButton = addBtn("重试/重新转写", "ghost small", !canRetry || batchSubmitting, async () => {
+      if (batchSubmitting) return;
+      batchSubmitting = true; retryButton.disabled = true;
+      const selection = [...AppState.selected].sort().join(',');
+      const ids = selectedTasks().filter(task => TERMINAL.includes(task.status) || task.status === 'retryable').map(task => task.task_id);
       const downs = ids.filter((id) => id.startsWith("dl:"));
       const jobs = ids.filter((id) => id.startsWith("job:"));
       const steps = [];
+      const receipt = {kind: 'retry', title: '重试提交回执', taskIds: ids, done: 0, skipped: 0, needsPage: 0, unconfirmed: 0, errors: [], failedIds: []};
       if (downs.length) {
         steps.push(AppApi.retryDownloads(downs).then((res) => {
-          const n = res && res.retried ? res.retried.length : 0;
-          const need = res && res.needs_page ? res.needs_page.length : 0;
-          if (n) toast(`已重新提交 ${n} 个下载`);
-          if (need) toast(`${need} 个抖音任务需回视频页重新点击下载（地址有时效，建议先收藏）`, "error");
-        }).catch(() => toast("下载重试失败", "error")));
+          if (!res?.ok) throw new Error(res?.error || '下载重试未确认');
+          receipt.done += res.retried?.length || 0;
+          receipt.skipped += res.skipped || 0;
+          receipt.needsPage += res.needs_page?.length || 0;
+          receipt.unconfirmed += Math.max(0, downs.length - (res.retried?.length || 0) - (res.skipped || 0) - (res.needs_page?.length || 0));
+          if (res.needs_page?.length) receipt.errors.push('部分下载需要回到视频页面重新点击下载。');
+        }).catch(error => { receipt.unconfirmed += downs.length; receipt.errors.push(error.message || '下载重试未确认'); }));
       }
       if (jobs.length) {
         steps.push(AppApi.retranscribe(jobs).then((res) => {
-          const n = res && res.created ? res.created.length : 0;
-          if (n) toast(`已重建 ${n} 个转写任务`);
-        }));
+          if (!res?.ok) throw new Error(res?.error || '重新转写未确认');
+          receipt.done += res.created?.length || 0;
+          receipt.skipped += res.skipped?.length || 0;
+          receipt.unconfirmed += Math.max(0, jobs.length - (res.created?.length || 0) - (res.skipped?.length || 0));
+        }).catch(error => { receipt.unconfirmed += jobs.length; receipt.errors.push(error.message || '重新转写未确认'); }));
       }
-      Promise.all(steps).then(() => { AppState.selected.clear(); refreshAll(); });
+      await Promise.all(steps);
+      batchSubmitting = false;
+      setReceipt(receipt);
+      if ([...AppState.selected].sort().join(',') === selection) AppState.selected.clear();
+      refreshAll();
     });
-    addBtn("批量整理", "ghost small", !canAgent, () => {
-      pickEditingLevel((level) => {
-      AppApi.batchAgentTranslate([...AppState.selected], level).then((res) => {
-        if (!res || !res.ok) { toast((res && res.error) || "批量整理启动失败", "error"); return; }
-        toast(`已开始批量整理 ${res.count} 项${level ? "（" + levelLabel(level) + "）" : ""}`);
-        pollBatchAgent();
-      }).catch((e) => toast("批量整理失败：" + (e && e.message || e), "error"));
-      });
+    addBtn("批量整理", "ghost small", !canAgent || batchStarting, () => {
+      const ids = selectedTasks().filter(task => task.kind === 'transcription' && task.status === 'done').map(task => task.task_id);
+      pickEditingLevel(level => startBatchAgent(ids, level));
     });
-    addBtn("取消", "ghost small", !canCancel, () => {
-      AppApi.cancel([...AppState.selected]).then(() => { AppState.selected.clear(); refreshAll(); });
+    addBtn("取消", "ghost small", !canCancel, async () => {
+      const ids = selectedTasks().filter(task => ACTIVE.includes(task.status)).map(task => task.task_id);
+      try {
+        const result = await AppApi.cancel(ids);
+        if (!result?.ok) throw new Error(result?.error || '取消请求未确认');
+        setReceipt({kind: 'request', title: '批量取消回执', taskIds: ids, message: '已提交 ' + ids.length + ' 项取消请求，处理结果见任务列表。'});
+        refreshAll();
+      } catch (error) { toast(error.message || '取消请求未确认', 'error'); }
     });
     addBtn("删除", "danger small", false, () => {
       const ids = [...AppState.selected];
@@ -274,6 +296,8 @@ window.Workbench = (() => {
           AppApi.deleteTasks(ids).then((res) => {
             const n = res && Array.isArray(res.removed) ? res.removed.length : 0;
             if (!n) { toast(res?.error || '删除失败', 'error'); return; }
+            setReceipt({kind: 'request', title: '批量删除回执', taskIds: ids,
+              message: '已删除 ' + n + ' 项' + (n < ids.length ? '，其余 ' + (ids.length - n) + ' 项未确认。' : '。')});
             refreshAll(); toast(`已删除 ${n} 项`);
           }).catch(() => toast('删除失败，请重试', 'error'));
         },
@@ -281,23 +305,96 @@ window.Workbench = (() => {
     });
   }
 
-  function pollBatchAgent() {
-    const timer = setInterval(() => {
-      AppApi.batchAgentStatus().then((st) => {
-        if (!st) return;
-        if (st.running) {
-          toast(st.message || "批量整理进行中…");
-          return;
-        }
-        clearInterval(timer);
-        AppState.selected.clear();
-        refreshAll();
-        const msg = (st.errors && st.errors.length)
-          ? st.message + "，例如 " + st.errors[0]
-          : st.message;
-        toast(msg, st.failed > 0 ? "error" : "");
-      }).catch(() => clearInterval(timer));
-    }, 2500);
+  function setReceipt(receipt) {
+    if (batchReceipt?.running && receipt.kind !== 'agent') receipt = {...batchReceipt, submission: receipt};
+    batchReceipt = receipt;
+    try { localStorage.setItem(receiptStorageKey, JSON.stringify(receipt)); } catch (_) { /* Keep the visible receipt. */ }
+    renderReceipt();
+  }
+
+  function renderReceipt() {
+    if (AppState.currentView !== 'workbench') return;
+    const host = document.getElementById('inspector');
+    const existing = host?.querySelector('.batch-receipt');
+    if (!host || !batchReceipt) { existing?.remove(); return; }
+    const key = JSON.stringify(batchReceipt);
+    if (existing?.dataset.receipt === key) return;
+    existing?.remove();
+    const receipt = batchReceipt;
+    const panel = document.createElement('section'); panel.className = 'batch-receipt'; panel.setAttribute('aria-label', '最近的批量操作'); panel.dataset.receipt = key;
+    if (receipt.dismissed) {
+      const show = document.createElement('button'); show.type = 'button'; show.className = 'btn ghost small'; show.textContent = '查看最近批次回执';
+      show.onclick = () => setReceipt({...batchReceipt, dismissed: false}); panel.append(show); host.prepend(panel); return;
+    }
+    const heading = document.createElement('strong'); heading.textContent = receipt.title;
+    const close = document.createElement('button'); close.type = 'button'; close.className = 'icon-btn receipt-close'; close.textContent = '×'; close.setAttribute('aria-label', '收起批量回执');
+    close.onclick = () => setReceipt({...batchReceipt, dismissed: true});
+    const summary = document.createElement('p'); summary.className = 'receipt-summary'; summary.setAttribute('role', 'status');
+    if (receipt.unknown || receipt.kind === 'request') summary.textContent = receipt.message;
+    else if (receipt.running) summary.textContent = receipt.message || '正在整理 ' + receipt.taskIds.length + ' 项';
+    else if (receipt.kind === 'retry') summary.textContent = `已提交 ${receipt.done} · 跳过 ${receipt.skipped} · 等待浏览器 ${receipt.needsPage} · 未确认 ${receipt.unconfirmed}`;
+    else summary.textContent = `成功 ${receipt.done || 0} · 跳过 ${receipt.skipped || 0} · 失败 ${receipt.failed || 0}`;
+    panel.append(heading, close, summary);
+    if (receipt.submission) {
+      const note = document.createElement('p');
+      note.textContent = receipt.submission.message || `最近重试提交 ${receipt.submission.done} 项，跳过 ${receipt.submission.skipped} 项，等待浏览器 ${receipt.submission.needsPage} 项，未确认 ${receipt.submission.unconfirmed} 项`;
+      panel.append(note);
+    }
+    const errors = [...(receipt.errors || []), ...(receipt.submission?.errors || [])];
+    if (errors.length) {
+      const details = document.createElement('details'), title = document.createElement('summary'), list = document.createElement('ul');
+      title.textContent = '查看诊断信息';
+      errors.forEach(error => { const item = document.createElement('li'); item.textContent = error; list.append(item); });
+      details.append(title, list); panel.append(details);
+    }
+    if (receipt.queryFailed) {
+      const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn ghost small'; retry.textContent = '重新查询进度'; retry.onclick = pollBatchAgent; panel.append(retry);
+    }
+    if (!receipt.running && receipt.failedIds?.length) {
+      const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn ghost small'; retry.textContent = '仅重试失败项（' + receipt.failedIds.length + '）';
+      retry.onclick = () => { const ids = [...receipt.failedIds]; pickEditingLevel(level => startBatchAgent(ids, level)); }; panel.append(retry);
+    }
+    host.prepend(panel);
+  }
+
+  async function startBatchAgent(ids, level) {
+    if (batchStarting) return;
+    batchStarting = true;
+    try {
+      const result = await AppApi.batchAgentTranslate(ids, level);
+      if (!result?.ok) throw new Error(result?.error || '批量整理启动失败');
+      clearTimeout(batchTimer); batchTimer = null;
+      setReceipt({kind: 'agent', title: '批量整理回执', taskIds: ids, runId: result.run_id || '', level,
+        running: true, done: 0, skipped: 0, failed: 0, errors: [], failedIds: [], message: '正在整理 ' + result.count + ' 项'});
+      pollBatchAgent();
+    } catch (error) { toast(error.message || '批量整理启动失败', 'error'); }
+    finally { batchStarting = false; }
+  }
+
+  async function pollBatchAgent() {
+    if (batchChecking || !batchReceipt?.running) return;
+    clearTimeout(batchTimer); batchTimer = null; batchChecking = true;
+    const receipt = batchReceipt;
+    try {
+      const status = await AppApi.batchAgentStatus();
+      if (batchReceipt?.runId !== receipt.runId || batchReceipt?.kind !== 'agent') return;
+      if (!status || (receipt.runId && status.run_id !== receipt.runId)) {
+        setReceipt({...batchReceipt, running: false, unknown: true, message: '该批次的进度已不可读取，请检查对应文稿。'});
+        return;
+      }
+      setReceipt({...batchReceipt, running: status.running === true, done: status.done || 0, skipped: status.skipped || 0,
+        failed: status.failed || 0, message: status.message || '', errors: status.errors || [], queryFailed: false,
+        failedIds: (status.failed_ids || []).filter(id => receipt.taskIds.includes(id))});
+      if (status.running) batchTimer = setTimeout(pollBatchAgent, 2500);
+      else refreshAll();
+    } catch (_) {
+      if (batchReceipt?.runId === receipt.runId) setReceipt({...batchReceipt, queryFailed: true, message: '暂时无法读取批量进度'});
+    } finally {
+      batchChecking = false;
+      if (batchReceipt?.running && !batchTimer && !batchReceipt.queryFailed && batchReceipt.runId !== receipt.runId) {
+        batchTimer = setTimeout(pollBatchAgent, 0);
+      }
+    }
   }
 
   function reconcileSelection(rows) {
@@ -555,11 +652,29 @@ window.Workbench = (() => {
       b.textContent = label;
       b.onclick = () => fn();
       actions.appendChild(b);
+      return b;
     }
     addBtn("播放", "ghost small", () => AppApi.playMedia(task));
     addBtn("打开位置", "ghost small", () => AppApi.openPath(task.source_path || task.downloaded_path));
     const resultPath = task.final_path || task.raw_path;
+    if (resultPath && task.kind === 'transcription') {
+      addBtn('在文本库阅读', 'primary small', () => MaterialNavigation.go('library', {taskIds: [task.task_id]}));
+    }
+    if (MaterialNavigation.isVideo(task.source_path || task.downloaded_path)) {
+      const videoButton = addBtn('在视频库定位', 'ghost small', () => MaterialNavigation.openVideo(task.task_id, videoButton));
+    }
     if (resultPath) addBtn("打开文本", "ghost small", () => AppApi.openPath(resultPath));
+    if (task.status === 'awaiting_browser') {
+      const next = document.createElement('div'); next.className = 'task-next-action';
+      next.textContent = '等待浏览器提供视频地址，请回到视频页面继续下载。';
+      actions.before(next);
+      addBtn('前往视频页面', 'primary small', async () => {
+        try {
+          const result = await AppApi.openVideoPage(task.task_id);
+          if (!result?.ok) toast(result?.error || '无法打开视频页面', 'error');
+        } catch (_) { toast('无法打开视频页面，请重试', 'error'); }
+      });
+    }
     if (task.kind === "download" && task.status === "done") {
       addBtn("转写", "ghost small", () => {
         AppApi.transcribeDownload(task.task_id).then((res) => {
@@ -605,6 +720,21 @@ window.Workbench = (() => {
       addBtn("取消", "ghost small", () => AppApi.cancel([task.task_id]).then(refreshAll));
     }
     addBtn("删除", "danger small", () => deleteTask(task));
+    const secondary = [...actions.children].filter(button => !button.classList.contains('primary') && button.textContent !== '播放');
+    secondary.forEach(button => button.classList.add('task-secondary-action'));
+    if (secondary.length) {
+      const more = addBtn('更多操作', 'ghost small task-more-trigger', () => {
+        const mask = openModal('任务操作', '<div class="task-action-list"></div>');
+        const list = mask.querySelector('.task-action-list');
+        secondary.forEach(original => {
+          const button = original.cloneNode(true);
+          button.classList.remove('task-secondary-action');
+          button.onclick = () => { closeModal(); original.click(); };
+          list.append(button);
+        });
+      });
+      more.setAttribute('aria-haspopup', 'dialog');
+    }
   }
 
   function refreshAll() {
@@ -691,12 +821,48 @@ window.Workbench = (() => {
       render._lastSelectionKey = selectionKey;
       renderInspector();
     }
+    renderReceipt();
     if (filterFocus) [...document.querySelectorAll('#jobFilters .filter')].find(button => button.dataset.filter === filterFocus)?.focus({preventScroll:true});
     else if (clearFocus) document.querySelector('#jobFilters .clear-completed')?.focus({preventScroll:true});
     else if (inspectorFocus) [...document.querySelectorAll('#inspector button')].find(button => button.textContent === inspectorFocus)?.focus({preventScroll:true});
     const details = document.querySelector('#inspector .task-error-details');
     if (details && detailOpen) details.open = true;
     if (details && detailFocus) details.querySelector('summary')?.focus({preventScroll:true});
+  }
+
+  function snapshot() {
+    savedContext = {
+      filter: AppState.filter, selected: [...AppState.selected], anchorId: AppState.anchorId,
+      scrollTop: document.getElementById('jobList')?.scrollTop || 0,
+      inspectorScrollTop: document.getElementById('inspector')?.scrollTop || 0,
+    };
+    return savedContext;
+  }
+
+  function enter(context = savedContext) {
+    let locatedId = '';
+    if (context?.taskIds) {
+      const task = sorted(AppState.tasks || []).find(item => context.taskIds.includes(item.task_id));
+      AppState.filter = '全部';
+      AppState.selected = new Set(task ? [task.task_id] : []);
+      AppState.anchorId = task?.task_id || null;
+      locatedId = task?.task_id || '';
+      if (!task) toast('关联任务已归档或移除，可在文本库查看已有结果', 'error');
+    } else if (context) {
+      AppState.filter = context.filter;
+      AppState.selected = new Set(context.selected);
+      AppState.anchorId = context.anchorId;
+    }
+    render(true);
+    if (batchReceipt?.running && !batchTimer) pollBatchAgent();
+    if (locatedId) {
+      const row = [...document.querySelectorAll('.job')].find(node => node.dataset.taskId === locatedId);
+      row?.scrollIntoView({block: 'center'});
+      row?.querySelector('.job-open')?.focus({preventScroll: true});
+    } else if (context) {
+      document.getElementById('jobList').scrollTop = context.scrollTop;
+      document.getElementById('inspector').scrollTop = context.inspectorScrollTop;
+    }
   }
 
   const EDITING_LEVELS = [
@@ -739,5 +905,5 @@ window.Workbench = (() => {
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
   }
-  return { render, refreshAll, __progressInternals: { stageLines, pipeline, percent, dataKey } };
+  return { render, enter, snapshot, refreshAll, __progressInternals: { stageLines, pipeline, percent, dataKey } };
 })();

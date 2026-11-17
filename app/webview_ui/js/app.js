@@ -247,7 +247,7 @@ function buildNav() {
   });
 }
 
-function switchView(key) {
+function switchView(key, navigation = null) {
   document.body.dataset.keyboardNavigation = 'false';
   if (!window.AccountAccess.allowed() && !['setup','subscription','settings','faq'].includes(key)) {
     key = 'setup';
@@ -256,14 +256,15 @@ function switchView(key) {
   if (key === 'guide') { if (window.Onboarding) window.Onboarding.show(); return; }
   const page = PAGES.concat(BOTTOM_PAGES).find((p) => p.key === key);
   if (!page) return;
-  if (AppState.currentView === 'library' && key === 'library') { window.Library.refreshLight(); return; }
+  if (AppState.currentView === 'library' && key === 'library' && !navigation) { window.Library.refreshLight(); return; }
   // Account revocation hides the reader immediately. Its existing editor DOM
   // remains intact and Library.render restores it after successful login.
   if (!AccountAccess.allowed() && AppState.currentView === 'library' && document.getElementById('discardChanges')) closeModal();
   if (AccountAccess.allowed() && AppState.currentView === 'library' && window.Library?.canLeave
-      && !window.Library.canLeave(() => switchView(key))) return;
+      && !window.Library.canLeave(() => switchView(key, navigation))) return;
   if (AppState.currentView === "subscription" && key !== "subscription") window.Subscription.leave();
   if (AppState.currentView === "setup" && key !== "setup") window.Setup.leave();
+  window.MaterialNavigation.entered(key, navigation);
   AppState.currentView = key;
   document.querySelectorAll(".page").forEach((el) => el.classList.remove("active"));
   const target = document.getElementById("page-" + key);
@@ -273,9 +274,9 @@ function switchView(key) {
     el.classList.toggle("active", el.dataset.page === key);
     if (el.dataset.page === key) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
   });
-  if (key === "workbench") window.Workbench.render();
-  else if (key === "videos") window.Videos.render();
-  else if (key === "library") window.Library.render();
+  if (key === "workbench") window.Workbench.enter(navigation?.target);
+  else if (key === "videos") window.Videos.render(navigation?.target);
+  else if (key === "library") window.Library.render(navigation?.target);
   else if (key === "settings") window.Settings.render();
   else if (key === "subscription") window.Subscription.render();
   else if (key === "faq") window.FaqPage.render();

@@ -35,6 +35,9 @@ fs.mkdirSync(output, {recursive:true});
       const filters = await page.locator('.filter').evaluateAll(els=>els.map(e=>({height:e.getBoundingClientRect().height, text:e.textContent})));
       assert(filters.every(f=>f.height<=40), 'filter labels must stay on one line');
       await page.evaluate(()=>switchView('library'));
+      // Compact navigation resumes the previous reader. Return explicitly to
+      // the list before checking its layout and opening another document.
+      if(width<=1000 && await page.locator('#readerBack').isVisible()) await page.locator('#readerBack').click();
       await page.waitForSelector('.doc');
       assert.equal(await page.locator('.doc-title').first().textContent(), await page.evaluate(()=>window.__fixtureTitle));
       const clipped = await page.locator('.doc-title').first().evaluate(e=>e.scrollHeight>e.clientHeight+1);
