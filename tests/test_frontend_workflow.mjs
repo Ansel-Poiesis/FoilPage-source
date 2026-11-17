@@ -154,6 +154,47 @@ test('linked video remains visible and focused in a long catalog after columns r
   } finally { await page.close(); }
 });
 
+test('late portrait covers keep the linked video visible until the user starts browsing', async () => {
+  const page = await open({width: 960});
+  let releaseCovers;
+  const coversReady = new Promise(resolve => { releaseCovers = resolve; });
+  const portrait = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAADwAAABpCAAAAABD1B/qAAAAf0lEQVR4nGNgYOHgERSVlFNS09Y3trBxcPX0DQqLik9OzykoqaxtbO3qmzR99vwlK9Zs3Lpz36Fjp89fvnHnwdOXbz99+/WfYVTzqOZRzaOaRzWPah7VPKp5VPOo5lHNo5pHNY9qHtU8qnlU86jmUc2jmkc1j2oe1TyqeZBqBgBmATaCT64IVgAAAABJRU5ErkJggg==', 'base64');
+  try {
+    await page.route('http://127.0.0.1:18766/cover/**', async route => {
+      await coversReady;
+      await route.fulfill({status: 200, contentType: 'image/png', body: portrait});
+    });
+    await page.evaluate(() => {
+      __workflowVideos = Array.from({length: 10}, (_, index) => ({
+        id: 'late-' + index, title: '合成封面 ' + index, available: true,
+        task_ids: index === 6 ? ['job:one'] : [],
+        thumbnail_url: index < 6 ? 'http://127.0.0.1:18766/cover/' + index + '.png' : '',
+      }));
+    });
+    await library(page);
+    await page.locator('#readerVideoLink').click();
+    await page.locator('.video-card.is-located[data-video-id=late-6]').waitFor();
+    releaseCovers();
+    await page.waitForFunction(() => [...document.querySelectorAll('#videoGrid img')].every(image => image.classList.contains('is-loaded')));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert(await page.locator('.video-card.is-located').evaluate(card => {
+      const rect = card.getBoundingClientRect(), grid = card.closest('#videoGrid').getBoundingClientRect();
+      return rect.top < grid.bottom && rect.bottom > grid.top;
+    }), 'late-loading portrait covers must not displace the linked video');
+    await page.locator('#videoGrid').hover();
+    await page.mouse.wheel(0, -5000);
+    await page.waitForFunction(() => document.querySelector('#videoGrid').scrollTop < 10);
+    await page.evaluate(() => {
+      const image = document.querySelector('#videoGrid img');
+      image.classList.remove('is-loaded'); image.src += '?reload';
+    });
+    await page.waitForFunction(() => [...document.querySelectorAll('#videoGrid img')].every(image => image.classList.contains('is-loaded')));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert(await page.locator('#videoGrid').evaluate(grid => grid.scrollTop < 10), 'later cover loads must respect the user scroll');
+    assert.deepEqual(page.errors, []);
+  } finally { releaseCovers(); await page.close(); }
+});
+
 test('cross-page navigation keeps its target and history through dirty-draft cancellation', async () => {
   const page = await open();
   try {

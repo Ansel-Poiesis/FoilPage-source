@@ -9,8 +9,23 @@ window.Videos = (() => {
   const deleting = new Set();
   let currentItems = new Map();
   let query = '', availability = 'all', savedScroll = 0, pendingContext = null;
+  let locatedVideoId = null, locateFrame = 0;
   let catalogLoaded = false;
   const playIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg>';
+  function stopLocating() {
+    locatedVideoId = null;
+    cancelAnimationFrame(locateFrame); locateFrame = 0;
+  }
+  function settleLocatedVideo() {
+    if (!locatedVideoId || locateFrame) return;
+    locateFrame = requestAnimationFrame(() => {
+      locateFrame = 0;
+      if (AppState.currentView !== 'videos' || !locatedVideoId) return;
+      const card = [...document.querySelectorAll('#videoGrid .video-card')].find(node => node.dataset.videoId === locatedVideoId);
+      card?.classList.add('is-located');
+      card?.scrollIntoView({block: 'center'});
+    });
+  }
   function mediaUrl(value) {
     if (typeof value !== "string") return "";
     if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value)) return value;
@@ -292,12 +307,13 @@ window.Videos = (() => {
         const image = document.createElement("img"); image.src = thumbnail; image.alt = ""; image.loading = "lazy";
         // 列归属在初配时定死，图片后载只影响列的自然高度，不重排
         // （重排会挪卡丢焦点）。
-        image.onload = () => image.classList.add("is-loaded");
+        image.onload = () => { image.classList.add("is-loaded"); settleLocatedVideo(); };
         image.onerror = () => {
           image.remove();
           button.classList.add("no-thumb");
           card.classList.add("has-no-cover");
           coverNote.hidden = item.available !== true;
+          settleLocatedVideo();
         };
         button.append(image);
       } else {
@@ -425,6 +441,7 @@ window.Videos = (() => {
       if (target.videoId) {
         const card = [...grid.querySelectorAll('.video-card')].find(node => node.dataset.videoId === target.videoId);
         if (card) {
+          locatedVideoId = target.videoId;
           card.classList.add('is-located'); card.scrollIntoView({block: 'center'});
           (card.querySelector('.video-cover:not(:disabled)') || card.querySelector('.video-menu-trigger')).focus({preventScroll: true});
         } else toast('该视频记录已移除，请刷新列表', 'error');
@@ -480,13 +497,14 @@ window.Videos = (() => {
   }
   function render(context) {
     const host = document.getElementById("page-videos");
+    stopLocating();
     if (context?.videoId) { query = ''; availability = 'all'; }
     else if (context) { query = context.query || ''; availability = context.availability || 'all'; }
     pendingContext = context || {scrollTop: savedScroll};
     closeMenu(); stopPlayer(); stopScanPoll();
     if (!pageObserver) {
       pageObserver = new MutationObserver(() => {
-        if (!host.classList.contains("active")) { ++request; closeMenu(); stopPlayer(); stopScanPoll(); leave(); }
+        if (!host.classList.contains("active")) { ++request; closeMenu(); stopPlayer(); stopScanPoll(); stopLocating(); leave(); }
       });
       pageObserver.observe(host,{attributes:true,attributeFilter:["class"]});
     }
@@ -496,13 +514,17 @@ window.Videos = (() => {
     const toolbar = host.querySelector('.videos-toolbar');
     toolbar.insertAdjacentHTML('afterbegin', '<div class="video-browse-tools"><input id="videoSearch" type="search" placeholder="搜索视频标题" aria-label="搜索视频标题" spellcheck="false"><div class="video-filters" role="group" aria-label="视频可用性"><button type="button" data-video-filter="all">全部 <span></span></button><button type="button" data-video-filter="available">可播放 <span></span></button><button type="button" data-video-filter="missing">位置待恢复 <span></span></button></div></div>');
     const search = document.getElementById('videoSearch'); search.value = query;
+    const grid = document.getElementById('videoGrid');
+    for (const event of ['wheel', 'pointerdown', 'keydown']) grid.addEventListener(event, stopLocating, {passive: true});
     search.oninput = () => {
+      stopLocating();
       query = search.value; pendingContext = null;
       if (catalogLoaded) applyItems([...currentItems.values()]); document.getElementById('videoGrid').scrollTop = 0;
     };
     toolbar.querySelectorAll('[data-video-filter]').forEach(button => {
       button.setAttribute('aria-pressed', String(button.dataset.videoFilter === availability));
       button.onclick = () => {
+        stopLocating();
         availability = button.dataset.videoFilter; pendingContext = null;
         if (catalogLoaded) applyItems([...currentItems.values()]); document.getElementById('videoGrid').scrollTop = 0;
       };
