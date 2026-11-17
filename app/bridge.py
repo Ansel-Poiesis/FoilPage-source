@@ -807,18 +807,18 @@ class Bridge(AccountBridgeMixin):
         with self._lock:
             all_downloads = self.controller.downloads.list(limit=100000)
             jobs = self.controller.queue.list_jobs()
-            # Resolve each source once, matching queue source identity while
-            # keeping linked archived jobs available to the reader navigation.
-            source_keys: dict[str, Path | str] = {}
-            jobs_by_source: dict[Path | str, list[str]] = {}
-            for job in jobs:
-                source = job["source_path"]
+            # Import and enqueue persist canonical paths. Build the history
+            # index lexically so offline sources stay cheap to list.
+            source_keys: dict[str, str] = {}
+
+            def source_key(source: str) -> str:
                 if source not in source_keys:
-                    try:
-                        source_keys[source] = Path(source).resolve()
-                    except (OSError, RuntimeError, ValueError):
-                        source_keys[source] = source
-                jobs_by_source.setdefault(source_keys[source], []).append(f"job:{job['id']}")
+                    source_keys[source] = os.path.normcase(os.path.abspath(os.path.expanduser(source)))
+                return source_keys[source]
+
+            jobs_by_source: dict[str, list[str]] = {}
+            for job in jobs:
+                jobs_by_source.setdefault(source_key(job["source_path"]), []).append(f"job:{job['id']}")
             downloads_by_media: dict[str, list[str]] = {}
             for row in all_downloads:
                 if row.get("media_id"):
@@ -836,12 +836,7 @@ class Bridge(AccountBridgeMixin):
             for media in self.controller.media.list_media(media_type="video"):
                 download = downloads.get(media["id"], {})
                 source = media["source_path"]
-                if source not in source_keys:
-                    try:
-                        source_keys[source] = Path(source).resolve()
-                    except (OSError, RuntimeError, ValueError):
-                        source_keys[source] = source
-                task_ids = list(dict.fromkeys(jobs_by_source.get(source_keys[source], [])
+                task_ids = list(dict.fromkeys(jobs_by_source.get(source_key(source), [])
                                              + downloads_by_media.get(media["id"], [])))
                 available = Path(media["source_path"]).is_file()
                 try:
