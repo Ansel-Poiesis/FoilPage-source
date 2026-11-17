@@ -414,7 +414,7 @@ window.Workbench = (() => {
         cover.setAttribute("aria-hidden", "true");
         const coverUrl = coverUrlFor(task);
         if (coverUrl) cover.style.backgroundImage = `url("${coverUrl}")`;
-        el.insertBefore(cover, el.querySelector(".job-body"));
+        el.querySelector(".job-open").prepend(cover);
         ensureCover(task);
       }
       el.querySelector(".job-title").textContent = task.display_title || "未命名";
@@ -488,9 +488,11 @@ window.Workbench = (() => {
         <div class="pct"></div>
         <div class="prog-track"><i></i></div>
         <div class="pipeline"></div>
-        <div class="meta-line"><span>状态</span><span class="ml-status"></span></div>
-        <div class="meta-line"><span>分类</span><span class="ml-cat"></span></div>
-        <div class="meta-line"><span>更新时间</span><span class="ml-time"></span></div>
+        <div class="inspector-meta">
+          <div class="meta-line"><span>状态</span><span class="ml-status"></span></div>
+          <div class="meta-line"><span>分类</span><span class="ml-cat"></span></div>
+          <div class="meta-line"><span>更新时间</span><span class="ml-time"></span></div>
+        </div>
         ${err ? `<div class="err"></div>` : ""}
         ${err && errorDetails ? `<details class="task-error-details"><summary>诊断详情（${errorCode}）</summary><div class="task-error-tools"></div><pre class="task-error-json"></pre></details>` : ""}
         <div class="actions"></div>
@@ -503,8 +505,10 @@ window.Workbench = (() => {
     }
     host.querySelector(".t").setAttribute('data-i18n-skip','');
     host.querySelector(".t").textContent = task.display_title;
+    host.querySelector(".t").title = task.display_title || "";
     const pctEl = host.querySelector(".pct");
     const measurable = ["downloading", "running", "transcribing"].includes(task.status);
+    pctEl.classList.toggle("is-status", !measurable);
     pctEl.textContent = measurable ? String(percent(task)) : rowStatusText(task);
     const pctSmall = document.createElement("small");
     pctSmall.textContent = "%";

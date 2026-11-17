@@ -16,10 +16,10 @@ fs.mkdirSync(output, {recursive:true});
     const page = await browser.newPage({viewport:{width:1280,height:800}});
     const errors = [];
     page.on('pageerror',e=>errors.push(e.message));
-    await page.addInitScript(require('./ui_fixture.cjs'),{nativeChrome:true});
+    await page.addInitScript(require('./ui_fixture.cjs'),{nativeChrome:true,taskCover:true});
     await page.goto(pathToFileURL(path.join(root,'app/webview_ui/index.html')).href);
     await page.waitForSelector('.nav-row[data-page="workbench"]');
-    for (const width of [1280,960,640,560]) {
+    for (const width of [1280,1120,960,700,640,560]) {
       await page.setViewportSize({width,height:640});
       await page.locator('.nav-row[data-page="settings"]').scrollIntoViewIfNeeded();
       const creditLayout=await page.evaluate(()=>({
@@ -31,7 +31,53 @@ fs.mkdirSync(output, {recursive:true});
       assert(creditLayout.footer.bottom<=creditLayout.height,'author credit remains inside short windows');
       assert(creditLayout.nav.bottom<=creditLayout.footer.top,'navigation cannot overlap the author credit');
       assert(creditLayout.settings.bottom<=creditLayout.footer.top,'settings remains reachable above the credit');
+      await page.evaluate(()=>switchView('workbench'));
+      await page.waitForSelector('.job-cover');
+      const taskLayout=await page.evaluate(()=>{
+        const list=document.querySelector('#jobList');
+        const row=document.querySelector('.job:has(.job-cover)');
+        const rect=selector=>row.querySelector(selector).getBoundingClientRect().toJSON();
+        return {scrollWidth:list.scrollWidth,width:list.clientWidth,title:rect('.job-title'),cover:rect('.job-cover'),stages:rect('.job-stages'),remove:rect('.job-delete')};
+      });
+      await page.screenshot({animations:'disabled',path:path.join(output,`cover-layout-${width}.png`)});
+      assert(taskLayout.scrollWidth<=taskLayout.width+1,`task list has no horizontal overflow at ${width}`);
+      assert(taskLayout.cover.right<=taskLayout.title.left,`cover stays beside the task title at ${width}`);
+      assert(taskLayout.title.right<=taskLayout.stages.left,`task title stays before stages at ${width}`);
+      assert(taskLayout.stages.right<=taskLayout.remove.left,`delete stays after stages at ${width}`);
+      const shellLayout=await page.evaluate(()=>{
+        const brand=document.querySelector('.brand');
+        const nav=document.querySelector('#nav');
+        return {brandWidth:brand.clientWidth,brandContent:brand.scrollWidth,navWidth:nav.clientWidth,navContent:nav.scrollWidth,credit:document.querySelector('#authorCredit').getBoundingClientRect().toJSON()};
+      });
+      assert(shellLayout.brandContent<=shellLayout.brandWidth+1,`brand fits the sidebar at ${width}`);
+      assert(shellLayout.navContent<=shellLayout.navWidth+1,`navigation has no horizontal scrollbar at ${width}`);
+      assert(shellLayout.credit.width>30 && shellLayout.credit.left>=0,`author link remains inside the sidebar at ${width}`);
+      if(width<=1000) {
+        await page.evaluate(()=>{AppState.selected.clear();Workbench.render();});
+        await page.locator('.job[data-task-id="job:1"] .job-open').click();
+        const details=await page.locator('#inspector').evaluate(node=>{
+          const panel=node.getBoundingClientRect();
+          const cover=node.querySelector('.inspector-cover').getBoundingClientRect();
+          const actions=node.querySelector('.actions').getBoundingClientRect();
+          return {coverHeight:cover.height,actionsVisible:actions.top>=panel.top && actions.bottom<=panel.bottom+1};
+        });
+        assert(details.coverHeight<=72,`compact inspector uses a thumbnail at ${width}`);
+        assert(details.actionsVisible,`compact inspector keeps actions visible at ${width}`);
+      }
     }
+    await page.setViewportSize({width:560,height:500});
+    await page.evaluate(()=>{
+      AppState.settings.font_scale=1.3;
+      AppState.tasks[1].display_title='从声音到文字：保留访谈原话、例子与限定条件，让一篇完整的长记录清晰可读';
+      applyTheme(); Workbench.render();
+    });
+    const compactActions=await page.locator('#inspector .actions button').evaluateAll(buttons=>buttons.map(button=>{
+      const rect=button.getBoundingClientRect();
+      return !!document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)?.closest('.actions');
+    }));
+    assert(compactActions.length>0 && compactActions.every(Boolean),'inspector actions remain reachable in a scaled 560x500 window');
+    assert(await page.locator('#inspector').evaluate(node=>node.querySelector('.pct').getBoundingClientRect().bottom<=node.querySelector('.actions').getBoundingClientRect().top),'compact progress stays above the pinned actions');
+    await page.evaluate(()=>{AppState.settings.font_scale=1;applyTheme();});
     await page.setViewportSize({width:1280,height:800});
     await page.evaluate(()=>switchView('workbench'));
     await page.waitForSelector('.nav-row[aria-current=page]');
@@ -70,9 +116,25 @@ fs.mkdirSync(output, {recursive:true});
       const css = await page.locator('.sidebar').evaluate(e=>({font:getComputedStyle(e).fontFamily,shadow:getComputedStyle(e).boxShadow,bg:getComputedStyle(e).backgroundColor}));
       assert.notEqual(css.shadow,'none',`shell depth resolves for ${theme}`);
       assert.match(css.font,/Segoe UI Variable/);
+      const scrollbarContrast=await page.locator('#nav').evaluate(node=>{
+        const canvas=document.createElement('canvas'); canvas.width=canvas.height=1;
+        const context=canvas.getContext('2d',{willReadFrequently:true});
+        const luminance=color=>{
+          context.fillStyle=color; context.fillRect(0,0,1,1);
+          const channels=[...context.getImageData(0,0,1,1).data].slice(0,3).map(value=>{
+            const channel=value/255;
+            return channel<=.04045 ? channel/12.92 : ((channel+.055)/1.055)**2.4;
+          });
+          return channels[0]*.2126+channels[1]*.7152+channels[2]*.0722;
+        };
+        const thumb=luminance(getComputedStyle(node,'::-webkit-scrollbar-thumb').backgroundColor);
+        const surface=luminance(getComputedStyle(node.closest('.sidebar')).backgroundColor);
+        return (Math.max(thumb,surface)+.05)/(Math.min(thumb,surface)+.05);
+      });
+      assert(scrollbarContrast>=3,`scrollbar remains visible in ${theme}, contrast ${scrollbarContrast.toFixed(2)}`);
       await page.mouse.move(0,0);
       await page.screenshot({animations:'disabled',path:path.join(output,`theme-${theme}.png`)});
-      themeEvidence.push({theme,...css});
+      themeEvidence.push({theme,...css,scrollbarContrast});
     }
     await page.evaluate(()=>{AppState.settings.theme='dark';applyTheme();});
     for(const width of [1280,960,640,560]) {

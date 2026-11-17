@@ -49,7 +49,7 @@ fs.mkdirSync(output, {recursive:true});
       assert.equal(await page.locator('select').filter({has:page.locator('option[value="light"]')}).count(),1);
       await page.screenshot({path:path.join(output,`settings-${width}.png`)});
       await page.evaluate(()=>switchView('subscription'));
-      await page.waitForSelector('#page-subscription.active .plan-card');
+      await page.waitForSelector('#page-subscription.active .plan-comparison');
       await page.screenshot({path:path.join(output,`subscription-${width}.png`)});
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'subscription stays within the window');
       for(const key of ['links','import','browser']) {

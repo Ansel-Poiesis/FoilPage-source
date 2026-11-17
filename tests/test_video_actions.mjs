@@ -164,6 +164,31 @@ test('refresh button lives in the topbar beside the page title',async()=>{
   }finally{await page.close();}
 });
 
+test('missing and failed covers keep titles and file availability visible',async()=>{
+  const page=await open({videoItems:[
+    {id:'cover:none',title:'保留没有封面的本地视频',source:'本地视频',available:true,deletable:true},
+    {id:'cover:broken',title:'封面读取失败仍可识别',source:'B站',available:true,deletable:true,thumbnail_url:'data:image/png;base64,AAAA'},
+    {id:'file:missing',title:'已经移走的视频',available:false,deletable:true},
+  ]});
+  try{
+    await page.waitForSelector('.video-card[data-video-id="cover:broken"].has-no-cover');
+    await page.mouse.move(0,0);
+    const layout=await page.locator('.video-card').evaluateAll(cards=>cards.map(node=>{
+      const cover=node.querySelector('.video-cover'), info=node.querySelector('.video-info');
+      const bounds=cover.getBoundingClientRect(), label=info.getBoundingClientRect();
+      return {opacity:getComputedStyle(info).opacity,position:getComputedStyle(info).position,ratio:bounds.width/bounds.height,below:label.top>=bounds.bottom};
+    }));
+    assert(layout.every(item=>item.opacity==='1' && item.position==='static' && item.below),'fallback text is always readable below the cover '+JSON.stringify(layout));
+    assert(layout.every(item=>Math.abs(item.ratio-16/9)<0.04),'fallbacks reserve the landscape cover area');
+    assert.equal(await page.locator('.video-cover-note:visible').count(),2);
+    assert(await page.locator('.video-card[data-video-id="file:missing"] .video-cover').isDisabled());
+    assert.equal(await page.locator('.video-card[data-video-id="file:missing"] .video-meta').textContent(),'文件不可用');
+    await page.locator('.video-card[data-video-id="file:missing"] .video-menu-trigger').click();
+    assert(await page.getByRole('menuitem',{name:'删除',exact:true}).isEnabled());
+    assert.deepEqual(page.errors,[]);
+  }finally{await page.close();}
+});
+
 test('title and metadata reveal on hover and keyboard focus',async()=>{
   const page=await open();try{
     const info=card(page).locator('.video-info');

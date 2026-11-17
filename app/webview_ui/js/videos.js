@@ -259,23 +259,35 @@ window.Videos = (() => {
     const built = [];
     items.forEach(item => {
       const card = document.createElement("article"); card.className = "video-card"; card.dataset.videoId = item.id;
+      card.classList.toggle("is-unavailable", item.available !== true);
       // 封面区：图片自然比例撑高（先生 2026-10-23：混合比例瀑布流），
       // 标题/来源/日期收进悬停信息层。
       const wrap = document.createElement("div"); wrap.className = "video-cover-wrap";
       const button = document.createElement("button"); button.className = "video-cover"; button.type = "button";
       button.disabled = item.available !== true || deleting.has(item.id); button.setAttribute("aria-label", "播放 " + (item.title || "未命名视频"));
       const thumbnail = mediaUrl(item.thumbnail_url);
+      card.classList.toggle("has-no-cover", !thumbnail);
+      const coverNote = document.createElement("span"); coverNote.className = "video-cover-note";
+      coverNote.textContent = "暂无封面";
+      coverNote.setAttribute("aria-hidden", "true"); coverNote.hidden = !!thumbnail || item.available !== true;
       if (thumbnail) {
         const image = document.createElement("img"); image.src = thumbnail; image.alt = ""; image.loading = "lazy";
         // 列归属在初配时定死，图片后载只影响列的自然高度，不重排
         // （重排会挪卡丢焦点）。
         image.onload = () => image.classList.add("is-loaded");
-        image.onerror = () => image.remove();
+        image.onerror = () => {
+          image.remove();
+          button.classList.add("no-thumb");
+          card.classList.add("has-no-cover");
+          coverNote.hidden = item.available !== true;
+        };
         button.append(image);
       } else {
         button.classList.add("no-thumb");
       }
-      const glyph = document.createElement("span"); glyph.className = "video-play"; glyph.innerHTML = playIcon; button.append(glyph);
+      const glyph = document.createElement("span"); glyph.className = "video-play";
+      glyph.innerHTML = item.available === true ? playIcon : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M8 15h8"/></svg>';
+      button.append(glyph, coverNote);
       const time = duration(item.duration_seconds);
       if (time) { const badge = document.createElement("span"); badge.className = "video-duration"; badge.textContent = time; button.append(badge); }
       button.onclick = () => play(item,button);

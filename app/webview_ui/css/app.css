@@ -1175,20 +1175,6 @@ body[data-theme="nord-light"] {
 .job-stage.cur { color: var(--text2); }
 .job-stage.cur .st-dot { background: var(--amber); animation: dotPulse 1.8s ease-in-out infinite; }
 
-/* ============ 工作台：隐藏任务列表/详情白色滚动条 ============ */
-.job-list,
-.wb-right {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-.job-list::-webkit-scrollbar,
-.wb-right::-webkit-scrollbar {
-  display: none !important;
-  width: 0 !important;
-  height: 0 !important;
-  background: transparent !important;
-}
-
 /* ============ 侧边栏：设置下沉占位 ============ */
 .nav { flex: 1; min-height:0; overflow-y:auto; scrollbar-width:thin; display: flex; flex-direction: column; gap: 2px; }
 .author-credit { display:flex; flex-direction:column; gap:3px; flex:none; margin:16px 8px 0; padding:4px 0; color:var(--sidebar-muted); font-size:11px; line-height:1.5; text-decoration:none; }
