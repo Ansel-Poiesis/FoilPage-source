@@ -43,3 +43,49 @@ def test_revision_changes_with_content_and_is_order_independent(tmp_path, monkey
 def test_missing_directory_yields_empty_revision(tmp_path, monkeypatch):
     monkeypatch.setattr(local_api, "_extension_dir", lambda: tmp_path / "absent")
     assert local_api._bundled_extension_revision() == ""
+
+
+def _capture_diagnostic_body() -> dict:
+    return {
+        "outcome": "url_captured", "reason": "", "url_source": "captured_media",
+        "elapsed_ms": 1, "main_world_present": True, "main_world_stale": False,
+        "main_world_version": "0.1.5", "detail_requests": 1, "detail_responses": 1,
+        "detail_json_responses": 1, "detail_json_failures": 0, "media_items": 1,
+        "response_aweme_nodes": 1, "response_video_nodes": 1,
+        "response_play_addr_nodes": 1, "response_url_candidates": 1,
+        "response_https_candidates": 1, "response_allowed_urls": 1,
+        "captured_targets": 1, "target_captured": True,
+        "player_present": True, "player_ready_state": 4, "player_paused": False,
+    }
+
+
+def test_capture_diagnostic_accepts_age_and_refresh_observability():
+    body = _capture_diagnostic_body()
+    body.update({
+        "newest_candidate_age_ms": 489137,
+        "candidate_ages_ms": [489137, 489137, 489137],
+        "capture_refresh": "fail:replay_rejected",
+    })
+    cleaned = local_api._sanitize_capture_diagnostic(body)
+    assert cleaned["newest_candidate_age_ms"] == 489137
+    assert cleaned["candidate_ages_ms"] == [489137] * 3
+    assert cleaned["capture_refresh"] == "fail:replay_rejected"
+    # 旧扩展缺省：三个新字段均可省略且不报错。
+    legacy = local_api._sanitize_capture_diagnostic(_capture_diagnostic_body())
+    assert legacy["newest_candidate_age_ms"] is None
+    assert legacy["candidate_ages_ms"] == []
+    assert legacy["capture_refresh"] == ""
+
+
+def test_capture_diagnostic_rejects_bad_age_observability():
+    import pytest
+    for bad in (
+        {"newest_candidate_age_ms": -1},
+        {"newest_candidate_age_ms": True},
+        {"candidate_ages_ms": [1, 2, "3"]},
+        {"candidate_ages_ms": list(range(9))},
+        {"capture_refresh": "x" * 41},
+    ):
+        body = _capture_diagnostic_body() | bad
+        with pytest.raises(ValueError):
+            local_api._sanitize_capture_diagnostic(body)

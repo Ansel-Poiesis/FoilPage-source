@@ -777,7 +777,9 @@
   function requestCaptureRefresh(videoId, timeoutMs = 9000) {
     const id = String(videoId || "");
     const nonce = String(document.documentElement?.dataset?.shengjianMainNonce || "");
-    if (!id || !nonce || typeof window.postMessage !== "function") return Promise.resolve(false);
+    if (!id || !nonce || typeof window.postMessage !== "function") {
+      return Promise.resolve({ ok: false, reason: "no_nonce" });
+    }
     return new Promise((resolve) => {
       let settled = false;
       const finish = (value) => {
@@ -785,30 +787,33 @@
         settled = true;
         try { window.removeEventListener("message", onResult); } catch { /* noop */ }
         // 捕获消息经 flush 有 ~150ms 批处理延迟，稍候再放行读档。
-        setTimeout(() => resolve(value), value ? 350 : 0);
+        setTimeout(() => resolve(value), value.ok ? 350 : 0);
       };
       const onResult = (event) => {
         const data = event?.data;
         if (!data || data.source !== "shengjian-capture-refresh-result") return;
         if (event.origin !== window.location.origin) return;
         if (String(data.nonce || "") !== nonce || String(data.videoId || "") !== id) return;
-        finish(Boolean(data.ok));
+        finish({ ok: Boolean(data.ok), reason: String(data.reason || (data.ok ? "" : "main_rejected")) });
       };
       window.addEventListener("message", onResult);
-      setTimeout(() => finish(false), timeoutMs);
+      setTimeout(() => finish({ ok: false, reason: "timeout" }), timeoutMs);
       try {
         window.postMessage({ source: "shengjian-capture-refresh", nonce, videoId: id }, window.location.origin);
       } catch {
-        finish(false);
+        finish({ ok: false, reason: "post_failed" });
       }
     });
   }
 
-  // 最新候选过龄才刷新（有新鲜签名就不多打一次平台请求）。
-  async function maybeRefreshCapture(videoId) {
-    if (!videoId) return false;
-    if (newestCandidateAgeMs(videoId) <= FRESH_HINT_MS) return false;
-    return requestCaptureRefresh(videoId);
+  // 最新候选过龄才刷新（有新鲜签名就不多打一次平台请求）。返回可观测结果。
+  async function maybeRefreshCapture(videoId, { skipWhenFresh = true } = {}) {
+    if (!videoId) return { attempted: false, ok: false, reason: "no_video" };
+    if (skipWhenFresh && newestCandidateAgeMs(videoId) <= FRESH_HINT_MS) {
+      return { attempted: false, ok: true, reason: "fresh_skip" };
+    }
+    const outcome = await requestCaptureRefresh(videoId);
+    return { attempted: true, ok: Boolean(outcome.ok), reason: outcome.reason || (outcome.ok ? "ok" : "unknown") };
   }
 
   function waitForMediaUrl(active, tries = 10, gapMs = 300) {
@@ -871,7 +876,7 @@
     }
   }
 
-  function captureDiagnostic(outcome, reason, elapsedMs, target, urlSource = "") {
+  function captureDiagnostic(outcome, reason, elapsedMs, target, urlSource = "", refreshOutcome = "") {
     const status = mainWorldStatus();
     const video = target.root?.querySelector("video") || visibleVideo();
     return {
@@ -903,6 +908,7 @@
       newest_candidate_age_ms: target.videoId && Number.isFinite(newestCandidateAgeMs(target.videoId))
         ? newestCandidateAgeMs(target.videoId) : null,
       candidate_ages_ms: target.videoId ? capturedCandidateAgesMs(target.videoId) : [],
+      capture_refresh: refreshOutcome,
       target_cover_held: Boolean(target.videoId && coverUrlFor(String(target.videoId))),
       unbound_capture: Boolean(latestUnboundCapture.url),
       player_present: Boolean(video),
@@ -1160,10 +1166,15 @@
       const readStartedAt = Date.now();
       // 提交前刷新（先生 2026-11-18）：候选过龄且播放器没有在播本视频时，
       // 先请 MAIN 世界用页面自己的 detail 请求取一次新签名——旧签名提交
-      // 上去三通道全 403，是风控波期间失败率飙升的主因。刷新失败静默降级。
+      // 上去三通道全 403，是风控波期间失败率飙升的主因。刷新结果进诊断
+      // （重放常被平台拒：a_bogus 一次性/短时效，靠自动重试的整页刷新兜底）。
+      let captureRefreshOutcome = "skip:player_active";
       try {
-        if (!activeMediaUrl(video)) await maybeRefreshCapture(video.videoId);
-      } catch { /* 刷新失败照常提交，走既有回退 */ }
+        if (!activeMediaUrl(video)) {
+          const outcome = await maybeRefreshCapture(video.videoId);
+          captureRefreshOutcome = `${outcome.attempted ? (outcome.ok ? "ok" : "fail") : "skip"}:${outcome.reason}`;
+        }
+      } catch { captureRefreshOutcome = "fail:exception"; }
       const immediateMedia = resolveMediaUrl(video);
       const initialCandidates = mediaCandidatesFor(video.videoId, activeMediaUrl(video), immediateMedia);
       const initialPlayUrl = playEndpointFor(video.videoId, activeMediaUrl(video), immediateMedia);
@@ -1220,7 +1231,7 @@
         const reasonCode = gateReason(status, { targetCaptured });
         const reason = gateMessage(status, { targetCaptured });
         rememberCaptureRetryGuide(target.videoId);
-        reportCaptureDiagnostic(captureDiagnostic("url_missing", reasonCode, Date.now() - readStartedAt, target));
+        reportCaptureDiagnostic(captureDiagnostic("url_missing", reasonCode, Date.now() - readStartedAt, target, "", captureRefreshOutcome));
         try {
           console.warn(`[FoilPage] 抖音未捕获播放地址，转交后台解析：${JSON.stringify({
             reason: reasonCode,
@@ -1242,7 +1253,7 @@
       }
       if (mediaUrl || playUrl) {
         const urlSource = activeMediaUrl(target) ? "player" : mediaUrl ? "captured_media" : "play_endpoint";
-        reportCaptureDiagnostic(captureDiagnostic("url_captured", "", Date.now() - readStartedAt, target, urlSource));
+        reportCaptureDiagnostic(captureDiagnostic("url_captured", "", Date.now() - readStartedAt, target, urlSource, captureRefreshOutcome));
       }
         sendRuntimeMessage({
           type: "shengjian-page-submit",
@@ -1639,17 +1650,32 @@
     }
     if (message?.type === "shengjian-recapture-retry") {
       // 先生 2026-11-18：终态双通道失败后的自动重捕获重试（每任务最多一
-      // 次，由后台调度与去重）。只在本页仍显示目标视频时执行；刷新拿新
-      // 签名后按正常提交链路重发（新凭据、新任务行；旧失败行由同 URL 成
-      // 功后的取代清理收尾）。转写意图不自动重试——重下载成功后任务页可
-      // 一键转写，避免自动链路误耗转写额度。
+      // 次，由后台调度与去重）。只在本页仍显示目标视频时执行。先试重放
+      // detail 拿新签名；重放常被平台拒（a_bogus 一次性/短时效），此时落
+      // 「整页刷新」兜底——把错误指引里的「按 F5」自动化：先留意图再刷
+      // 新，新页面拿到新鲜签名后由 checkRecaptureIntent 自动补交。转写
+      // 意图不自动重试，避免误耗转写额度。
       void (async () => {
         const videoId = String(message.videoId || "");
         const current = activeVideo();
         if (!videoId || current.videoId !== videoId) { sendResponse?.({ ok: false }); return; }
         showToast("正在重新获取下载地址，自动重试…");
-        try { await requestCaptureRefresh(videoId); } catch { /* 尽力而为 */ }
+        let refreshed = false;
+        try { refreshed = (await requestCaptureRefresh(videoId)).ok; } catch { /* 尽力而为 */ }
         const playerUrl = activeMediaUrl(current);
+        const freshEnough = Boolean(playerUrl)
+          || newestCandidateAgeMs(videoId) <= FRESH_HINT_MS;
+        if (!refreshed && !freshEnough) {
+          try {
+            sessionStorage.setItem("shengjianRecaptureIntent", JSON.stringify({
+              videoId, taskId: String(message.taskId || ""), at: Date.now(),
+            }));
+          } catch { sendResponse?.({ ok: false, reload: false }); return; }
+          showToast("重放被平台拒绝：正在刷新视频页重新获取地址…");
+          sendResponse?.({ ok: true, reload: true });
+          setTimeout(() => { try { location.reload(); } catch { /* 导航失败即放弃 */ } }, 400);
+          return;
+        }
         const immediateMedia = playerUrl || capturedMediaUrl(videoId, false);
         const mediaCandidates = mediaCandidatesFor(videoId, playerUrl, immediateMedia);
         const playUrl = playEndpointFor(videoId, playerUrl, immediateMedia);
@@ -1672,6 +1698,61 @@
     }
     return undefined;
   });
+
+  // 重载重取（先生 2026-11-18）：自动重试的重放被拒时留下意图并整页刷新；
+  // 新页面就绪且拿到新鲜签名（≤FRESH_HINT_MS 或播放器在播）后自动补交。
+  // 一次性语义：补交/过期/视频不符即清除，绝不反复打扰。
+  function checkRecaptureIntent() {
+    let intent = null;
+    try {
+      const raw = sessionStorage.getItem("shengjianRecaptureIntent");
+      if (raw) intent = JSON.parse(raw);
+    } catch { return; }
+    if (!intent || typeof intent.videoId !== "string" || !/^\d{10,24}$/.test(intent.videoId)) {
+      try { sessionStorage.removeItem("shengjianRecaptureIntent"); } catch { /* noop */ }
+      return;
+    }
+    if (Date.now() - Number(intent.at || 0) > 90_000) {
+      try { sessionStorage.removeItem("shengjianRecaptureIntent"); } catch { /* noop */ }
+      return;
+    }
+    const deadline = Date.now() + 25_000;
+    const attempt = () => {
+      const current = activeVideo();
+      const playerUrl = current.videoId === intent.videoId ? activeMediaUrl(current) : "";
+      if (current.videoId === intent.videoId
+          && (playerUrl || newestCandidateAgeMs(intent.videoId) <= FRESH_HINT_MS)) {
+        const immediateMedia = playerUrl || capturedMediaUrl(intent.videoId, false);
+        const mediaCandidates = mediaCandidatesFor(intent.videoId, playerUrl, immediateMedia);
+        const playUrl = playEndpointFor(intent.videoId, playerUrl, immediateMedia);
+        if (mediaCandidates.length || playUrl) {
+          try { sessionStorage.removeItem("shengjianRecaptureIntent"); } catch { /* noop */ }
+          sendRuntimeMessage({
+            type: "shengjian-page-submit",
+            url: `https://www.douyin.com/video/${intent.videoId}`,
+            title: current.title,
+            mediaUrl: mediaCandidates[0] || playUrl || immediateMedia,
+            mediaCandidates,
+            candidateAgesMs: capturedCandidateAgesMs(intent.videoId),
+            playUrl,
+            coverUrl: coverUrlFor(intent.videoId),
+            transcribe: false,
+            recaptureOf: String(intent.taskId || ""),
+          }, () => { /* 回执由既有任务通知链路负责 */ });
+          showToast("已重新获取下载地址，自动重试下载");
+          return;
+        }
+      }
+      if (Date.now() >= deadline) {
+        try { sessionStorage.removeItem("shengjianRecaptureIntent"); } catch { /* noop */ }
+        showToast("自动重试未能取得新地址：请确认视频可播放后再点一次下载", true);
+        return;
+      }
+      setTimeout(attempt, 1200);
+    };
+    attempt();
+  }
+  checkRecaptureIntent();
 
   // Test/diagnostics hook. MV3 content scripts run in an isolated world, so page
   // scripts cannot reach these internals; only the extension and Node harness can.
@@ -1696,6 +1777,7 @@
     requestCaptureReplay,
     requestCaptureRefresh,
     maybeRefreshCapture,
+    checkRecaptureIntent,
     capturedMediaEntries,
     capturedCandidateAgesMs,
     newestCandidateAgeMs,

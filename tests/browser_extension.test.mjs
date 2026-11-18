@@ -2968,6 +2968,6 @@ test("capture candidates order by freshness with stale signatures demoted", asyn
   const ages = api.capturedCandidateAgesMs(target);
   assert.equal(ages.length, 3);
   assert.ok(ages[0] <= 2000 && ages[2] > 10 * 60 * 1000);
-  // 无 MAIN 世界（无 nonce）时刷新立即降级为 false，不阻塞提交链路。
-  assert.equal(await api.requestCaptureRefresh(target, 50), false);
+  // 无 MAIN 世界（无 nonce）时刷新立即降级，不阻塞提交链路。
+  assert.equal((await api.requestCaptureRefresh(target, 50)).ok, false);
 });

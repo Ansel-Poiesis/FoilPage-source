@@ -32,6 +32,7 @@ async function harness(options = {}) {
   let writeHandler = null;
   const saved = structuredClone(options.saved || {});
   const healthCalls = []; const requests = []; const sockets = []; const reloads = [];
+  const sent = [];
   const alarms = [];
   const timers = new Map();
   let nextTimer = 1;
@@ -72,8 +73,13 @@ async function harness(options = {}) {
       onChanged: event(),
     },
     tabs: {
-      query(query, callback) { callback?.([]); return Promise.resolve([]); },
-      sendMessage(tabId, message, callback) { callback?.({}); return Promise.resolve({}); },
+      query(query, callback) {
+        const result = options.douyinTab && (!query || !query.url || JSON.stringify(query.url).includes('douyin'))
+          ? [{ id: 7, url: `https://www.douyin.com/video/${options.douyinTab}`, active: true }]
+          : [];
+        callback?.(result); return Promise.resolve(result);
+      },
+      sendMessage(tabId, message, callback) { sent.push(message); callback?.({ ok: true }); return Promise.resolve({ ok: true }); },
     },
     cookies: { async getAll() { throw new Error('update checks must not read credentials'); } },
     downloads: {
@@ -117,10 +123,10 @@ async function harness(options = {}) {
   };
   let source = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
   source = source.replace(/^import .*;\r?\n/gm, '');
-  vm.runInNewContext(source + '\nglobalThis.fixture = { selfUpdateCheck, withExtensionOperation, localTaskWatchers, inFlightBrowserDownloads, desktopRequestsInFlight, fallbacksInFlight };', context);
+  vm.runInNewContext(source + '\nglobalThis.fixture = { selfUpdateCheck, withExtensionOperation, localTaskWatchers, inFlightBrowserDownloads, desktopRequestsInFlight, fallbacksInFlight, scheduleRecaptureRetry };', context);
   await settle();
   return {
-    ...context.fixture, saved, requests, healthCalls, reloads, alarms, timers,
+    ...context.fixture, saved, requests, healthCalls, reloads, alarms, timers, sent,
     advance(ms) { now += ms; },
     setLatest(value) { latest = value; },
     setHealthRevision(value) { healthRevision = value; },
@@ -137,6 +143,7 @@ async function harness(options = {}) {
       await settle();
     },
     async alarm() { chrome.alarms.onAlarm.emit({ name: 'shengjianFailureReports' }); await settle(); },
+    async fireAlarm(name) { chrome.alarms.onAlarm.emit({ name }); await settle(); },
   };
 }
 
@@ -433,4 +440,38 @@ test('revision reload defers while the popup is open and retries after it closes
   await fixture.message();
   assert.equal(fixture.reloads.length, 1);
   assert.equal(fixture.saved.shengjianExtensionRevision, REVISION_A);
+});
+
+// 先生 2026-11-18 22:34 实测：MV3 SW 的 30s setTimeout 随 SW 挂起被杀，
+// 自动重试从未触发——改为 chrome.alarms 一次性闹钟，闹钟触发后向仍在
+// 显示该视频的标签派发重捕获重试。
+test('terminal douyin failure retries via a chrome.alarm, not a SW timer', async () => {
+  const RECAPTURE_VIDEO = '1234567890123456';
+  const fixture = await harness({
+    douyinTab: RECAPTURE_VIDEO,
+    requestHandler: (path) => {
+      if (path.startsWith('/v1/downloads/')) {
+        return { job: { id: TASK_ID, status: 'failed',
+          url: `https://www.douyin.com/video/${RECAPTURE_VIDEO}`, options: {} } };
+      }
+      if (path === '/v1/downloads?limit=6') return { jobs: [] };
+      return { ok: true };
+    },
+  });
+  fixture.scheduleRecaptureRetry({
+    id: TASK_ID, url: `https://www.douyin.com/video/${RECAPTURE_VIDEO}`,
+    error: { code: 'douyin_verification_required' }, options: {},
+  });
+  const alarm = fixture.alarms.find(entry => entry.name.startsWith('shengjianRecaptureRetry-'));
+  assert.ok(alarm, '重试必须排程为闹钟');
+  assert.ok(alarm.schedule.delayInMinutes >= 0.5, '退避至少 0.5 分钟');
+  await fixture.fireAlarm(alarm.name);
+  const retryMessage = fixture.sent.find(entry => entry.type === 'shengjian-recapture-retry');
+  assert.ok(retryMessage, '闹钟触发后必须派发重捕获重试');
+  assert.equal(retryMessage.videoId, RECAPTURE_VIDEO);
+  assert.equal(retryMessage.taskId, TASK_ID);
+  // 每任务一次：再次排程被持久旗标/内存集合挡住。
+  fixture.scheduleRecaptureRetry({ id: TASK_ID, url: `https://www.douyin.com/video/${RECAPTURE_VIDEO}`,
+    error: { code: 'douyin_verification_required' }, options: {} });
+  assert.equal(fixture.alarms.filter(entry => entry.name.startsWith('shengjianRecaptureRetry-')).length, 1);
 });

@@ -1080,6 +1080,37 @@ async function withoutRejectedCandidates(fresh, job) {
   };
 }
 
+// 重试用 chrome.alarms（MV3 SW 空闲 ~30s 即挂起，setTimeout 会被一起杀掉
+// ——2026-11-18 22:34 实测重试未触发，改为 0.5 分钟一次性闹钟）。
+const RECAPTURE_ALARM_PREFIX = "shengjianRecaptureRetry-";
+
+async function runRecaptureRetry(taskId) {
+  try {
+    const result = await request(`/v1/downloads/${encodeURIComponent(taskId)}`);
+    const job = result?.job;
+    const videoId = videoIdFromPageUrl(String(job?.url || ""));
+    if (!videoId || String(job?.status || "") !== "failed") return;
+    const tabs = await new Promise((resolve) => {
+      chrome.tabs.query({ url: ["https://*.douyin.com/*"] }, (queryResult) => resolve(queryResult));
+    });
+    const tab = (Array.isArray(tabs) ? tabs : [])
+      .filter(entry => typeof entry?.id === "number" && videoIdFromPageUrl(entry.url) === videoId)
+      .sort((left, right) => (right.active ? 1 : 0) - (left.active ? 1 : 0))[0];
+    if (!tab) return;
+    chrome.tabs.sendMessage(tab.id, { type: "shengjian-recapture-retry", videoId, taskId }, (response) => {
+      if (chrome.runtime.lastError || !response?.ok) return;
+      console.log("[FoilPage] 自动重捕获重试已派发，原任务", taskId,
+        response?.reload ? "（页面重载重取）" : "");
+    });
+  } catch { /* 桌面离线/任务不存在：静默，任务页保留失败指引 */ }
+}
+
+chrome.alarms?.onAlarm?.addListener?.((alarm) => {
+  if (alarm?.name && alarm.name.startsWith(RECAPTURE_ALARM_PREFIX)) {
+    void runRecaptureRetry(alarm.name.slice(RECAPTURE_ALARM_PREFIX.length));
+  }
+});
+
 function scheduleRecaptureRetry(job) {
   const taskId = String(job?.id || "");
   if (!taskId || recaptureAlreadyScheduled(taskId)) return;
@@ -1092,24 +1123,7 @@ function scheduleRecaptureRetry(job) {
   recaptureRetried.add(taskId);
   void markTaskNotification(taskId, "recaptureRetried").catch(() => {});
   void notifyTabs("下载被平台风控拦截，稍后将自动重新获取地址重试一次", false, job, "fallback").catch(() => {});
-  const timer = setTimeout(() => {
-    void (async () => {
-      try {
-        const tabs = await new Promise((resolve) => {
-          chrome.tabs.query({ url: ["https://*.douyin.com/*"] }, (result) => resolve(result));
-        });
-        const tab = (Array.isArray(tabs) ? tabs : [])
-          .filter(entry => typeof entry?.id === "number" && videoIdFromPageUrl(entry.url) === videoId)
-          .sort((left, right) => (right.active ? 1 : 0) - (left.active ? 1 : 0))[0];
-        if (!tab) return;
-        chrome.tabs.sendMessage(tab.id, { type: "shengjian-recapture-retry", videoId, taskId }, (response) => {
-          if (chrome.runtime.lastError || !response?.ok) return;
-          console.log("[FoilPage] 自动重捕获重试已提交，原任务", taskId);
-        });
-      } catch { /* 无可重试标签：任务页仍保留失败指引 */ }
-    })();
-  }, 30000);
-  timer.unref?.();
+  chrome.alarms?.create?.(`${RECAPTURE_ALARM_PREFIX}${taskId}`, { delayInMinutes: 0.5 });
 }
 async function handleLocalTaskFailed(job) {
   const taskId = String(job?.id || "");

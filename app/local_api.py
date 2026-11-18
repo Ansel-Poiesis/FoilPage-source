@@ -162,6 +162,20 @@ def _sanitize_capture_diagnostic(body: dict[str, Any]) -> dict[str, Any]:
     version = body.get("main_world_version", "")
     if not isinstance(version, str) or len(version) > 24 or (version and not re.fullmatch(r"\d+(?:\.\d+){1,3}", version)):
         raise ValueError("采集诊断扩展版本无效")
+    # 签名年龄与刷新结果观测（先生 2026-11-18）：旧扩展缺省不影响。
+    newest_age = body.get("newest_candidate_age_ms")
+    if newest_age is not None and (isinstance(newest_age, bool) or not isinstance(newest_age, int)
+                                   or not 0 <= newest_age <= 24 * 60 * 60 * 1000):
+        raise ValueError("采集诊断候选年龄无效")
+    raw_ages = body.get("candidate_ages_ms", [])
+    if not isinstance(raw_ages, list) or len(raw_ages) > 8 or any(
+        isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 24 * 60 * 60 * 1000
+        for value in raw_ages
+    ):
+        raise ValueError("采集诊断候选年龄列表无效")
+    refresh_outcome = body.get("capture_refresh", "")
+    if not isinstance(refresh_outcome, str) or len(refresh_outcome) > 40:
+        raise ValueError("采集诊断刷新结果无效")
     return {
         "outcome": outcome,
         "reason": reason,
@@ -191,6 +205,9 @@ def _sanitize_capture_diagnostic(body: dict[str, Any]) -> dict[str, Any]:
         "player_ready_state": bounded_int("player_ready_state", 4),
         "player_paused": flag("player_paused", nullable=True),
         "url_source": url_source,
+        "newest_candidate_age_ms": newest_age,
+        "candidate_ages_ms": raw_ages,
+        "capture_refresh": refresh_outcome,
     }
 
 
