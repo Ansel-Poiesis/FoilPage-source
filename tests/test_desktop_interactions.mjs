@@ -340,7 +340,7 @@ test('gallery task shows the badge and a lazy inspector grid',async()=>{
   }finally{await page.close();}
 });
 
-test('pointer selections use a background while keyboard and high-contrast focus stay visible', async () => {
+test('pointer selections use a raised surface without an inset edge while keyboard and high-contrast focus stay visible', async () => {
   const page = await open();
   try {
     await page.locator('.job-open').first().click();
@@ -359,7 +359,7 @@ test('pointer selections use a background while keyboard and high-contrast focus
           return {shadow: style.boxShadow, background: style.backgroundColor};
         });
       });
-      assert(selection.every(style => style.shadow === 'none'), `${theme} selection must not add an inset edge`);
+      assert(selection.every(style => style.shadow !== 'none' && !style.shadow.includes('inset')), `${theme} selection uses surface depth without an inset edge`);
       assert(selection.every(style => style.background !== 'rgba(0, 0, 0, 0)'), `${theme} selection needs a visible fill`);
     }
     await page.locator('[data-page=workbench]').focus();

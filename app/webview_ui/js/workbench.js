@@ -142,6 +142,7 @@ window.Workbench = (() => {
         </div>
         <aside class="wb-right" id="inspector" aria-label="任务详情"></aside>
       </div>`;
+    host.onkeydown = selectionKeydown;
   }
 
   function renderFilters() {
@@ -225,11 +226,14 @@ window.Workbench = (() => {
     const canCancel = sel.some(task => ACTIVE.includes(task.status));
     const canAgent = sel.some(task => task.kind === 'transcription' && task.status === 'done');
     host.innerHTML = `
-      <div class="inspector">
+      <div class="inspector inspector-selection">
         <div class="t">已选 ${count} 项</div>
-        <div class="meta-line"><span>进行中</span><span>${activeN}</span></div>
-        <div class="meta-line"><span>已完成</span><span>${doneN}</span></div>
-        <div class="meta-line"><span>失败/取消</span><span>${failedN}</span></div>
+        <p class="selection-shortcuts"><kbd>Ctrl</kbd> 多选 <span>·</span> <kbd>Shift</kbd> 连选 <span>·</span> <kbd>Esc</kbd> 清空</p>
+        <div class="inspector-meta selection-stats">
+          <div class="meta-line"><span>进行中</span><span>${activeN}</span></div>
+          <div class="meta-line"><span>已完成</span><span>${doneN}</span></div>
+          <div class="meta-line"><span>失败/取消</span><span>${failedN}</span></div>
+        </div>
         <div class="actions"></div>
       </div>`;
     const actions = host.querySelector(".actions");
@@ -242,6 +246,8 @@ window.Workbench = (() => {
       actions.appendChild(b);
       return b;
     };
+    const clearSelectionButton = addBtn("取消选择", "ghost small", false, () => clearSelection(false));
+    clearSelectionButton.setAttribute('aria-keyshortcuts', 'Escape');
     const retryButton = addBtn("重试/重新转写", "ghost small", !canRetry || batchSubmitting, async () => {
       if (batchSubmitting) return;
       batchSubmitting = true; retryButton.disabled = true;
@@ -413,6 +419,7 @@ window.Workbench = (() => {
   function selectTask(rows, currentId, event, checkbox) {
     const cur = rows.findIndex(task => task.task_id === currentId);
     if (cur < 0) return;
+    document.getElementById('jobList').dataset.selectionInput = event.detail === 0 ? 'keyboard' : 'pointer';
     const anchor = rows.findIndex(task => task.task_id === AppState.anchorId);
     if (event.shiftKey && anchor >= 0) {
       if (rangeAnchor !== AppState.anchorId || !rangeBaseline) {
@@ -428,13 +435,40 @@ window.Workbench = (() => {
       if (checkbox || event.ctrlKey || event.metaKey) {
         AppState.selected.has(currentId) ? AppState.selected.delete(currentId) : AppState.selected.add(currentId);
       } else {
-        AppState.selected = new Set([currentId]);
+        if (AppState.selected.has(currentId)) AppState.selected.delete(currentId);
+        else AppState.selected = new Set([currentId]);
       }
       AppState.anchorId = currentId;
       rangeBaseline = null;
       rangeAnchor = null;
     }
     render();
+  }
+
+  function clearSelection(instant = true) {
+    const focus = document.activeElement, anchor = AppState.anchorId || [...AppState.selected].at(-1);
+    document.getElementById('jobList').dataset.selectionInput = instant ? 'keyboard' : 'pointer';
+    AppState.selected.clear(); AppState.anchorId = null;
+    rangeBaseline = null; rangeAnchor = null;
+    render();
+    if (focus && !focus.isConnected) {
+      [...document.querySelectorAll('#jobList .job')].find(row => row.dataset.taskId === anchor)
+        ?.querySelector('.job-open')?.focus({preventScroll: true});
+    }
+  }
+
+  function selectionKeydown(event) {
+    if (event.defaultPrevented || event.target.isContentEditable || event.target.closest('textarea,select,input:not([type="checkbox"])')) return;
+    if (event.key === 'Escape' && AppState.selected.size) {
+      event.preventDefault(); event.stopPropagation(); clearSelection();
+    } else if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'a' && event.target.closest('#jobList')) {
+      event.preventDefault();
+      const rows = filtered(AppState.tasks || []);
+      document.getElementById('jobList').dataset.selectionInput = 'keyboard';
+      AppState.selected = new Set(rows.map(task => task.task_id));
+      AppState.anchorId ||= rows[0]?.task_id || null;
+      rangeBaseline = null; rangeAnchor = null; render();
+    }
   }
 
   /* 单个任务右侧的双阶段进度：每个百分比只属于当前阶段，完成后显示语义化状态。 */
@@ -500,7 +534,7 @@ window.Workbench = (() => {
       el.dataset.taskId = task.task_id;
       el.setAttribute("role", "listitem");
       el.innerHTML = `
-        <label class="job-check"><input class="job-check-input" type="checkbox" ${AppState.selected.has(task.task_id) ? "checked" : ""} aria-label="选择任务"></label>
+        <label class="job-check"><input class="job-check-input" type="checkbox" ${AppState.selected.has(task.task_id) ? "checked" : ""} aria-label="选择任务"><svg class="job-check-visual" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path class="job-check-tick" pathLength="1" d="m6 12 4 4 8-9"/></svg></label>
         <button class="job-body job-open" type="button" aria-pressed="${AppState.selected.has(task.task_id)}">
           <span class="job-title"></span>
         </button>
@@ -555,6 +589,7 @@ window.Workbench = (() => {
         // A label forwards its own click to the checkbox; do not select twice.
         if (e.target.closest(".job-check")) return;
         selectTask(rows, task.task_id, e, false);
+        if (!e.target.closest('button')) el.querySelector('.job-open').focus({preventScroll: true});
       };
       list.appendChild(el);
     });
@@ -571,7 +606,7 @@ window.Workbench = (() => {
     const selectedId = AppState.selected.size === 1 ? [...AppState.selected][0] : null;
     const task = tasks.find((t) => t.task_id === selectedId) || null;
     if (!task) {
-      host.innerHTML = `<div class="empty"><span class="empty-symbol" aria-hidden="true">${AppIcons('tasks')}</span><div class="big">查看任务详情</div><div class="sub">选择一项查看进度与文件；勾选多项，批量处理。</div></div>`;
+      host.innerHTML = `<div class="empty"><span class="empty-symbol" aria-hidden="true">${AppIcons('tasks')}</span><div class="big">查看任务详情</div><div class="sub">单击选择，再次单击取消；勾选多项，批量处理。</div><p class="selection-shortcuts"><kbd>Ctrl+A</kbd> 全选当前列表 <span>·</span> <kbd>Esc</kbd> 清空</p></div>`;
       return;
     }
     const steps = pipeline(task);
