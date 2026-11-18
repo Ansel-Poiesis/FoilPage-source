@@ -13,15 +13,17 @@ window.Tools = (() => {
     state.setAttribute('role', linkError ? 'alert' : 'status');
   }
   let importBusy = false, importMessage = '', importError = false, dropEvents = null;
+  let importedTaskIds = [];
   function paintImport() {
     const zone = document.getElementById('mediaDropZone');
     if (!zone) return;
     zone.setAttribute('aria-busy', String(importBusy));
     zone.classList.toggle('is-reading', importBusy);
-    zone.querySelectorAll('button').forEach(button => button.disabled = importBusy);
+    zone.querySelectorAll('.tool-buttons button').forEach(button => button.disabled = importBusy);
     const state = zone.querySelector('#importState');
     state.textContent = importBusy ? '正在读取媒体，加入转写队列…' : importMessage;
     state.setAttribute('role', importError ? 'alert' : 'status');
+    zone.querySelector('#viewImportedTasks').hidden = importBusy || !importedTaskIds.length;
     zone.querySelector('.import-drop-title').textContent = importBusy ? '正在读取媒体' : '把视频或录音拖到这里';
   }
   function beginImport() {
@@ -33,11 +35,13 @@ window.Tools = (() => {
     importBusy = false;
     if (result?.cancelled) { paintImport(); return; }
     importError = !result?.ok;
+    importedTaskIds = !importError && Array.isArray(result.enqueued)
+      ? result.enqueued.map(id => 'job:' + id)
+      : [];
     if (importError) importMessage = result?.error || '导入未完成，请重试';
     else {
-      const queued = Array.isArray(result.enqueued) ? result.enqueued.length : 0;
-      const count = Number(result.imported) || 0;
-      importMessage = queued ? `已加入 ${queued} 项转写任务` : count ? `已读取 ${count} 项媒体，已有转写任务` : '已加入转写队列';
+      const queued = importedTaskIds.length;
+      importMessage = queued ? `已加入 ${queued} 项转写任务` : '本次未新增任务';
       if (result.skipped) importMessage += `，${result.skipped} 项已存在`;
       if (result.failed) importMessage += `，${result.failed} 项未导入`;
     }
@@ -50,6 +54,28 @@ window.Tools = (() => {
     return AppState.currentView === 'import' && beginImport();
   }
   function finishNativeDrop(result) { finishImport(result); }
+  async function viewImportedTasks(button) {
+    const ids = importedTaskIds;
+    if (!ids.length || importBusy || button.disabled) return;
+    const previousTasks = AppState.tasks;
+    const isCurrent = () => AppState.currentView === 'import' && button.isConnected && !importBusy && importedTaskIds === ids;
+    button.disabled = true;
+    try {
+      const tasks = await AppApi.tasks();
+      if (!isCurrent()) return;
+      if (!Array.isArray(tasks)) throw new Error('Invalid task list');
+      if (AppState.tasks === previousTasks) AppState.tasks = tasks;
+      const visible = new Set(AppState.tasks.map(task => task.task_id));
+      const count = ids.filter(id => visible.has(id)).length;
+      if (!count) { toast('任务列表中找不到本次导入的任务', 'error'); return; }
+      MaterialNavigation.go('workbench', {importTaskIds: ids});
+      if (count < ids.length) toast('部分导入任务当前不在任务列表', 'error');
+    } catch (_) {
+      if (isCurrent()) toast('无法查看本次任务，请重试', 'error');
+    } finally {
+      button.disabled = false;
+    }
+  }
   function esc(value) { return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function needsDouyinBrowserAuth(value) {
     try {
@@ -90,7 +116,24 @@ window.Tools = (() => {
         finally { linkBusy = false; if (AppState.currentView === 'links') paintLinks(); }
       };
     } else if (key === 'import') {
-      host.innerHTML = `<div class="tool-page"><div class="tool-intro"><span class="tool-symbol">${AppIcons('import')}</span><h2>听过的，留下文字</h2></div><div id="mediaDropZone" class="tool-card import-card media-drop-zone" aria-label="媒体导入区域" aria-busy="false"><span class="import-art" aria-hidden="true">${AppIcons('import')}</span><h3 class="import-drop-title">把视频或录音拖到这里</h3><p>支持多文件，已导入的内容会自动去重。</p><div class="tool-buttons"><button id="pickFiles" class="btn primary" type="button">选择文件</button><button id="pickFolder" class="btn ghost" type="button">选择文件夹</button></div><p class="import-state" id="importState" role="status" aria-live="polite"></p><span class="import-queue-note">加入队列后，切换页面也会继续转写</span></div></div>`;
+      host.innerHTML = `<div class="tool-page">
+        <div class="tool-intro"><span class="tool-symbol">${AppIcons('import')}</span><h2>听过的，留下文字</h2></div>
+        <div id="mediaDropZone" class="tool-card import-card media-drop-zone" aria-label="媒体导入区域" aria-busy="false">
+          <span class="import-art" aria-hidden="true">${AppIcons('import')}</span>
+          <h3 class="import-drop-title">把视频或录音拖到这里</h3>
+          <p>支持多文件，已导入的内容会自动去重。</p>
+          <div class="tool-buttons">
+            <button id="pickFiles" class="btn primary" type="button">选择文件</button>
+            <button id="pickFolder" class="btn ghost" type="button">选择文件夹</button>
+          </div>
+          <div class="import-receipt">
+            <p class="import-state" id="importState" role="status" aria-live="polite"></p>
+            <button id="viewImportedTasks" class="btn ghost small" type="button" hidden>查看本次任务</button>
+          </div>
+          <span class="import-queue-note">加入队列后，切换页面也会继续转写</span>
+        </div>
+      </div>`;
+      host.querySelector('#viewImportedTasks').onclick = event => viewImportedTasks(event.currentTarget);
       paintImport();
       for (const [id, fn] of [['pickFiles', AppApi.pickImport], ['pickFolder', AppApi.pickFolderImport]]) {
         host.querySelector('#' + id).onclick = async () => {

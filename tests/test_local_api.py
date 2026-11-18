@@ -156,6 +156,25 @@ def call(server, method, path, *, token="", origin="", body=None, headers=None):
     return response.status, result, headers_out
 
 
+def upgrade_extension_events(server, client, reader, origin, token):
+    key = base64.b64encode(b"sixteen-byte-key").decode("ascii")
+    client.sendall((
+        "GET /v1/extension-events HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{server.address[1]}\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        f"Sec-WebSocket-Protocol: shengjian-v1, {token}\r\n"
+        f"Origin: {origin}\r\n\r\n"
+    ).encode("ascii"))
+    response_headers = []
+    while True:
+        line = reader.readline()
+        if line in (b"\r\n", b""):
+            return response_headers
+        response_headers.append(line)
+
+
 def test_downloads_list_filters_by_url_for_extension_precheck() -> None:
     """扩展提交前预检（先生 2026-10-08）：按规范 URL 过滤任务列表。"""
     with tempfile.TemporaryDirectory(prefix="local_api_urlfilter_") as temp:
@@ -359,22 +378,7 @@ def test_desktop_douyin_link_is_pushed_to_paired_extension_for_one_shot_auth() -
         client_file = client.makefile("rb")
         outcome = {}
         try:
-            key = base64.b64encode(b"sixteen-byte-key").decode("ascii")
-            client.sendall((
-                "GET /v1/extension-events HTTP/1.1\r\n"
-                f"Host: 127.0.0.1:{server.address[1]}\r\n"
-                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                f"Sec-WebSocket-Key: {key}\r\n"
-                "Sec-WebSocket-Version: 13\r\n"
-                f"Sec-WebSocket-Protocol: shengjian-v1, {token}\r\n"
-                f"Origin: {ORIGIN}\r\n\r\n"
-            ).encode("ascii"))
-            response_headers = []
-            while True:
-                line = client_file.readline()
-                response_headers.append(line)
-                if line in (b"\r\n", b""):
-                    break
+            response_headers = upgrade_extension_events(server, client, client_file, ORIGIN, token)
             assert response_headers[0].startswith(b"HTTP/1.0 101")
             assert any(line.lower().startswith(b"sec-websocket-protocol: shengjian-v1")
                        for line in response_headers)
@@ -812,6 +816,50 @@ def test_pairing_window_issues_token_once_and_replaces_pinned_origin() -> None:
         finally:
             server.stop()
             controller.close()
+
+
+def test_pairing_switch_disconnects_only_the_previous_extension(tmp_path) -> None:
+    controller = logged_in_controller(SettingsStore(base_dir=tmp_path / "data"))
+    server = LocalApiServer(controller, StubCoordinator(), port=0)
+    server.start()
+    token = controller.settings["local_api_token"]
+    registered = threading.Event()
+    register = server._register_extension_client
+
+    def track_registration(*args):
+        write_lock = register(*args)
+        registered.set()
+        return write_lock
+
+    try:
+        assert server.origin_policy.authorize(ORIGIN)
+        with (mock.patch.object(server, "_register_extension_client", track_registration),
+              socket.create_connection(server.address, timeout=3) as client,
+              client.makefile("rb") as reader):
+            assert upgrade_extension_events(server, client, reader, ORIGIN, token)[0].startswith(b"HTTP/1.0 101")
+            assert registered.wait(2)
+
+            server.begin_pairing()
+            assert call(server, "POST", "/v1/pair", origin=ORIGIN, body={})[0] == 200
+            assert server._notify_extension_clients({"type": "fixture"}) == 1
+            frame = b'\x81\x12{"type":"fixture"}'
+            assert reader.read(len(frame)) == frame
+
+            server.begin_pairing()
+            assert call(server, "POST", "/v1/pair", origin=OTHER_ORIGIN, body={})[0] == 200
+            assert server._notify_extension_clients({"type": "fixture"}) == 0
+            assert reader.read(1) == b""
+
+        # A handshake that passed authentication before the switch can reach registration late.
+        stale_socket, peer = socket.socketpair()
+        with stale_socket, peer:
+            assert server._register_extension_client(stale_socket, ORIGIN) is None
+
+        with socket.create_connection(server.address, timeout=3) as client, client.makefile("rb") as reader:
+            assert upgrade_extension_events(server, client, reader, OTHER_ORIGIN, token)[0].startswith(b"HTTP/1.0 101")
+    finally:
+        server.stop()
+        controller.close()
 
 
 def test_pairing_window_expires() -> None:

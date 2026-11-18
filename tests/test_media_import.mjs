@@ -45,23 +45,87 @@ test('file picker reports one queued media and folder picker aggregates queued, 
     {value:{ok:true,imported:1,enqueued:['one'],skipped:0,failed:0}},
     {value:{ok:true,imported:3,enqueued:['two','three'],skipped:1,failed:1}},
   ]});try{
+    await page.evaluate(() => {
+      const original = AppApi.tasks;
+      const makeTask = (id, title) => ({
+        task_id: 'job:' + id, display_title: title, status: 'queued',
+        kind: 'transcription', progress: 0, updated_at: '2026-11-18',
+      });
+      AppApi.tasks = async () => [
+        ...await original(), makeTask('older', '同名访谈'),
+        makeTask('one', '同名访谈'), makeTask('two', '同名访谈'), makeTask('three', '第二段录音'),
+      ];
+    });
     await page.getByRole('button',{name:'选择文件',exact:true}).click();await waitIdle(page);
     assert.equal(await page.locator('#importState').textContent(),'已加入 1 项转写任务');
     assert.equal(await calls(page,'pick_and_import'),1);
+    await page.getByRole('button',{name:'查看本次任务'}).click();
+    assert.deepEqual(await page.locator('#jobList .job').evaluateAll(rows => rows.map(row => row.dataset.taskId)), ['job:one']);
+    assert.deepEqual(await page.evaluate(() => [...AppState.selected]), ['job:one']);
+    assert(await page.locator('[data-task-id="job:one"] .job-open').evaluate(row => row === document.activeElement));
+    await page.getByRole('button',{name:'返回导入'}).click();
+    assert.equal(await page.locator('#importState').textContent(),'已加入 1 项转写任务');
     await page.getByRole('button',{name:'选择文件夹',exact:true}).click();await waitIdle(page);
     assert.equal(await page.locator('#importState').textContent(),'已加入 2 项转写任务，1 项已存在，1 项未导入');
     assert.equal(await calls(page,'pick_folder_and_import'),1);
     assert.equal(await page.locator('#importState').getAttribute('role'),'status');
     assert.equal(await page.evaluate(()=>__importToasts.length),2,'one aggregate completion notification per request');
+    await page.getByRole('button',{name:'查看本次任务'}).click();
+    assert.deepEqual(await page.locator('#jobList .job').evaluateAll(rows => rows.map(row => row.dataset.taskId)), ['job:two', 'job:three']);
+    assert.equal(await page.locator('[data-filter="本次导入"]').getAttribute('aria-pressed'), 'true');
+    assert.deepEqual(await page.evaluate(() => [...AppState.selected]), []);
+    await page.locator('[data-filter="全部"]').click();
+    assert(await page.locator('[data-task-id="job:older"]').isVisible());
     assert.deepEqual(page.errors,[]);
   }finally{await page.close();}
 });
 
 test('duplicate-only import distinguishes existing tasks from newly queued jobs',async()=>{
-  const page=await open({importResult:{ok:true,imported:2,enqueued:[],skipped:2,failed:0}});try{
+  const page=await open({importReplies:[
+    {value:{ok:true,imported:1,enqueued:['previous'],skipped:0,failed:0}},
+    {value:{ok:true,imported:2,enqueued:[],skipped:2,failed:0}},
+  ]});try{
+    await page.evaluate(() => {
+      const original = AppApi.tasks;
+      AppApi.tasks = async () => [
+        ...await original(), {task_id:'job:previous',display_title:'上次导入',kind:'transcription',status:'queued'},
+      ];
+    });
     await page.locator('#pickFiles').click();await waitIdle(page);
-    assert.equal(await page.locator('#importState').textContent(),'已读取 2 项媒体，已有转写任务，2 项已存在');
-    assert.equal(await calls(page,'pick_and_import'),1);assert.deepEqual(page.errors,[]);
+    await page.getByRole('button',{name:'查看本次任务'}).click();
+    assert.equal(await page.locator('[data-filter="本次导入"]').getAttribute('aria-pressed'), 'true');
+    await page.getByRole('button',{name:'返回导入'}).click();
+    await page.locator('#pickFiles').click();await waitIdle(page);
+    assert.equal(await page.locator('#importState').textContent(),'本次未新增任务，2 项已存在');
+    assert(await page.locator('#viewImportedTasks').isHidden());
+    await page.locator('[data-page=workbench]').click();
+    assert.equal(await page.locator('[data-filter="本次导入"]').count(),0);
+    assert.equal(await page.locator('[data-filter="全部"]').getAttribute('aria-pressed'),'true');
+    assert.deepEqual(await page.evaluate(() => [...AppState.selected]), []);
+    assert.equal(await calls(page,'pick_and_import'),2);assert.deepEqual(page.errors,[]);
+  }finally{await page.close();}
+});
+
+test('archived or removed imported tasks never navigate to a different task',async()=>{
+  const page=await open();try{
+    await page.locator('#pickFiles').click();await waitIdle(page);
+    await page.getByRole('button',{name:'查看本次任务'}).click();
+    await page.waitForFunction(() => __importToasts.at(-1)?.[0] === '任务列表中找不到本次导入的任务');
+    assert.equal(await page.evaluate(() => AppState.currentView), 'import');
+    assert(await page.getByRole('button',{name:'查看本次任务'}).isEnabled());
+    assert.deepEqual(page.errors,[]);
+  }finally{await page.close();}
+});
+
+test('English import receipt translates the action and counts for partial results',async()=>{
+  const page=await open({
+    settings:{ui_language:'en'},
+    importResult:{ok:true,imported:2,enqueued:['one','two'],skipped:1,failed:1},
+  });try{
+    await page.locator('#pickFiles').click();await waitIdle(page);
+    await page.getByRole('button',{name:'View imported tasks'}).waitFor();
+    assert.equal(await page.locator('#importState').textContent(),'Added 2 transcription tasks · 1 already present · 1 failed to import');
+    assert.deepEqual(page.errors,[]);
   }finally{await page.close();}
 });
 

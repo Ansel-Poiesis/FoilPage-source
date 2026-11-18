@@ -5,12 +5,15 @@
 
 window.Workbench = (() => {
   const FILTERS = ["全部", "处理中", "需处理", "已完成"];
+  const IMPORT_FILTER = '本次导入';
+  let importTaskIds = new Set();
   const ACTIVE = ["queued", "running", "retryable", "received", "resolving", "awaiting_browser", "downloading", "imported", "transcribing"];
   const PROCESSING = ACTIVE.filter(status => !['retryable', 'awaiting_browser'].includes(status));
   const NEED = ["failed", "retryable", "awaiting_browser"];
   const TERMINAL = ["done", "failed", "cancelled"];
   let rangeBaseline = null, rangeAnchor = null, visibleSelectionKey = "", tasksRequest = 0;
   let savedContext = null;
+  let inspectorAction = null;
   const receiptStorageKey = 'foilpage.batchReceipt.v1';
   let batchReceipt = null, batchTimer = null, batchChecking = false, batchStarting = false, batchSubmitting = false;
   try {
@@ -115,7 +118,8 @@ window.Workbench = (() => {
   function filtered(tasks) {
     const f = AppState.filter;
     let rows;
-    if (f === "全部") rows = tasks;
+    if (f === IMPORT_FILTER) rows = tasks.filter(task => importTaskIds.has(task.task_id));
+    else if (f === "全部") rows = tasks;
     else if (f === "处理中") rows = tasks.filter((t) => PROCESSING.includes(t.status));
     else if (f === "需处理") rows = tasks.filter((t) => NEED.includes(t.status));
     else if (f === "已完成") rows = tasks.filter((t) => t.status === "done");
@@ -125,6 +129,7 @@ window.Workbench = (() => {
 
   function countFor(filter) {
     const tasks = AppState.tasks || [];
+    if (filter === IMPORT_FILTER) return tasks.filter(task => importTaskIds.has(task.task_id)).length;
     if (filter === "全部") return tasks.length;
     if (filter === "处理中") return tasks.filter((t) => PROCESSING.includes(t.status)).length;
     if (filter === "需处理") return tasks.filter((t) => NEED.includes(t.status)).length;
@@ -149,7 +154,8 @@ window.Workbench = (() => {
     const wrap = document.getElementById("jobFilters");
     if (!wrap) return;
     wrap.innerHTML = "";
-    FILTERS.forEach((f) => {
+    const filters = AppState.filter === IMPORT_FILTER ? [...FILTERS, IMPORT_FILTER] : FILTERS;
+    filters.forEach((f) => {
       const el = document.createElement("button");
       el.type = 'button';
       el.className = "filter" + (f === AppState.filter ? " active" : "");
@@ -595,15 +601,41 @@ window.Workbench = (() => {
     });
   }
 
+  function renderInspectorAction() {
+    const feedback = document.querySelector('#inspector .task-action-feedback');
+    if (!feedback) return;
+    const action = inspectorAction;
+    feedback.classList.toggle('is-error', Boolean(action?.error));
+    feedback.textContent = action?.pending ? I18n.t('正在打开…')
+      : action?.error ? `${I18n.t(action.label)} · ${I18n.t(action.error)}` : '';
+  }
+
+  async function runInspectorAction(taskId, label, invoke) {
+    if (inspectorAction?.taskId === taskId && inspectorAction.pending) return;
+    const action = {taskId, label, pending: true, error: ''};
+    inspectorAction = action;
+    renderInspectorAction();
+    try {
+      const result = await invoke();
+      if (!result?.ok) action.error = result?.error || '无法打开，请重试';
+    } catch {
+      action.error = '无法打开，请重试';
+    } finally {
+      action.pending = false;
+      if (inspectorAction === action) renderInspectorAction();
+    }
+  }
+
   function renderInspector() {
     const host = document.getElementById("inspector");
     if (!host) return;
+    const selectedId = AppState.selected.size === 1 ? [...AppState.selected][0] : null;
+    if (inspectorAction?.taskId !== selectedId) inspectorAction = null;
     if (AppState.selected.size > 1) {
       renderMultiInspector(host);
       return;
     }
     const tasks = AppState.tasks || [];
-    const selectedId = AppState.selected.size === 1 ? [...AppState.selected][0] : null;
     const task = tasks.find((t) => t.task_id === selectedId) || null;
     if (!task) {
       host.innerHTML = `<div class="empty"><span class="empty-symbol" aria-hidden="true">${AppIcons('tasks')}</span><div class="big">查看任务详情</div><div class="sub">单击选择，再次单击取消；勾选多项，批量处理。</div><p class="selection-shortcuts"><kbd>Ctrl+A</kbd> 全选当前列表 <span>·</span> <kbd>Esc</kbd> 清空</p></div>`;
@@ -612,16 +644,21 @@ window.Workbench = (() => {
     const steps = pipeline(task);
     const err = task.error || "";
     const errorDetails = task.error_details || null;
+    const completed = task.status === 'done' && task.kind === 'transcription';
+    const incompleteRefinement = errorDetails?.diagnostic?.transcript_preserved;
     const errorCode = String(errorDetails?.code || "unknown").replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 64);
     host.innerHTML = `
       <div class="inspector">
         ${task.cover_path ? `<div class="inspector-cover" data-cover-task="${task.task_id}" role="img" aria-label="任务封面"></div>` : ""}
-        <div class="t"></div>
+        ${completed ? `<div class="task-result-heading">
+          <p class="task-result-status${incompleteRefinement ? ' is-partial' : ''}">${incompleteRefinement ? rowStatusText(task) : '转写完成'}</p>
+          <h2 class="t"></h2>
+        </div>` : `<div class="t"></div>
         <div class="pct"></div>
         <div class="prog-track"><i></i></div>
-        <div class="pipeline"></div>
-        <div class="inspector-meta">
-          <div class="meta-line"><span>状态</span><span class="ml-status"></span></div>
+        <div class="pipeline"></div>`}
+        <div class="inspector-meta${completed ? ' task-result-meta' : ''}">
+          ${completed ? '' : '<div class="meta-line"><span>状态</span><span class="ml-status"></span></div>'}
           <div class="meta-line"><span>分类</span><span class="ml-cat"></span></div>
           <div class="meta-line"><span>更新时间</span><span class="ml-time"></span></div>
         </div>
@@ -631,6 +668,7 @@ window.Workbench = (() => {
           <div class="task-action-group task-primary-actions" role="group" aria-label="主要操作"></div>
           <div class="task-action-group task-media-actions" role="group" aria-label="媒体操作"></div>
           <div class="task-action-group task-file-actions" role="group" aria-label="文件操作"></div>
+          <div class="task-action-feedback" role="status" aria-atomic="true"></div>
           <div class="task-action-group task-management-actions" role="group" aria-label="任务管理"></div>
         </div>
       </div>`;
@@ -643,28 +681,32 @@ window.Workbench = (() => {
     host.querySelector(".t").setAttribute('data-i18n-skip','');
     host.querySelector(".t").textContent = task.display_title;
     host.querySelector(".t").title = task.display_title || "";
-    const pctEl = host.querySelector(".pct");
-    const measurable = ["downloading", "running", "transcribing"].includes(task.status);
-    pctEl.classList.toggle("is-status", !measurable);
-    pctEl.textContent = measurable ? String(percent(task)) : rowStatusText(task);
-    const pctSmall = document.createElement("small");
-    pctSmall.textContent = "%";
-    if (measurable) pctEl.appendChild(pctSmall);
-    host.querySelector('.prog-track').hidden = !measurable;
-    host.querySelector('.pipeline').hidden = task.status === 'done';
-    host.querySelector(".prog-track i").style.width = percent(task) + "%";
-    const mlStatus = host.querySelector(".ml-status");
-    mlStatus.style.color = statusColor(task.status);
-    mlStatus.textContent = task.progress_text || "-";
+    if (!completed) {
+      const pctEl = host.querySelector(".pct");
+      const measurable = ["downloading", "running", "transcribing"].includes(task.status);
+      pctEl.classList.toggle("is-status", !measurable);
+      pctEl.textContent = measurable ? String(percent(task)) : rowStatusText(task);
+      if (measurable) {
+        const unit = document.createElement("small");
+        unit.textContent = "%";
+        pctEl.appendChild(unit);
+      }
+      host.querySelector('.prog-track').hidden = !measurable;
+      host.querySelector('.pipeline').hidden = task.status === 'done';
+      host.querySelector(".prog-track i").style.width = percent(task) + "%";
+      const mlStatus = host.querySelector(".ml-status");
+      mlStatus.style.color = statusColor(task.status);
+      mlStatus.textContent = task.progress_text || "-";
+      const pipe = host.querySelector(".pipeline");
+      steps.forEach((s) => {
+        const row = document.createElement("div");
+        row.className = "pstep " + s.state;
+        row.innerHTML = `<span class="dot"></span><span>${s.label}</span><span style="margin-left:auto">${s.detail}</span>`;
+        pipe.appendChild(row);
+      });
+    }
     host.querySelector(".ml-cat").textContent = task.result_category || "未分类";
     host.querySelector(".ml-time").textContent = task.updated_at || "-";
-    const pipe = host.querySelector(".pipeline");
-    steps.forEach((s) => {
-      const row = document.createElement("div");
-      row.className = "pstep " + s.state;
-      row.innerHTML = `<span class="dot"></span><span>${s.label}</span><span style="margin-left:auto">${s.detail}</span>`;
-      pipe.appendChild(row);
-    });
     if (err) host.querySelector(".err").textContent = err;
     ensureGallery(task, host);
     if (err && errorDetails) {
@@ -700,16 +742,22 @@ window.Workbench = (() => {
       group.appendChild(b);
       return b;
     }
-    addBtn("播放", "ghost small", () => AppApi.playMedia(task), mediaActions, 'play');
-    addBtn("打开位置", "ghost small", () => AppApi.openPath(task.source_path || task.downloaded_path), fileActions, 'folder');
+    function addFileAction(label, invoke, group, icon) {
+      return addBtn(label, 'ghost small', () => runInspectorAction(task.task_id, label, invoke), group, icon);
+    }
+    const play = addFileAction('播放', () => AppApi.playMedia(task), mediaActions, 'play');
+    const mediaPath = task.kind === 'download'
+      ? task.downloaded_path || task.source_path : task.source_path || task.downloaded_path;
+    addFileAction('定位媒体文件', () => AppApi.openPath(mediaPath || ''), fileActions, 'folder');
     const resultPath = task.final_path || task.raw_path;
     if (resultPath && task.kind === 'transcription') {
-      addBtn('在文本库阅读', 'primary small', () => MaterialNavigation.go('library', {taskIds: [task.task_id]}), primaryActions, 'library');
+      const read = addBtn('在文本库阅读', 'primary small', () => MaterialNavigation.go('library', {taskIds: [task.task_id]}), primaryActions, 'library');
+      read.classList.add('task-read');
     }
-    if (MaterialNavigation.isVideo(task.source_path || task.downloaded_path)) {
+    if (MaterialNavigation.isVideo(mediaPath)) {
       const videoButton = addBtn('在视频库定位', 'ghost small', () => MaterialNavigation.openVideo(task.task_id, videoButton), mediaActions, 'video');
     }
-    if (resultPath) addBtn("打开文本", "ghost small", () => AppApi.openPath(resultPath), fileActions, 'document');
+    if (resultPath) addFileAction('定位文稿文件', () => AppApi.openPath(resultPath), fileActions, 'document');
     if (task.status === 'awaiting_browser') {
       const next = document.createElement('div'); next.className = 'task-next-action';
       next.textContent = '等待浏览器提供视频地址，请回到视频页面继续下载。';
@@ -767,7 +815,7 @@ window.Workbench = (() => {
       addBtn("取消", "ghost small", () => AppApi.cancel([task.task_id]).then(refreshAll), managementActions, 'stop');
     }
     addBtn("删除", "danger small", () => deleteTask(task), managementActions, 'trash');
-    const secondary = [...actions.querySelectorAll('button')].filter(button => !primaryActions.contains(button) && button.textContent !== '播放');
+    const secondary = [...actions.querySelectorAll('button')].filter(button => !primaryActions.contains(button) && button !== play);
     secondary.forEach(button => button.classList.add('task-secondary-action'));
     if (secondary.length) {
       const more = addBtn('更多操作', 'ghost small task-more-trigger', () => {
@@ -782,6 +830,7 @@ window.Workbench = (() => {
       }, actions);
       more.setAttribute('aria-haspopup', 'dialog');
     }
+    renderInspectorAction();
   }
 
   function refreshAll() {
@@ -878,17 +927,26 @@ window.Workbench = (() => {
   }
 
   function snapshot() {
-    savedContext = {
+    const context = {
       filter: AppState.filter, selected: [...AppState.selected], anchorId: AppState.anchorId,
       scrollTop: document.getElementById('jobList')?.scrollTop || 0,
       inspectorScrollTop: document.getElementById('inspector')?.scrollTop || 0,
+      restoreReadingFocus: document.activeElement?.matches('#inspector .task-read'),
     };
-    return savedContext;
+    if (context.filter !== IMPORT_FILTER) savedContext = context;
+    return context;
   }
 
   function enter(context = savedContext) {
     let locatedId = '';
-    if (context?.taskIds) {
+    if (context?.importTaskIds) {
+      importTaskIds = new Set(context.importTaskIds);
+      AppState.filter = IMPORT_FILTER;
+      const rows = filtered(AppState.tasks || []);
+      locatedId = rows[0]?.task_id || '';
+      AppState.selected = new Set(rows.length === 1 ? [locatedId] : []);
+      AppState.anchorId = rows.length === 1 ? locatedId : null;
+    } else if (context?.taskIds) {
       const task = sorted(AppState.tasks || []).find(item => context.taskIds.includes(item.task_id));
       AppState.filter = '全部';
       AppState.selected = new Set(task ? [task.task_id] : []);
@@ -899,6 +957,10 @@ window.Workbench = (() => {
       AppState.filter = context.filter;
       AppState.selected = new Set(context.selected);
       AppState.anchorId = context.anchorId;
+    } else if (AppState.filter === IMPORT_FILTER) {
+      AppState.filter = '全部';
+      AppState.selected.clear();
+      AppState.anchorId = null;
     }
     render(true);
     if (batchReceipt?.running && !batchTimer) pollBatchAgent();
@@ -909,6 +971,7 @@ window.Workbench = (() => {
     } else if (context) {
       document.getElementById('jobList').scrollTop = context.scrollTop;
       document.getElementById('inspector').scrollTop = context.inspectorScrollTop;
+      if (context.restoreReadingFocus) document.querySelector('#inspector .task-read')?.focus({preventScroll: true});
     }
   }
 

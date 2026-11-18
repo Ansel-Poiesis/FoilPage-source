@@ -107,11 +107,12 @@
     const pill = document.createElement("div");
     // is-hidden：控件簇先就位，pill 等第一条反馈再显示，避免空泡常驻。
     pill.className = "shengjian-yt-pill is-hidden";
-    pill.setAttribute("role", "status");
     const stage = document.createElement("span");
     stage.className = "sj-stage";
     const num = document.createElement("span");
     num.className = "sj-num";
+    num.setAttribute("role", "progressbar");
+    num.setAttribute("aria-label", "视频下载进度");
     const numValue = document.createElement("b");
     numValue.textContent = "0";
     const numUnit = document.createElement("i");
@@ -128,9 +129,26 @@
     check.append(path);
     const text = document.createElement("span");
     text.className = "sj-text";
-    stage.append(num, check, text);
-    pill.append(stage);
+    text.setAttribute("role", "status");
+    const launch = document.createElement("a");
+    launch.className = "sj-launch";
+    launch.href = "foilpage://launch";
+    launch.textContent = "打开 FoilPage";
+    launch.addEventListener("click", (event) => event.stopPropagation());
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "sj-dismiss";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭提示");
+    stage.append(num, check, text, launch);
+    pill.append(stage, close);
     pill.addEventListener("click", () => dismissPill());
+    pill.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismissPill();
+    });
     host.append(pill);
     const player = document.querySelector("#player-container-outer, #player-container, ytd-player");
     if (player?.parentElement) player.parentElement.insertBefore(host, player.nextSibling);
@@ -142,19 +160,33 @@
     const pill = findPill();
     if (!pill) return;
     for (const key of ["hide", "fade"]) clearTimeout(pillTimers[key]);
+    if (pill.contains(document.activeElement)) {
+      findHost()?.querySelector(".shengjian-yt-button:not(:disabled)")?.focus({ preventScroll: true });
+    }
+    pill.inert = true;
     pill.classList.add("is-fading");
-    pillTimers.fade = setTimeout(() => pill.remove(), 420);
+    pillTimers.fade = setTimeout(() => pill.classList.add("is-hidden"), 420);
+  }
+
+  function armPillHide(ms) {
+    pillTimers.hide = setTimeout(() => {
+      if (!findPill()?.contains(document.activeElement)) dismissPill();
+    }, ms);
   }
 
   function showPillText(text, options = {}) {
     const pill = findPill() || ensureHost().querySelector(".shengjian-yt-pill");
     if (!pill) return;
     for (const key of ["hide", "fade"]) clearTimeout(pillTimers[key]);
+    pill.inert = false;
     pill.classList.remove("is-fading", "is-done", "is-percent", "is-hidden");
     pill.classList.toggle("is-error", Boolean(options.error));
+    pill.classList.toggle("has-launch", Boolean(options.launch));
     pill.querySelector(".sj-text").textContent = String(text || "");
     pill.title = String(options.title || text || "");
-    pillTimers.hide = setTimeout(dismissPill, options.autoHideMs || pillHoldFor(text, options.error ? "error" : "text"));
+    if (!options.launch) {
+      armPillHide(options.autoHideMs || pillHoldFor(text, options.error ? "error" : "text"));
+    }
   }
 
   function applyPillStatus(message, error = false) {
@@ -166,21 +198,25 @@
       return;
     }
     if (status.mode === "done") {
-      pill.classList.remove("is-error", "is-fading", "is-hidden");
+      pill.inert = false;
+      pill.classList.remove("is-error", "is-fading", "is-hidden", "has-launch");
       pill.classList.add("is-percent", "is-done");
       const valueEl = pill.querySelector(".sj-num b");
       if (valueEl) valueEl.textContent = "100";
       pill.title = String(message);
       pill.querySelector('.sj-text').textContent = String(message);
       for (const key of ["hide", "fade"]) clearTimeout(pillTimers[key]);
-      pillTimers.hide = setTimeout(dismissPill, PILL_HOLD_MS.done);
+      armPillHide(PILL_HOLD_MS.done);
       return;
     }
     if (status.mode === "percent") {
-      pill.classList.remove("is-fading", "is-done", "is-error", "is-hidden");
+      for (const key of ["hide", "fade"]) clearTimeout(pillTimers[key]);
+      pill.inert = false;
+      pill.classList.remove("is-fading", "is-done", "is-error", "is-hidden", "has-launch");
       pill.classList.add("is-percent");
       const valueEl = pill.querySelector(".sj-num b");
       if (valueEl) valueEl.textContent = String(status.percent);
+      pill.querySelector(".sj-num").setAttribute("aria-valuenow", String(status.percent));
       pill.title = `正在下载 ${status.percent}%`;
       return;
     }
@@ -222,6 +258,7 @@
       showPillText("未识别当前视频，请在视频播放页重试", { error: true });
       return;
     }
+    feedbackRevision++;
     button.disabled = true;
     button.classList.add("is-busy");
     showPillText("正在提交…");
@@ -243,34 +280,34 @@
           showPillText("扩展已更新，请刷新页面后重试", { error: true });
           return;
         }
+        if (response?.ok && (response.job?.queued || response.job?.waiting_connection)) {
+          showPillText("任务已保留，等待 FoilPage 连接", { launch: true });
+          return;
+        }
         if (!response?.ok) {
+          if (response?.needs_connection === true) {
+            showPillText("FoilPage 未连接，请连接后重试", { error: true, launch: true, title: response.message });
+            return;
+          }
           if (response?.feedback_sent) return;
           showPillText(response?.message || "FoilPage 下载任务未能创建", { error: true });
           return;
         }
-        // Background sends accepted or offline-queued feedback exactly once.
+        // Background reports desktop acceptance separately.
       });
     };
-    // 先生 2026-11-15：YouTube 入口补齐与抖音页相同的提交预检——进行中
-    // 阻止、已完成确认、近窗失败确认。页面脚本没有确认卡组件，用原生 confirm。
     sendRuntimeMessage({ type: "shengjian-check-existing", url: canonicalUrl(videoId) }, (check) => {
       if (videoIdFromLocation() !== videoId) { restore(); return; }
       if (chrome.runtime.lastError || !check?.ok) { beginSubmission(); return; }
-      if (check.active) {
+      if (check.active && (action === "download" || check.activeTranscribing)) {
         restore();
         showPillText(check.activeTranscribing && action === "transcribe"
           ? "该视频已在处理中，转写会自动接续（进度见 FoilPage 任务页）"
           : "该视频正在处理中，无需重复提交（进度见 FoilPage 任务页）");
         return;
       }
-      const reasons = [];
-      if (check.done && action === "download") {
-        reasons.push("该视频已下载完成；重新下载将新增一份文件（需要文稿请点「转写」）");
-      }
-      if (check.recentFailure) {
-        reasons.push(`该视频刚失败过（${check.recentFailure.summary}），短时间内反复提交可能加剧平台拦截`);
-      }
-      if (reasons.length && !window.confirm(`${reasons.join("；")}。仍要提交吗？`)) {
+      if (check.done && action === "download"
+          && !window.confirm("该视频已下载完成，重新下载将新增一份文件。仍要提交吗？")) {
         restore();
         showPillText("已取消提交");
         return;
@@ -293,18 +330,20 @@
 
   // YouTube 是 SPA：路径切换后整个页面重渲染，浮动簇是 body 级节点通常
   // 存活，但保险起见在非视频页主动移除，避免残留到首页/搜索页。
+  let feedbackRevision = 0;
   let restoredVideoId = "";
   function restoreTaskFeedback() {
     const videoId = videoIdFromLocation();
     if (!videoId || videoId === restoredVideoId) return;
     restoredVideoId = videoId;
+    const revision = ++feedbackRevision;
     sendRuntimeMessage({type:"shengjian-task-state",url:canonicalUrl(videoId)}, response => {
-      if (videoIdFromLocation() !== videoId || !response?.job) return;
+      if (revision !== feedbackRevision || videoIdFromLocation() !== videoId || !response?.job) return;
       const job = response.job;
       if (job.status === "done") showPillText(job.transcription_label || (job.job_id ? "已转写" : "已下载"),{error:job.transcription_error === true});
       else if (job.status === "failed") showPillText(job.download_complete ? "转写失败，请在 FoilPage 查看" : "下载失败，请在 FoilPage 查看",{error:true});
       else if (job.status === "cancelled") showPillText("任务已取消");
-      else if (job.queued || job.waiting_connection) showPillText("等待 FoilPage 连接，任务已保留");
+      else if (job.queued || job.waiting_connection) showPillText("任务已保留，等待 FoilPage 连接", { launch: true });
       else if (["transcribing","queued","imported"].includes(job.status)) showPillText("正在转写");
       else applyPillStatus(job.status === "downloading" ? `正在下载 ${Math.round(Number(job.progress || 0)*100)}%` : "正在下载");
     });
@@ -314,6 +353,8 @@
     const key = location.pathname + location.search;
     if (key !== lastKey) {
       lastKey = key;
+      restoredVideoId = "";
+      for (const key of ["hide", "fade"]) clearTimeout(pillTimers[key]);
       findHost()?.remove();
     }
     if (!ensureControls() && !videoIdFromLocation()) {
@@ -333,6 +374,7 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "shengjian-toast") {
       if (message.taskUrl && message.taskUrl !== canonicalUrl(videoIdFromLocation())) return undefined;
+      feedbackRevision++;
       applyPillStatus(String(message?.message || ""), Boolean(message?.error));
       sendResponse?.({ ok: true });
     }

@@ -8,13 +8,14 @@ window.Settings = (() => {
     { key: "ui", label: "界面", icon: "monitor" },
     { key: "recognition", label: "识别", icon: "wave" },
     { key: "agent", label: "文本整理", icon: "spark" },
-    { key: "control", label: "Agent 控制", icon: "power" },
+    { key: "control", label: "Agent 控制", icon: "sliders" },
     { key: "model", label: "模型", icon: "box" },
     { key: "data", label: "数据", icon: "database" },
     { key: "startup", label: "启动", icon: "power" },
     { key: "about", label: "关于", icon: "info" },
   ];
   const SECTION_ICONS = {
+    sliders: `<svg viewBox="0 0 24 24"><path d="M4 7h6m4 0h6M4 17h10m4 0h2"/><circle cx="12" cy="7" r="2"/><circle cx="16" cy="17" r="2"/></svg>`,
     monitor: `<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>`,
     wave: `<svg viewBox="0 0 24 24"><path d="M4 12h2l2-6 4 12 3-8 2 4h3"/></svg>`,
     spark: `<svg viewBox="0 0 24 24"><path d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8Z"/><path d="m19 16 .7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7Z"/></svg>`,
@@ -42,9 +43,14 @@ window.Settings = (() => {
     refreshNotificationInbox?.();
   });
   const inSection = key => AppState.currentView === "settings" && section === key;
+  const controlKeys = new WeakMap();
   function controlKey(node) {
-    const label = node.getAttribute("aria-label") || node.closest(".set-row")?.querySelector(".set-label")?.textContent || node.type || "control";
-    return `${node.tagName}:${node.type || ""}:${label}:${node.closest("[data-profile-id]")?.dataset.profileId || ""}`;
+    // The render pass indexes each control before its accessible name is translated.
+    if (!controlKeys.has(node)) {
+      const name = node.id || node.getAttribute("aria-label") || node.closest(".set-row")?.querySelector(".set-label")?.textContent || node.type || "control";
+      controlKeys.set(node, `${node.tagName}:${node.type || ""}:${name}:${node.closest("[data-profile-id]")?.dataset.profileId || ""}`);
+    }
+    return controlKeys.get(node);
   }
   function runControl(node, action, redraw = false) {
     if (rebuilding || !node.isConnected || node.disabled) return;
@@ -66,6 +72,7 @@ window.Settings = (() => {
     }).catch(() => { node.setAttribute("aria-invalid", "true"); })
       .then(saved => {
         pendingControls.delete(pendingKey); node.removeAttribute("aria-busy"); if (!editable) node.disabled = false;
+        if (node.isConnected) node.syncConfirmedDisplay?.();
         if (inSection(owner)) document.getElementById("settingsPane")?.querySelectorAll('[aria-busy="true"],[data-pending-control],[data-model-select]').forEach(control => {
           if (controlKey(control) === key) {
             if (control.hasAttribute("data-pending-control")) {control.disabled = control.dataset.pendingControl === "true"; delete control.dataset.pendingControl;}
@@ -79,10 +86,17 @@ window.Settings = (() => {
                 control.value = String(confirmed); control.dataset.initialValue = control.value;
               }
             }
+            control.syncConfirmedDisplay?.();
           }
         });
         if (!saved && inSection(owner)) document.getElementById("settingsPane")?.querySelectorAll('select').forEach(control => {if (controlKey(control) === key) {control.value = control.dataset.initialValue; control.setAttribute("aria-invalid", "true");}});
-        if (saved && redraw && inSection(owner) && node.isConnected) render({key, section:owner});
+        if (saved && redraw && inSection(owner) && node.isConnected) {
+          const previousSwitch = node.matches('[role="switch"]') ? {
+            checked: node.getAttribute("aria-checked"),
+            thumb: getComputedStyle(node, "::after").transform,
+          } : null;
+          render({key, section:owner, previousSwitch});
+        }
         return saved;
       });
   }
@@ -390,7 +404,18 @@ window.Settings = (() => {
       const scale = parseFloat(slider.value);
       document.body.style.fontSize = (window.BASE_FONT_SIZE * scale).toFixed(2) + "px";
     };
-    slider.onchange = () => save({ font_scale: parseFloat(slider.value) }, false);
+    slider.syncConfirmedDisplay = () => {
+      slider.value = String(parseFloat(s().font_scale) || 1.15);
+      slider.dataset.initialValue = slider.value;
+      showValue();
+    };
+    slider.onchange = async () => {
+      const focused = document.activeElement === slider;
+      await runControl(slider, () => save({font_scale: Number(slider.value)}));
+      if (focused && inSection("ui") && slider.isConnected && document.activeElement === document.body) {
+        slider.focus({preventScroll: true});
+      }
+    };
     wrap.append(slider, value);
     return wrap;
   }
@@ -439,13 +464,22 @@ window.Settings = (() => {
     });
     g.appendChild(row("界面强调色", "", accentWrap));
 
-    g.appendChild(row("界面字号", "", fontScaleCtrl()));
+    const typeRow = row("界面字号", "", fontScaleCtrl());
+    const specimen = document.createElement("figure");
+    specimen.className = "settings-type-specimen";
+    specimen.setAttribute("aria-label", "字号预览");
+    specimen.innerHTML = `<figcaption><span>声音笔记</span><span class="sample-time">00:18</span></figcaption><p>雨停了，檐下还有水声。</p>`;
+    typeRow.classList.add("settings-type-row");
+    typeRow.appendChild(specimen);
+    g.appendChild(typeRow);
 
     const animToggle = toggleEl(!!s().animations, () => save({ animations: !s().animations }), "animations");
     g.appendChild(row("界面动效", "", animToggle));
 
+    pane.appendChild(g);
+    const tasks = group("任务");
     const confirmToggle = toggleEl(!!s().confirm_delete, () => save({ confirm_delete: !s().confirm_delete }), "confirm_delete");
-    g.appendChild(row("删除前确认", "", confirmToggle));
+    tasks.appendChild(row("删除前确认", "", confirmToggle));
 
     const sortOrder = selectEl(
       s().task_sort_order || "newest",
@@ -455,8 +489,8 @@ window.Settings = (() => {
       ],
       (v) => save({ task_sort_order: v }), "task_sort_order"
     );
-    g.appendChild(row("任务排序", "", sortOrder));
-    pane.appendChild(g);
+    tasks.appendChild(row("任务排序", "", sortOrder));
+    pane.appendChild(tasks);
     return pane;
   }
 
@@ -923,10 +957,11 @@ window.Settings = (() => {
     dot.className = "worker-dot" + (w.running ? " on" : "");
     dot.style.cssText = "width:11px;height:11px;border-radius:50%;background:" + (w.running ? "var(--primary)" : "var(--faint)");
     const label = document.createElement("span");
-    label.style.cssText = "font-size:13px;color:var(--text2);font-weight:600";
+    label.className = "set-value";
+    label.style.fontWeight = "600";
     label.textContent = w.label || "Worker 已停止";
     const meta = document.createElement("span");
-    meta.style.cssText = "font-size:11px;color:var(--muted)";
+    meta.className = "settings-worker-meta";
     meta.textContent = w.meta || "";
     const btn = document.createElement("button");
     btn.className = "btn " + (w.running ? "danger small" : "primary small");
@@ -1684,6 +1719,16 @@ window.Settings = (() => {
       const show = currentPack() === "custom";
       customSoundRows.forEach((r) => { r.style.display = show ? "" : "none"; });
     };
+    async function previewSound(kind, pack, path) {
+      try {
+        const result = await AppApi.previewNotificationSound(kind, pack, path);
+        if (!result?.ok) throw new Error(result?.error || "试听失败");
+        return result;
+      } catch (error) {
+        if (inSection("startup") && pane.isConnected) toast(error.message || "试听失败", "error");
+        return false;
+      }
+    }
     const soundPathCtrl = (kind, hint) => {
       const key = "notification_sound_" + kind + "_path";
       const wrap = document.createElement("div");
@@ -1691,11 +1736,13 @@ window.Settings = (() => {
       const box = document.createElement("div");
       box.className = "path-box";
       const txt = document.createElement("span");
+      const playBtn = document.createElement("button");
       const showPath = () => {
         const value = String(s()[key] || "");
         txt.className = "path-text" + (value ? "" : " is-empty");
         txt.textContent = value || "未选择";
         txt.title = value;
+        playBtn.disabled = !value;
       };
       showPath();
       box.appendChild(txt);
@@ -1703,6 +1750,7 @@ window.Settings = (() => {
       const pickBtn = document.createElement("button");
       pickBtn.className = "btn ghost small";
       pickBtn.textContent = "选择";
+      pickBtn.setAttribute("aria-label", kind === "success" ? "选择成功提示音" : "选择失败提示音");
       pickBtn.onclick = () => runControl(pickBtn, async () => {
         const owner = section;
         try {
@@ -1711,26 +1759,32 @@ window.Settings = (() => {
           if (!res?.ok || typeof res.settings?.[key] !== "string" || !res.settings[key]) throw new Error(res?.error || "选择失败");
           AppState.settings = {...AppState.settings, [key]: res.settings[key]};
           showPath();
-          if (inSection(owner) && wrap.isConnected) toast("提示音已更新");
-          await AppApi.previewNotificationSound(kind, "custom", res.settings[key]);
+          if (inSection(owner) && wrap.isConnected) {
+            toast("提示音已更新");
+            await previewSound(kind, "custom", res.settings[key]);
+          }
           return res;
         } catch (error) { if (inSection(owner) && wrap.isConnected) toast(error.message || "选择失败", "error"); }
       }, true);
       wrap.appendChild(pickBtn);
-      const playBtn = document.createElement("button");
       playBtn.className = "btn ghost small";
       playBtn.textContent = "试听";
-      playBtn.onclick = () => runControl(playBtn, () => AppApi.previewNotificationSound(kind, "custom", String(s()[key] || "")));
+      playBtn.setAttribute("aria-label", kind === "success" ? "试听成功提示音" : "试听失败提示音");
+      playBtn.onclick = () => runControl(playBtn, () => previewSound(kind, "custom", String(s()[key] || "")));
+      pickBtn.syncConfirmedDisplay = showPath;
       wrap.appendChild(playBtn);
       return row(kind === "success" ? "成功提示音" : "失败提示音", hint, wrap);
     };
     customSoundRows.push(soundPathCtrl("success", "任务完成时播放的 WAV 文件"));
     customSoundRows.push(soundPathCtrl("error", "任务失败时播放的 WAV 文件"));
     const packSelect = selectEl(currentPack(), SOUND_PACKS, async (v) => {
-      await save({ notification_sound_pack: v }, false);
-      refreshCustomSoundRows();
-      if (v !== "custom") await AppApi.previewNotificationSound("success", v, "");
+      const saved = await save({notification_sound_pack: v});
+      if (saved && inSection("startup") && pane.isConnected && v !== "custom" && v !== "silent") {
+        await previewSound("success", saved.notification_sound_pack, "");
+      }
+      return saved;
     }, "notification_sound_pack");
+    packSelect.syncConfirmedDisplay = refreshCustomSoundRows;
     g.appendChild(row("提示音", "任务终态时播放；预设组或自定义 WAV 文件", packSelect));
     customSoundRows.forEach((r) => g.appendChild(r));
     refreshCustomSoundRows();
@@ -1924,7 +1978,7 @@ window.Settings = (() => {
     const host = document.getElementById("page-settings");
     host.innerHTML = `
       <div class="settings-layout">
-        <div class="settings-nav" id="settingsNav"></div>
+        <nav class="settings-nav" id="settingsNav" aria-label="设置"></nav>
         <div class="settings-pane" id="settingsPane"></div>
       </div>`;
     const nav = document.getElementById("settingsNav");
@@ -1960,7 +2014,15 @@ window.Settings = (() => {
     const pane = document.getElementById("settingsPane");
     pane.dataset.section = section;
     pane.innerHTML = "";
-    pane.appendChild(BUILDERS[section]());
+    const content = BUILDERS[section]();
+    if (returnFocus?.previousSwitch) {
+      const changed = [...content.querySelectorAll('[role="switch"]')].find(node => controlKey(node) === returnFocus.key);
+      if (changed && changed.getAttribute("aria-checked") !== returnFocus.previousSwitch.checked) {
+        changed.style.setProperty("--thumb-from", returnFocus.previousSwitch.thumb);
+        changed.dataset.switchChanged = "";
+      }
+    }
+    pane.appendChild(content);
     pane.querySelectorAll('input,textarea,select,button').forEach(control => {
       const key = controlKey(control), draft = editingDrafts.get(section)?.get(key);
       if (draft && 'value' in control) {control.value = draft.value; if (draft.invalid) control.setAttribute("aria-invalid", draft.invalid);}

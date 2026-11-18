@@ -52,6 +52,54 @@ def _bundled_extension_latest() -> str:
     _EXTENSION_MANIFEST_CACHE["version"] = version
     _EXTENSION_MANIFEST_CACHE["at"] = now
     return version
+
+
+_EXTENSION_REVISION_CACHE: dict[str, object] = {"revision": "", "signature": None, "at": 0.0}
+
+
+def _extension_dir() -> Path:
+    import sys
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "browser-extension"
+    return Path(__file__).resolve().parents[1] / "browser-extension"
+
+
+def _bundled_extension_revision() -> str:
+    """安装目录扩展内容指纹（30s+目录签名缓存）：同版本号热修（先生
+    2026-11-18）不升版本号也能驱动扩展自重载——指纹=相对路径与文件内容
+    的 SHA256 前 16 位；目录不可读时返回空串，扩展按无指纹处理。"""
+    now = time.time()
+    root = _extension_dir()
+    try:
+        signature = tuple(
+            (item.relative_to(root).as_posix(), item.stat().st_mtime_ns, item.stat().st_size)
+            for item in sorted(root.rglob("*")) if item.is_file()
+        )
+    except OSError:
+        signature = None
+    if signature == ():
+        # 目录缺失或为空（rglob 对不存在目录返回空迭代而非报错）：按无指纹处理。
+        signature = None
+    if (
+        signature is not None
+        and _EXTENSION_REVISION_CACHE["signature"] == signature
+        and now - float(_EXTENSION_REVISION_CACHE["at"]) < 30
+    ):
+        return str(_EXTENSION_REVISION_CACHE["revision"])
+    revision = ""
+    if signature is not None:
+        digest = hashlib.sha256()
+        for relative, _, _ in signature:
+            digest.update(relative.encode("utf-8"))
+            try:
+                digest.update(hashlib.sha256((root / relative).read_bytes()).digest())
+            except OSError:
+                digest.update(b"unreadable")
+        revision = digest.hexdigest()[:16]
+    _EXTENSION_REVISION_CACHE["signature"] = signature
+    _EXTENSION_REVISION_CACHE["revision"] = revision
+    _EXTENSION_REVISION_CACHE["at"] = now
+    return revision
 # A validated one-shot Douyin session can contain up to 64 cookies of 4 KiB
 # each. Keep the loopback request bounded while allowing that declared limit.
 MAX_BODY_BYTES = 384 * 1024
@@ -344,8 +392,8 @@ class OriginPolicy:
         if not EXTENSION_ORIGIN.fullmatch(origin):
             raise ValueError("扩展来源无效")
         with self._lock:
-            self._origin = origin
             self._pin(origin)
+            self._origin = origin
 
 
 class _LoopbackHttpServer(ThreadingHTTPServer):
@@ -432,8 +480,15 @@ class LocalApiServer:
         with self._pairing_lock:
             if time.monotonic() >= self._pairing_until:
                 return False
+            stale_clients = []
+            with self._extension_lock:
+                changed = self.origin_policy.origin != origin
+                self.origin_policy.replace(origin)
+                if changed:
+                    stale_clients = list(self._extension_clients)
+                    self._extension_clients.clear()
             self._pairing_until = 0.0
-        self.origin_policy.replace(origin)
+            self._close_extension_clients(stale_clients)
         return True
 
     def start(self) -> None:
@@ -470,6 +525,17 @@ class LocalApiServer:
         with self._extension_lock:
             clients = list(self._extension_clients)
             self._extension_clients.clear()
+        self._close_extension_clients(clients)
+        if server:
+            server.shutdown()
+            server.server_close()
+        if self._thread:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+        self.coordinator.stop(timeout=timeout)
+
+    @staticmethod
+    def _close_extension_clients(clients: list[socket.socket]) -> None:
         for client in clients:
             try:
                 client.shutdown(socket.SHUT_RDWR)
@@ -479,13 +545,6 @@ class LocalApiServer:
                 client.close()
             except OSError:
                 pass
-        if server:
-            server.shutdown()
-            server.server_close()
-        if self._thread:
-            self._thread.join(timeout=timeout)
-            self._thread = None
-        self.coordinator.stop(timeout=timeout)
 
     def submit_douyin_link_from_desktop(
         self, url: str, *, title: str = "", transcribe: bool = True,
@@ -609,9 +668,11 @@ class LocalApiServer:
                 self._remove_extension_client(client)
         return sent
 
-    def _register_extension_client(self, client: socket.socket) -> threading.Lock:
+    def _register_extension_client(self, client: socket.socket, origin: str) -> threading.Lock | None:
         write_lock = threading.Lock()
         with self._extension_lock:
+            if origin != self.origin_policy.origin:
+                return None
             self._extension_clients[client] = write_lock
         with self._desktop_request_lock:
             pending = [item.copy() for item in self._desktop_download_requests.values()
@@ -814,6 +875,7 @@ class LocalApiServer:
                         "api_version": API_VERSION, "auth_required": True,
                         "configured": bool(owner.origin_policy.origin),
                         "extension_latest": _bundled_extension_latest(),
+                        "extension_revision": _bundled_extension_revision(),
                         "client_config": owner.client_config.snapshot(),
                         "agent_control": {"protocol_version": AGENT_PROTOCOL_VERSION,
                                           "endpoint": "/v1/agent/call"},
@@ -1003,6 +1065,7 @@ class LocalApiServer:
                         if receipt is not None:
                             matching_submission_receipt(receipt, body.get("url", ""),
                                 (download_options or {}).get("transcribe_after_download", bool(owner.controller.settings.get("transcribe_after_download", False))),
+                                accepted_transcribe=owner.controller.downloads.accepted_transcription_intent(request_id, receipt),
                                 allow_any_url=bool(owner.controller.settings.get("allow_any_url", False)))
                             item = owner.coordinator.get(receipt["id"]) or receipt
                             self._json(202, {"job": public_download_job(item)})
@@ -1322,7 +1385,9 @@ class LocalApiServer:
                 self.send_header("Sec-WebSocket-Protocol", "shengjian-v1")
                 self.end_headers()
                 client = self.connection
-                write_lock = owner._register_extension_client(client)
+                write_lock = owner._register_extension_client(client, origin)
+                if write_lock is None:
+                    return
                 try:
                     # Text heartbeats dispatch a JS message event often enough
                     # to keep the MV3 worker alive; task events are pushed over
@@ -1337,7 +1402,8 @@ class LocalApiServer:
                         else:
                             with write_lock:
                                 client.sendall(_websocket_frame(b'{"type":"heartbeat"}'))
-                except OSError:
+                except (OSError, ValueError):
+                    # Re-pairing may close this socket as select starts.
                     pass
                 finally:
                     owner._remove_extension_client(client)

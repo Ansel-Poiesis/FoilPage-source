@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS download_requests (
     client_request_id TEXT PRIMARY KEY,
     download_id TEXT NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS download_request_intents (
+    client_request_id TEXT PRIMARY KEY REFERENCES download_requests(client_request_id) ON DELETE CASCADE,
+    transcribe INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cancelled_download_requests (
     client_request_id TEXT PRIMARY KEY
 );
@@ -187,6 +191,8 @@ class DownloadStore:
             )
             if request_id:
                 self._conn.execute("INSERT INTO download_requests VALUES (?,?)", (request_id, item["id"]))
+                self._conn.execute("INSERT INTO download_request_intents VALUES (?,?)",
+                                   (request_id, bool(options.get("transcribe_after_download"))))
         return item
 
     def get(self, download_id: str) -> DownloadJob | None:
@@ -215,30 +221,43 @@ class DownloadStore:
             ).fetchone()
             return self._from_row(row) if row else None
 
-    def remember_client_request(self, request_id: str, download_id: str) -> None:
+    def accepted_transcription_intent(self, request_id: str, receipt: DownloadJob) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT transcribe FROM download_request_intents WHERE client_request_id=?", (request_id,),
+            ).fetchone()
+        # Older installations only stored the intent on the task.
+        return bool(row["transcribe"]) if row else bool(receipt["options"].get("transcribe_after_download"))
+
+    def remember_client_request(self, request_id: str, download_id: str, transcribe: bool) -> None:
         if not request_id:
             return
         with self._lock, self._conn:
             self._require(download_id)
             self._conn.execute("INSERT OR IGNORE INTO download_requests VALUES (?,?)", (request_id, download_id))
+            self._conn.execute("INSERT OR IGNORE INTO download_request_intents VALUES (?,?)",
+                               (request_id, transcribe))
 
-    def list(self, statuses: Iterable[str] | None = None, *, limit: int = 100) -> list[DownloadJob]:
+    def list(self, statuses: Iterable[str] | None = None, *, limit: int = 100, url: str | None = None) -> list[DownloadJob]:
         limit = max(1, min(int(limit), 500))
         selected = tuple(dict.fromkeys(statuses or ()))
         if any(status not in DOWNLOAD_STATUSES for status in selected):
             raise DownloadStateError("下载状态非法")
+        conditions = []
+        parameters = []
+        if selected:
+            marks = ",".join("?" for _ in selected)
+            conditions.append(f"status IN ({marks})")
+            parameters.extend(selected)
+        if url is not None:
+            conditions.append("url=?")
+            parameters.append(url)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self._lock:
-            if selected:
-                marks = ",".join("?" for _ in selected)
-                rows = self._conn.execute(
-                    f"SELECT * FROM download_jobs WHERE status IN ({marks}) ORDER BY requested_at DESC, id DESC LIMIT ?",
-                    (*selected, limit),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM download_jobs ORDER BY requested_at DESC, id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+            rows = self._conn.execute(
+                f"SELECT * FROM download_jobs{where} ORDER BY requested_at DESC, id DESC LIMIT ?",
+                (*parameters, limit),
+            ).fetchall()
         return [self._from_row(row) for row in rows]
 
     def claim_next(self) -> DownloadJob | None:
@@ -294,6 +313,20 @@ class DownloadStore:
                 row,
             )
             return current
+
+    def promote_transcription(self, download_id: str) -> DownloadJob:
+        """Keep worker progress when a second click upgrades a live task."""
+        with self._lock, self._conn:
+            current = self._from_row(self._require(download_id))
+            # Preserve the original click for pre-upgrade receipts too.
+            self._conn.execute(
+                "INSERT OR IGNORE INTO download_request_intents "
+                "SELECT client_request_id,? FROM download_requests WHERE download_id=?",
+                (bool(current["options"].get("transcribe_after_download")), download_id),
+            )
+            return self.transition(download_id, current["status"], options={
+                **current["options"], "transcribe_after_download": True,
+            })
 
     def request_cancel(self, download_id: str) -> DownloadJob:
         current = self.get(download_id)

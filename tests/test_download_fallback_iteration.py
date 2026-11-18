@@ -66,11 +66,74 @@ def test_successful_local_retry_clears_previous_network_error(coordinator, monke
     item = coordinator.submit("https://www.bilibili.com/video/BV1fixtureRetry",
                               options={"transcribe_after_download": False})
     coordinator._fail(item["id"], "network_error", "网络失败", True)
+    retrying = next(row for row in coordinator.controller.task_rows() if row["task_id"] == item["id"])
+    assert retrying["status"] == "received" and retrying["error"] is None
     coordinator.store.transition(item["id"], "resolving")
     coordinator._run_one(coordinator.store.get(item["id"]))
     completed = coordinator.store.get(item["id"])
     assert completed["status"] == "done"
     assert completed["error"] is None
+
+
+def test_promotion_during_local_transfer_queues_exactly_one_transcription(coordinator):
+    page = "https://www.bilibili.com/video/BV1fixturePromote"
+    download = coordinator.submit(page, options={"transcribe_after_download": False})
+    claimed = coordinator.store.claim_next()
+    upgraded = coordinator.submit(page, options={"transcribe_after_download": True})
+    assert upgraded["id"] == download["id"]
+    coordinator._run_one(claimed)
+    result = coordinator.get(download["id"])
+    assert result["downloaded_path"] and result["status"] == "queued"
+    assert result["options"]["transcribe_after_download"] and result["job_id"]
+    assert len(coordinator.controller.queue.list_jobs()) == 1
+
+
+def test_browser_job_is_reserved_before_synchronous_handoff(coordinator, monkeypatch):
+    original_resolve = coordinator._resolve_browser_job
+
+    def inspect_reservation(item, **kwargs):
+        assert item["status"] == "resolving"
+        assert coordinator.store.claim_next() is None
+        return original_resolve(item, **kwargs)
+
+    monkeypatch.setattr(coordinator, "_resolve_browser_job", inspect_reservation)
+    result = coordinator.submit(PAGE, media_url=FIRST, mode="browser")
+    assert result["status"] == "awaiting_browser" and result["browser_download"]
+
+
+def test_late_start_report_leaves_the_next_browser_attempt_alive(coordinator):
+    item = coordinator.submit(PAGE, mode="browser", media_url=FIRST, options={"browser_fallback": True})
+    pending = coordinator.record_browser_download_failure(item["id"], browser_error="NETWORK_FAILED")
+    assert pending["error"]["diagnostic"]["fallback_pending"] == "browser"
+    assert coordinator.controller.task_rows()[0]["error"] is None
+    second = coordinator.continue_fallback(item["id"], stage="browser", media_candidates=[SECOND])
+    late = coordinator.record_extension_failure(url=PAGE, event_id="late-start-report",
+        phase="browser_download_start", channel="chrome.downloads", code="browser_download_start_failed",
+        message="delayed first attempt", task_id=item["id"])
+    assert late["status"] == second["status"] == "awaiting_browser"
+    assert late["error"] is None
+
+
+def test_fresh_click_after_platform_verification_can_download_and_queue(coordinator, tmp_path, monkeypatch):
+    original = coordinator.submit(PAGE, media_url=FIRST, mode="browser", options={"browser_fallback": True})
+    coordinator.record_browser_download_failure(original["id"], browser_error="SERVER_FORBIDDEN")
+    coordinator.continue_fallback(original["id"], stage="resolver", session_cookies=[{
+        "name": "sessionid", "value": "test-only", "domain": ".douyin.com", "path": "/", "secure": True,
+    }])
+    monkeypatch.setattr(coordinator.adapter, "download", Mock(side_effect=DownloadAdapterError(
+        "douyin_verification_required", "请完成页面验证", retryable=False,
+    )))
+    coordinator._run_one(coordinator.store.claim_next())
+    assert coordinator.get(original["id"])["status"] == "failed"
+
+    fresh = coordinator.submit(PAGE, media_url=SECOND, mode="browser", options={"transcribe_after_download": True})
+    assert fresh["id"] != original["id"] and fresh["status"] == "awaiting_browser"
+    assert coordinator.submit(PAGE, options={"transcribe_after_download": True})["id"] == fresh["id"]
+    transferred = tmp_path / "verified-page.mp4"
+    transferred.write_bytes(b"fixture-media" * 20)
+    coordinator.submit_local_file(str(transferred), download_id=fresh["id"])
+    result = coordinator.get(fresh["id"])
+    assert result["status"] == "queued" and result["job_id"] and result["downloaded_path"]
 
 
 def test_legacy_completed_download_does_not_show_its_stale_retry_error(coordinator):
@@ -410,3 +473,41 @@ def test_late_browser_completion_resurrects_terminally_failed_task(coordinator, 
     assert public_download_job(linked)["download_complete"] is True
     assert revived["media_id"]
     assert len(coordinator.store.list()) == 1
+
+
+def test_validate_options_accepts_capture_age_observability_fields():
+    options = {
+        "client_request_id": "client-abc123def456",
+        "quality": "best-available",
+        "audio_only": False,
+        "language": "zh",
+        "mode": "browser",
+        "transcribe_after_download": False,
+        "media_candidate_ages_ms": [1200, 640000],
+        "recapture_of": "a1b2c3d4e5f6",
+    }
+    DownloadCoordinator._validate_options(options)
+    bad_ages = dict(options, media_candidate_ages_ms=[100, -1])
+    with pytest.raises(DownloadAdapterError) as raised:
+        DownloadCoordinator._validate_options(bad_ages)
+    assert raised.value.code == "invalid_options"
+    bad_lineage = dict(options, recapture_of="not-a-task-id")
+    with pytest.raises(DownloadAdapterError) as raised:
+        DownloadCoordinator._validate_options(bad_lineage)
+    assert raised.value.code == "invalid_options"
+
+
+def test_both_channel_failure_carries_candidate_age_and_lineage_diagnostic(coordinator):
+    item = coordinator.submit(PAGE, mode="browser", media_url=SECOND,
+                              options={"browser_fallback": True, "transcribe_after_download": False,
+                                       "media_candidate_ages_ms": [45000, 950000],
+                                       "recapture_of": "a1b2c3d4e5f6"})
+    for _ in range(4):
+        coordinator.record_browser_download_failure(item["id"], browser_error="SERVER_FORBIDDEN")
+    coordinator.store.transition(item["id"], "resolving",
+        options={**coordinator.store.get(item["id"])["options"], "mode": "local", "fallback_stage": "resolver"})
+    coordinator._fail(item["id"], "douyin_verification_required", "需要页面校验", False)
+    failed = coordinator.store.get(item["id"])
+    diagnostic = failed["error"]["diagnostic"]
+    assert diagnostic["candidate_ages_ms"] == [45000, 950000]
+    assert diagnostic["recapture_of"] == "a1b2c3d4e5f6"

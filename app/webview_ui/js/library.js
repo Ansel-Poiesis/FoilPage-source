@@ -336,6 +336,13 @@ window.Library = (() => {
           </div>
           <div class="reader-links" id="readerLinks" hidden><button class="btn ghost small" id="readerTaskLink" type="button">查看任务</button><button class="btn ghost small" id="readerVideoLink" type="button">在视频库定位</button></div>
           <div class="reader-tags" id="readerTags"></div>
+          <div class="reader-preview-notice" id="readerPreviewNotice" hidden>
+            <span role="status">当前显示部分文稿</span>
+            <div class="reader-preview-actions">
+              <button class="btn ghost small" id="copyReaderPreview" type="button">复制可见部分</button>
+              <button class="btn ghost small" id="locateFullDocument" type="button">定位完整文稿</button>
+            </div>
+          </div>
           <div class="reader-body" id="readerBody">
             <div class="reader-empty"><div class="big">选择一篇文本</div></div>
           </div>
@@ -370,6 +377,8 @@ window.Library = (() => {
     document.getElementById("subtitleBtn").onclick = showSubtitleMenu;
     document.getElementById("openBtn").onclick = openReaderFile;
     document.getElementById("copyReaderBtn").onclick = copyReaderText;
+    document.getElementById("copyReaderPreview").onclick = copyReaderText;
+    document.getElementById("locateFullDocument").onclick = openReaderFile;
     document.getElementById("editReaderBtn").onclick = beginEditing;
     document.getElementById("saveReaderBtn").onclick = saveEditing;
     document.getElementById("cancelReaderBtn").onclick = cancelEditing;
@@ -603,7 +612,8 @@ window.Library = (() => {
     if (selection) {
       items.push(`<button class="ctx-item menu-item" type="button" data-act="copy-selection"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>复制选中文字</button>`);
     }
-    items.push(`<button class="ctx-item menu-item" type="button" data-act="copy-all"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13"/><path d="M16 12h5"/><path d="M8 18h13"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>复制全部 Markdown</button>`);
+    const copyLabel = state.readerTruncated && state.translationView === "off" ? "复制可见部分" : "复制全部 Markdown";
+    items.push(`<button class="ctx-item menu-item" type="button" data-act="copy-all"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13"/><path d="M16 12h5"/><path d="M8 18h13"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>${copyLabel}</button>`);
     if (doc && doc.source_path) {
       items.push(`<button class="ctx-item menu-item" type="button" data-act="copy-video-path"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/></svg>复制视频地址</button>`);
     }
@@ -1080,10 +1090,14 @@ window.Library = (() => {
     const ready = state.readerReady && !!state.selectedId;
     const inTranslation = state.translationView !== "off";
     const editable = ready && (tab || state.tab) !== "source" && !state.readerTruncated && !inTranslation && !state.comparing;
-    for (const id of ['subtitleBtn','openBtn','deleteBtn']) {
+    const preview = ready && state.readerTruncated && !inTranslation && !state.comparing;
+    const open = document.getElementById("openBtn");
+    for (const id of ['subtitleBtn','deleteBtn']) {
       const button = document.getElementById(id); if (button) button.disabled = !ready;
     }
-    if (copy) copy.disabled = !ready || state.editing || state.comparing;
+    if (open) { open.hidden = preview; open.disabled = !ready; }
+    if (copy) { copy.hidden = preview; copy.disabled = !ready || state.editing || state.comparing; }
+    document.getElementById("readerPreviewNotice").hidden = !preview;
     if (edit) edit.disabled = !editable || state.editing;
     if (save) { save.hidden = !state.editing; save.disabled = pendingSaves.has(state.selectedId + "@" + state.tab); }
     if (cancel) cancel.hidden = !state.editing;
@@ -1103,8 +1117,8 @@ window.Library = (() => {
       if (state.translationData?.text) copyText(state.translationData.text, "译文已复制");
       return;
     }
-    if (!state.readerText || state.readerTruncated) return;
-    copyText(state.readerText, "Markdown 已复制");
+    if (!state.readerText) return;
+    copyText(state.readerText, state.readerTruncated ? "已复制可见部分" : "Markdown 已复制");
   }
 
   function beginEditing() {
@@ -1183,11 +1197,25 @@ window.Library = (() => {
     deleteDoc(doc);
   }
 
-  function openReaderFile() {
-    if (!state.selectedId) return;
-    AppApi.reader(state.selectedId, state.tab).then((d) => {
-      if (d && d.ok) AppApi.openPath(d.path);
-    });
+  async function openReaderFile() {
+    if (!state.readerReady || !state.selectedId) return;
+    const {selectedId, tab} = state;
+    const serial = readerRequest;
+    const current = () => serial === readerRequest && state.readerReady && selectedId === state.selectedId
+      && tab === state.tab && AppState.currentView === "library";
+    const reportError = message => {
+      if (current()) toast(message || "无法定位文稿文件", "error");
+    };
+    try {
+      // Agent reorganization can replace a document's file while the reader stays open.
+      const data = await AppApi.reader(selectedId, tab);
+      if (!current()) return;
+      if (!data?.ok || !data.path) { reportError(data?.error); return; }
+      const result = await AppApi.openPath(data.path);
+      if (!result?.ok) reportError(result?.error);
+    } catch (_) {
+      reportError();
+    }
   }
 
   /* tick 轻刷新：仅重拉列表（后端带指纹），不打断阅读 */
@@ -1226,10 +1254,12 @@ window.Library = (() => {
       const counts = {added: 0, removed: 0, changed: 0};
       groups.forEach(group => { if (group.kind !== 'same') ++counts[group.kind]; });
       const summary = body.querySelector('.diff-summary');
-      summary.textContent = counts.added || counts.removed || counts.changed
+      const partial = raw.truncated || final.truncated;
+      const changes = counts.added || counts.removed || counts.changed;
+      summary.textContent = changes
         ? `新增 ${counts.added} 组 · 删减 ${counts.removed} 组 · 调整 ${counts.changed} 组`
-        : '原稿与整理稿内容一致';
-      if (raw.truncated || final.truncated) summary.textContent += ' · 当前仅对照已读取的部分文稿';
+        : partial ? '已读取的部分文稿内容一致' : '原稿与整理稿内容一致';
+      if (partial && changes) summary.textContent += ' · 当前仅对照已读取的部分文稿';
       let rendered = 0;
       const appendGroups = () => {
         const chunk = groups.slice(rendered, rendered + 80);

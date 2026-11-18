@@ -571,6 +571,28 @@ def test_open_path_missing_file():
     assert result["ok"] is False
 
 
+def test_reader_marks_only_utf8_documents_above_preview_limit_as_partial(tmp_path):
+    exact = "字" * 666_666 + "AB"
+    beyond = "字" * 666_666 + "尾"
+    path = tmp_path / "稿件.md"
+    rows = [_row("transcription", "a", status="done", final_path=str(path))]
+    bridge, _, _ = make_bridge(rows=rows, settings={"output_dir": str(tmp_path)})
+
+    path.write_text(exact, encoding="utf-8")
+    complete = bridge.get_reader("job:a", "final")
+    assert complete["ok"] and not complete["truncated"]
+    assert complete["size"] == 2_000_000
+    assert complete["text"] == exact and complete["revision"]
+
+    path.write_text(beyond, encoding="utf-8")
+    partial = bridge.get_reader("job:a", "final")
+    assert partial["ok"] and partial["truncated"]
+    assert partial["size"] == 2_000_001
+    assert partial["text"] == "字" * 666_666
+    assert partial["revision"] is None
+    assert partial["path"] == str(path)
+
+
 def test_open_path_wrong_kind():
     bridge, _, _ = make_bridge()
     result = bridge.open_directory("Z:/no/such/dir")

@@ -389,18 +389,20 @@ test('desktop task controls preserve every action and separate reading from medi
     await page.locator('.job-open').first().click();
     const actions = page.locator('#inspector .actions');
     const labels = await actions.locator('button:visible').allTextContents();
-    assert.deepEqual(labels, ['在文本库阅读', '播放', '在视频库定位', '打开位置', '打开文本', '重新转写', '删除']);
+    assert.deepEqual(labels, ['在文本库阅读', '播放', '在视频库定位', '定位媒体文件', '定位文稿文件', '重新转写', '删除']);
+    assert.equal(await page.locator('#inspector .task-result-status').textContent(), '转写完成');
+    assert.equal(await page.locator('#inspector .ml-status').count(), 0);
     const primary = await actions.getByRole('button', {name: '在文本库阅读', exact: true}).boundingBox();
     const media = await actions.getByRole('button', {name: '播放', exact: true}).boundingBox();
-    const files = await actions.getByRole('button', {name: '打开位置', exact: true}).boundingBox();
+    const files = await actions.getByRole('button', {name: '定位媒体文件', exact: true}).boundingBox();
     const management = await actions.getByRole('button', {name: '重新转写', exact: true}).boundingBox();
     assert(primary.width >= (await actions.boundingBox()).width - 1);
     assert(media.y >= primary.y + primary.height + 12);
     assert(files.y >= media.y + media.height + 12);
     assert(management.y >= files.y + files.height + 20);
     await actions.getByRole('button', {name: '播放', exact: true}).click();
-    await actions.getByRole('button', {name: '打开位置', exact: true}).click();
-    await actions.getByRole('button', {name: '打开文本', exact: true}).click();
+    await actions.getByRole('button', {name: '定位媒体文件', exact: true}).click();
+    await actions.getByRole('button', {name: '定位文稿文件', exact: true}).click();
     await actions.getByRole('button', {name: '重新转写', exact: true}).click();
     await page.waitForFunction(() => __detailCalls.some(call => call[0] === 'retry'));
     assert.deepEqual(await page.evaluate(() => __detailCalls), [
@@ -417,6 +419,33 @@ test('desktop task controls preserve every action and separate reading from medi
   } finally {
     await page.close();
   }
+});
+
+test('task file actions report moved files in the inspector and allow retry on the same task', async () => {
+  const page = await open();
+  try {
+    await page.evaluate(() => {
+      __MOCK__.open_path = () => ({ok: false, error: '文件不存在'});
+      __MOCK__.play_media = () => ({ok: false, error: '媒体文件尚未生成或已移除'});
+    });
+    await page.locator('.job-open').first().click();
+    const inspector = page.locator('#inspector');
+    const feedback = inspector.locator('.task-action-feedback');
+    for (const [label, reason] of [
+      ['定位文稿文件', '文件不存在'], ['定位媒体文件', '文件不存在'], ['播放', '媒体文件尚未生成或已移除'],
+    ]) {
+      const action = inspector.getByRole('button', {name: label, exact: true});
+      await action.focus();
+      await page.keyboard.press('Enter');
+      await feedback.getByText(`${label} · ${reason}`, {exact: true}).waitFor();
+      assert.deepEqual(await page.evaluate(() => [...AppState.selected]), ['job:0']);
+      assert(await action.evaluate(button => button === document.activeElement));
+    }
+    await page.evaluate(() => { __MOCK__.play_media = () => ({ok: true}); });
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.task-action-feedback').textContent === '');
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
 });
 
 test('the author credit aligns its wordmark and website and opens through the native bridge by keyboard', async () => {

@@ -67,7 +67,9 @@ export async function pair() {
     throw new Error("请先打开 FoilPage 桌面端");
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error?.message || `连接失败 ${response.status}`);
+  if (!response.ok) throw new LocalApiError(data?.error?.message || `连接失败 ${response.status}`, {
+    code: data?.error?.code, status: response.status,
+  });
   if (typeof data.token !== "string" || data.token.length < 32) {
     throw new Error("FoilPage 返回了无效连接凭据");
   }
@@ -92,7 +94,9 @@ export async function setup() {
     throw new Error("请先启动一次 FoilPage 桌面端");
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error?.message || `配置失败 ${response.status}`);
+  if (!response.ok) throw new LocalApiError(data?.error?.message || `配置失败 ${response.status}`, {
+    code: data?.error?.code, status: response.status,
+  });
   if (typeof data.token !== "string" || data.token.length < 32) {
     throw new Error("FoilPage 返回了无效连接凭据");
   }

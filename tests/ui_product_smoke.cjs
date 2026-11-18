@@ -99,7 +99,7 @@ fs.mkdirSync(output, {recursive:true});
       window.__sjSubmitted=[];
       window.chrome={storage:{local:{get:async()=>({localApiToken:'fixture-token'})}}, tabs:{query:async()=>[{url:'https://www.bilibili.com/video/BV1test'}]},runtime:{sendMessage:(msg,cb)=>{
         if(msg.type==='shengjian-page-submit')window.__sjSubmitted.push(msg);
-        const data = msg.type==='shengjian-authorized-status' ? {tasks:[{title:'从声音到文字：一段完整的访谈记录与整理体验',status:'downloading',progress:.46},{title:'保留课堂里的每一个例子',status:'done',progress:1},{title:'关于创作的谈话',status:'queued'}]} : {ok:true};
+        const data = msg.type==='shengjian-authorized-status' ? {ok:true,tasks:[{id:'one',title:'从声音到文字：一段完整的访谈记录与整理体验',status:'downloading',progress:.46},{id:'two',title:'保留课堂里的每一个例子',status:'done',progress:1},{id:'three',title:'关于创作的谈话',status:'queued'}]} : {ok:true};
         if(cb)cb(data);return Promise.resolve(data);
       }}};
     });
@@ -209,8 +209,9 @@ fs.mkdirSync(output, {recursive:true});
     assert.equal(await yt.locator('.shengjian-yt-pill').count(),1,'one feedback surface is reused across both outcomes');
     await assertOutsidePlayer(yt,'.shengjian-yt-pill','#player-container-outer');
     await yt.screenshot({path:path.join(output,'yt-pill-transcribe-success.png')});
-    await yt.locator('.shengjian-yt-pill').click();
-    await yt.waitForSelector('.shengjian-yt-pill',{state:'detached'});
+    await yt.getByRole('button',{name:'关闭提示'}).click();
+    assert.equal(await yt.locator('.shengjian-yt-pill').evaluate(pill=>pill.inert),true);
+    await yt.waitForSelector('.shengjian-yt-pill',{state:'hidden'});
 
     assert.deepEqual(errors,[],'no uncaught frontend errors');
     console.log('Product UI smoke passed at 1280 / 960 / 640 / 560; Bili and YouTube pills passed.');

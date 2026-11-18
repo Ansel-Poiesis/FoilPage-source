@@ -27,6 +27,13 @@
   // captured_targets=20、target_captured=false）。MAIN 世界按 aweme_id
   // 留一份更长的采集档案，提交时按目标 id 定向重放一次。
   const REPLAY_REQUEST_SOURCE = "shengjian-capture-replay";
+  // 刷新握手（先生 2026-11-18「抖音风控波」）：重放档案只回旧签名，签名
+  // 时效远短于档案 TTL。隔离世界可请求主世界用页面自己的 detail 请求
+  // （含 a_bogus/msToken）原样再取一次，拿全新签名的 play_addr。
+  const REFRESH_REQUEST_SOURCE = "shengjian-capture-refresh";
+  const REFRESH_RESULT_SOURCE = "shengjian-capture-refresh-result";
+  const DETAIL_REQUEST_TTL_MS = 30 * 60 * 1000;
+  const MAX_DETAIL_REQUESTS = 32;
   // TASK-8.18 图集：ISOLATED 从 chrome.storage 中继 8.16 热切换配置（纯数据）。
   // 默认禁用＝「关闭时与现状完全一致」；形状坏/无 nonce 一律回落默认。
   const CONFIG_SOURCE = "shengjian-client-config";
@@ -61,8 +68,11 @@
   // 与 ISOLATED 的 CAPTURE_TTL_MS 对齐：长会话回看场景需要 2 小时。
   const ARCHIVE_TTL_MS = 120 * 60 * 1000;
   const MAX_ARCHIVE_ITEMS = 240;
-  const MAX_ARCHIVE_CANDIDATES = 4;
+  // 风控波期间同一目标保留更多候选（先生 2026-11-18）：不同 CDN/码率签名
+  // 的存活是抽签，候选面越宽，浏览器通道越可能留有未试过的新地址。
+  const MAX_ARCHIVE_CANDIDATES = 6;
   const captureArchive = new Map();
+  let captureRevision = 0;
 
   // 隔离世界靠 DOM 标记判断 MAIN 是否随当前扩展注入；自更新后未 F5 的旧页无标记。
   try {
@@ -454,11 +464,12 @@
   let pending = [];
   let flushTimer = null;
 
-  // 归档随送达更新：delete+set 让插入顺序即新鲜度顺序，头部即最旧；
-  // 过期与超量都从头部裁剪，内存上界 = MAX_ARCHIVE_ITEMS × 每条一URL集。
+  // The archive uses access order for its size limit and observation time for expiry.
   function archiveCapturedItems(items) {
     const now = Date.now();
     for (const item of items) {
+      item.capturedAt = now;
+      item.captureRevision = ++captureRevision;
       captureArchive.delete(item.videoId);
       captureArchive.set(item.videoId, {
         videoId: item.videoId,
@@ -468,13 +479,15 @@
         coverUrl: item.coverUrl || "",
         // 图集档案按条限幅（每图 urls 已 ≤6）：240 槽 × 8 图内嵌足够重放。
         gallery: Array.isArray(item.gallery) ? item.gallery.slice(0, 8) : undefined,
-        at: now,
+        capturedAt: item.capturedAt,
+        captureRevision: item.captureRevision,
       });
     }
-    while (captureArchive.size) {
-      const [id, entry] = captureArchive.entries().next().value;
-      if (now - entry.at <= ARCHIVE_TTL_MS && captureArchive.size <= MAX_ARCHIVE_ITEMS) break;
-      captureArchive.delete(id);
+    for (const [id, entry] of captureArchive) {
+      if (now - entry.capturedAt > ARCHIVE_TTL_MS) captureArchive.delete(id);
+    }
+    while (captureArchive.size > MAX_ARCHIVE_ITEMS) {
+      captureArchive.delete(captureArchive.keys().next().value);
     }
   }
 
@@ -486,20 +499,80 @@
     const videoId = String(data?.videoId || "");
     if (!/^\d{10,24}$/.test(videoId)) return false;
     const hit = captureArchive.get(videoId);
-    if (!hit || Date.now() - hit.at > ARCHIVE_TTL_MS) return false;
-    // 重放即“正在被使用”：刷新时间戳并移到队尾，洪峰裁剪不会挤掉
-    // 反复点击中的目标。
+    if (!hit) return false;
+    if (Date.now() - hit.capturedAt > ARCHIVE_TTL_MS) {
+      captureArchive.delete(videoId);
+      return false;
+    }
+    // A read updates LRU position only. Replays keep the original observation.
     captureArchive.delete(videoId);
-    hit.at = Date.now();
     captureArchive.set(videoId, hit);
-    const { at, ...item } = hit;
     try {
-      window.postMessage({ source: MESSAGE_SOURCE, nonce: CAPTURE_NONCE, items: [item] },
+      window.postMessage({ source: MESSAGE_SOURCE, nonce: CAPTURE_NONCE, items: [hit] },
         window.location.origin);
     } catch {
       return false;
     }
     return true;
+  }
+
+  // 页面自己发过的 detail 请求（含平台签名参数），供刷新时原样重放。
+  const detailRequests = new Map();
+  function rememberDetailRequest(rawUrl) {
+    try {
+      const url = String(rawUrl || "");
+      if (!API_HINT.test(url) || !/aweme\/detail/i.test(url)) return;
+      const videoId = (url.match(/[?&]aweme_id=(\d{10,24})/) || [])[1] || "";
+      if (!videoId) return;
+      detailRequests.delete(videoId);
+      detailRequests.set(videoId, { url, at: Date.now() });
+      while (detailRequests.size > MAX_DETAIL_REQUESTS) {
+        detailRequests.delete(detailRequests.keys().next().value);
+      }
+    } catch { /* 观察逻辑永不冒泡到页面 */ }
+  }
+
+  function discardStaleDetailRequests() {
+    const now = Date.now();
+    for (const [id, entry] of detailRequests) {
+      if (now - entry.at > DETAIL_REQUEST_TTL_MS) detailRequests.delete(id);
+    }
+  }
+
+  // 刷新捕获：nonce 同握手；用页面自己的 detail 请求 URL 原样再取一次。
+  // 响应走 offer() 既有管线（解析→档案→flush 给隔离世界），回执只报成败
+  // 与原因，不携带地址——地址仍只经捕获消息的白名单管线流动。
+  async function refreshCapture(data) {
+    if (String(data?.nonce || "") !== CAPTURE_NONCE) return false;
+    const videoId = String(data?.videoId || "");
+    if (!/^\d{10,24}$/.test(videoId)) return false;
+    discardStaleDetailRequests();
+    const hit = detailRequests.get(videoId);
+    if (!hit) return { ok: false, reason: "no_recent_detail_request" };
+    let response = null;
+    try {
+      response = await nativeFetch(hit.url, { credentials: "include" });
+    } catch {
+      return { ok: false, reason: "replay_network_failed" };
+    }
+    if (!response || !response.ok) return { ok: false, reason: "replay_rejected" };
+    let text = "";
+    try {
+      text = await response.text();
+    } catch {
+      return { ok: false, reason: "replay_body_unreadable" };
+    }
+    let payload = null;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      return { ok: false, reason: "replay_not_json" };
+    }
+    const items = collectAwemes(payload);
+    const matching = items.filter(item => String(item.videoId) === videoId);
+    if (!matching.length) return { ok: false, reason: "replay_no_target_item" };
+    offer(text);
+    return { ok: true, items: matching.length };
   }
 
   function flush() {
@@ -551,6 +624,7 @@
         const url = typeof input === "string" ? input : String(input?.url || "");
         if (API_HINT.test(url)) {
           addMainMetric("shengjianMainApiRequests");
+          rememberDetailRequest(url);
           promise.then((response) => {
             try {
               if (response && typeof response.clone === "function") {
@@ -578,6 +652,7 @@
   XMLHttpRequest.prototype.send = function () {
     if (API_HINT.test(this.__shengjianUrl || "")) {
       addMainMetric("shengjianMainApiRequests");
+      rememberDetailRequest(this.__shengjianUrl || "");
       this.addEventListener("load", () => {
         try {
           offer(this.responseText);
@@ -596,6 +671,25 @@
     if (!data || data.source !== REPLAY_REQUEST_SOURCE) return;
     if (event.origin !== window.location.origin) return;
     replayCapture(data);
+  });
+
+  // 隔离世界的刷新请求：同源过滤后转交 refreshCapture；回执带同 nonce。
+  window.addEventListener("message", (event) => {
+    const data = event?.data;
+    if (!data || data.source !== REFRESH_REQUEST_SOURCE) return;
+    if (event.origin !== window.location.origin) return;
+    void refreshCapture(data).then((result) => {
+      const reply = {
+        source: REFRESH_RESULT_SOURCE,
+        nonce: String(data?.nonce || ""),
+        videoId: String(data?.videoId || ""),
+        ok: Boolean(result?.ok),
+        reason: String(result?.reason || ""),
+      };
+      try {
+        window.postMessage(reply, window.location.origin);
+      } catch { /* 隔离世界可能已随导航消失 */ }
+    });
   });
 
   // ISOLATED 中继的 8.16 热切换配置（同源＋nonce＋形状校验，坏形状回落
@@ -622,6 +716,9 @@
     offer,
     flush,
     replayCapture,
+    refreshCapture,
+    rememberDetailRequest,
+    detailRequests,
     captureArchive,
     MESSAGE_SOURCE,
   };

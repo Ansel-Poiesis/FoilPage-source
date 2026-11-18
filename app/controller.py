@@ -220,6 +220,12 @@ class AppController:
         for download in download_rows:
             if download.get("job_id") in linked_jobs:
                 continue
+            error = download.get("error") or {}
+            retry_in_progress = (
+                download["status"] in {"received", "resolving", "downloading"}
+                or (download["status"] == "awaiting_browser"
+                    and (error.get("diagnostic") or {}).get("fallback_pending"))
+            )
             row = dict(download)
             row.update({
                 "kind": "download",
@@ -227,9 +233,7 @@ class AppController:
                 "source": "浏览器下载",
                 "display_title": download.get("title") or download["url"],
                 "result_category": "浏览器下载",
-                # Historical completed retries may retain a transient error.
-                # Preserve the stored evidence without presenting it as failure.
-                "error": None if download["status"] == "done" else download.get("error"),
+                "error": None if retry_in_progress or download["status"] == "done" else download.get("error"),
                 "final_path": None,
                 "raw_path": None,
             })

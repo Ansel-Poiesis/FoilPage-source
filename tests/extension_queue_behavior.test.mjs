@@ -33,6 +33,7 @@ async function harness({online=true,seed={},fresh=null,websocket=false,handler=n
   const context={chrome,URL,AbortController,Date:class extends Date{static now(){return now;}},Math,Promise,Set,Map,console:{log(){},warn(){}},navigator:{userAgent:'fixture'},
     crypto:{randomUUID:()=>`fixture-request-${String(++sequence).padStart(12,'0')}`}, getToken:async()=>token,
     pickDouyinResolveCookies,browserFallbackMediaUrls,
+    health:async()=>{if(!online)throw offline();return {service:'VideoToArticle',api_version:'1'};},
     fetch:async()=>({ok:true,json:async()=>({ok:true,extension_latest:'1.0.0'})}),
     setTimeout(fn,delay){const timer={fn,delay,unref(){}};timers.push(timer);return timer;},clearTimeout(){},
     request:async(path,options)=>{
@@ -156,7 +157,7 @@ test('temporary fallback transport outage does not finish or erase the original 
   // 先生 2026-10-18：首错换道必给一次安抚（stage=fallback），离线也不例外；
   // 除此之外仍不得有失败/进度类页面通知。
   const reassurance=f.sent.filter(m=>m.stage==='fallback');
-  assert.equal(reassurance.length,1);assert.match(reassurance[0].message,/别急，正在尝试其他下载办法/);
+  assert.equal(reassurance.length,1);assert.match(reassurance[0].message,/正在重试下载/);
   assert.equal(f.sent.filter(m=>m.stage!=='fallback').length,0);
 });
 
@@ -534,7 +535,7 @@ test('a permanent local authorization rejection never claims durable download ac
 });
 
 for(const [code,expected] of [
-  ['douyin_verification_required',/播放 2 秒/],
+  ['douyin_verification_required',/完成验证/],
   ['login_required',/FoilPage 桌面端登录/],
   ['unauthorized',/浏览器.*允许连接.*重新连接/],
   ['resolver_error',/任务页查看原因/],
@@ -617,6 +618,32 @@ test('hint rebuild from the fresh-media response also carries the cover',async()
   assert.equal(posted[0].body.cover_url,cover,'fresh-media 重建的提示必须连同 cover_url 提交');
 });
 
+test('refresh reads the target player past empty or cached replies from other tabs', async () => {
+  const f = await harness({});
+  const tabs = [{id:2, active:true}, {id:3}, {id:4}];
+  f.chrome.tabs.query = (_query, callback) => callback(tabs);
+  const replies = new Map([
+    [2, {ok:true, videoId:VIDEO_A, activeTarget:false, mediaCandidates:[MEDIA_B]}],
+    [3, {ok:true, videoId:VIDEO_A, gallery:[]}],
+    [4, {ok:true, videoId:VIDEO_A, activeTarget:true, mediaCandidates:[MEDIA_A], gallery:[]}],
+  ]);
+  f.chrome.tabs.sendMessage = (id, _message, callback) => callback(replies.get(id));
+  assert.equal((await f.askTabsForFreshMedia(VIDEO_A)).mediaCandidates[0], MEDIA_A);
+  replies.delete(2);
+  replies.delete(4);
+  assert.equal(await f.askTabsForFreshMedia(VIDEO_A), null);
+});
+
+test('restoring a video with candidate URLs and an empty gallery still submits a video', async () => {
+  const f = await harness({fresh:{ok:true, videoId:VIDEO_A, mediaCandidates:[MEDIA_A], gallery:[]}});
+  await f.submitPageDownload({url:URL_A, transcribe:true});
+  const posted = f.calls.filter(call => call.path === '/v1/downloads' && call.body?.url);
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].body.media_url, MEDIA_A);
+  assert.equal(posted[0].body.options.transcribe_after_download, true);
+  assert.equal(f.cookieReads, 0);
+});
+
 // ---------------------------------------------------------------------------
 // TASK-8.18 图集载荷：kind:"gallery" 经队列中转直达 POST /v1/downloads——
 // 无媒体提示、无 Cookie，桌面按签名直链逐张下载（取证④）。
@@ -672,6 +699,8 @@ test('transcribe upgrade after dispatch posts a fresh credential instead of muta
   await f.submitPageDownload({url,title:'来源标题'});await f.settle();
   assert.ok(f.saved.shengjianSubmissionQueue[0].taskId,'首个凭据已派发');
   await f.submitPageDownload({url,title:'来源标题',transcribe:true});await f.settle();
+  await f.submitPageDownload({url,title:'来源标题',transcribe:true});
+  await f.submitPageDownload({url,title:'来源标题'});
   const submits=f.calls.filter(c=>c.path==='/v1/downloads');
   assert.equal(submits.length,2,'换意图走新凭据让服务端按 URL 活跃任务合并旗标');
   assert.notEqual(submits[0].body.client_request_id,submits[1].body.client_request_id);
@@ -679,7 +708,7 @@ test('transcribe upgrade after dispatch posts a fresh credential instead of muta
   assert.equal(submits[1].body.options.transcribe_after_download,true);
 });
 
-test('check-existing flags a recent platform-blocked failure for page confirmation',async()=>{
+test('check-existing omits old errors when the user submits again',async()=>{
   const f=await harness({initialJobs:[
     {id:'aaa000000001',url:URL_A,title:'原视频',status:'failed',progress:1,options:{},
      error:{code:'douyin_verification_required',message:'拦截'},updated_at:'1970-01-01T00:10:00Z'},
@@ -688,20 +717,90 @@ test('check-existing flags a recent platform-blocked failure for page confirmati
   assert.equal(check.ok,true);
   assert.equal(check.active,false);
   assert.equal(check.done,false);
-  assert.equal(check.recentFailure.code,'douyin_verification_required');
-  assert.match(check.recentFailure.summary,/抖音校验/);
+  assert.equal(check.recentFailure,undefined);
 });
 
-test('check-existing drops failures older than ten minutes',async()=>{
-  const f=await harness({initialJobs:[
-    {id:'aaa000000001',url:URL_A,title:'原视频',status:'failed',progress:1,options:{},
-     error:{code:'network_error',message:'网络'},updated_at:'1970-01-01T00:00:00Z'},
-  ]});
-  const check=await f.message({type:'shengjian-check-existing',url:URL_A});
-  assert.equal(check.ok,true);
-  assert.equal(check.recentFailure,null,'过期失败不再拦截或确认');
+test('a resumable network interruption keeps its download ID and retries once',async()=>{
+  const f=await harness();
+  const task=await f.submitPageDownload({url:URL_A,mediaUrl:MEDIA_A});
+  const interrupted={id:1,state:'interrupted',error:'NETWORK_FAILED',canResume:true};
+  let resumes=0;
+  f.chrome.downloads.search=(query,cb)=>cb([interrupted]);
+  f.chrome.downloads.resume=async id=>{assert.equal(id,1);resumes++;};
+  await f.handleBrowserDownloadInterrupted(1);
+  assert.equal(resumes,1);
+  assert.equal(f.saved.shengjianBrowserDownloadJobs['1'].taskId,task.id);
+  assert.equal(f.saved.shengjianBrowserDownloadJobs['1'].resumeAttempted,true);
+  assert.equal(f.calls.filter(call=>call.path.endsWith('/browser-failure')).length,0);
+  assert.equal(f.sent.filter(event=>event.stage==='failure').length,0);
+  await f.handleBrowserDownloadInterrupted(1);
+  assert.equal(resumes,1);
+  assert.equal(f.calls.filter(call=>call.path.endsWith('/browser-failure')).length,1);
 });
 
+test('native resume skips rejected, cancelled and non-resumable Chrome transfers', async () => {
+  for (const [error, canResume] of [
+    ['NETWORK_FAILED', false],
+    ['SERVER_FORBIDDEN', true],
+    ['SERVER_UNAUTHORIZED', true],
+    ['SERVER_CROSS_ORIGIN_REDIRECT', true],
+    ['USER_CANCELED', true],
+  ]) {
+    const f = await harness();
+    const task = await f.submitPageDownload({url: URL_A, mediaUrl: MEDIA_A});
+    let resumes = 0;
+    f.chrome.downloads.resume = async () => { resumes++; };
+    f.chrome.downloads.search = ({id}, done) => done([{id, state: 'interrupted', error, canResume}]);
+    await f.handleBrowserDownloadInterrupted(1);
+    assert.equal(resumes, 0, error);
+    const reports = f.calls.filter(call => call.path.endsWith('/browser-failure'));
+    assert.equal(reports.length, 1, error);
+    assert.equal(reports[0].path, `/v1/downloads/${task.id}/browser-failure`);
+    assert.equal(reports[0].body.browser_error, error);
+  }
+});
+
+test('Chrome resume rejection returns the owned transfer to its original task', async () => {
+  const f = await harness();
+  const task = await f.submitPageDownload({url: URL_A, mediaUrl: MEDIA_A});
+  const resumed = [];
+  f.chrome.downloads.search = ({id}, done) => done([{
+    id, state: 'interrupted', error: 'NETWORK_TIMEOUT', canResume: true,
+  }]);
+  f.chrome.downloads.resume = async id => {
+    resumed.push(id);
+    throw new Error('No longer resumable');
+  };
+  await f.handleBrowserDownloadInterrupted(9); // Unrelated browser download.
+  await f.handleBrowserDownloadInterrupted(1);
+  assert.deepEqual(resumed, [1]);
+  const reports = f.calls.filter(call => call.path.endsWith('/browser-failure'));
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].path, `/v1/downloads/${task.id}/browser-failure`);
+  assert.equal(reports[0].body.browser_error, 'NETWORK_TIMEOUT');
+  assert.equal(f.transfers.length, 1);
+});
+
+test('a worker restart keeps the native resume limit across Chrome recovery scans', async () => {
+  const first = await harness();
+  const task = await first.submitPageDownload({url: URL_A, mediaUrl: MEDIA_A});
+  const interruption = {id: 1, state: 'interrupted', error: 'NETWORK_DISCONNECTED', canResume: true};
+  const resumed = [];
+  first.chrome.downloads.search = (_, done) => done([interruption]);
+  first.chrome.downloads.resume = async id => { resumed.push(id); };
+  await first.handleBrowserDownloadInterrupted(1);
+  const items = {1: [{id: 1, state: 'in_progress'}]};
+  const restored = await harness({seed: first.saved, initialJobs: [first.jobs.get(task.id)], downloadItems: items});
+  restored.chrome.downloads.resume = async id => { resumed.push(id); };
+  items[1] = [interruption];
+  await restored.recoverBrowserDownloads();
+  await restored.recoverBrowserDownloads();
+  assert.deepEqual(resumed, [1]);
+  const reports = restored.calls.filter(call => call.path.endsWith('/browser-failure'));
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].path, `/v1/downloads/${task.id}/browser-failure`);
+  assert.equal(restored.transfers.length, 0);
+});
 
 // 先生 2026-11-16：离线拉起失败感知——协议窗弹错扩展无法感知，20s 未上线
 // 必须给发起页手动指引。
@@ -725,4 +824,17 @@ test('launch attempt stays silent when desktop is already online',async()=>{
   watcher.fn();
   await f.settle();
   assert.equal(f.sent.filter(m=>m.stage==='failure').length,0,'online path must not scare the user');
+});
+
+test('unpaired desktop can open without triggering a false launch warning',async()=>{
+  const f=await harness({online:false});
+  f.setToken('');
+  const rejected=await f.message({type:'shengjian-page-submit',url:URL_A,transcribe:true});
+  assert.equal(rejected.needs_connection,true);
+  assert.equal(rejected.ok,false);
+  await f.message({type:'shengjian-launch-attempt',videoId:VIDEO_A});
+  f.setOnline(true);
+  f.timers.at(-1).fn();
+  await f.settle();
+  assert.equal(f.sent.filter(m=>m.stage==='failure').length,0);
 });

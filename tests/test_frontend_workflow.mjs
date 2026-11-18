@@ -91,12 +91,15 @@ test('linked navigation uses record ids for equal titles and restores task selec
   try {
     await page.getByRole('button', {name: /^已完成/}).click();
     await page.locator('.job[data-task-id="job:two"] .job-open').click();
-    await page.getByRole('button', {name: '在文本库阅读', exact: true}).click();
+    const read = page.getByRole('button', {name: '在文本库阅读', exact: true});
+    await read.focus();
+    await page.keyboard.press('Enter');
     await page.waitForFunction(() => document.querySelector('#readerBody h1')?.textContent === '整理稿 job:two');
     assert.equal(await page.locator('#materialBack').getAttribute('aria-label'), '返回任务');
     await page.locator('#materialBack').click();
     assert.equal(await page.evaluate(() => AppState.filter), '已完成');
     assert.deepEqual(await page.evaluate(() => [...AppState.selected]), ['job:two']);
+    assert(await read.evaluate(button => document.activeElement === button));
     assert.deepEqual(page.errors, []);
   } finally { await page.close(); }
 });
@@ -421,7 +424,7 @@ test('compact task actions keep the status visible and open secondary actions in
   const page = await open({width: 560, height: 500});
   try {
     await page.locator('.job[data-task-id="job:one"] .job-open').click();
-    const status = await page.locator('#inspector .pct').boundingBox();
+    const status = await page.locator('#inspector .task-result-status').boundingBox();
     const panel = await page.locator('#inspector').boundingBox();
     assert(status.y >= panel.y && status.y + status.height <= panel.y + panel.height);
     await page.getByRole('button', {name: '更多操作', exact: true}).click();

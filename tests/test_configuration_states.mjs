@@ -52,6 +52,132 @@ async function waitForRequest(page,method,count) {
   await page.waitForFunction(({method,count})=>window.__configurationRequests[method].calls.length===count,{method,count});
 }
 
+for (const width of [1280, 560]) {
+  test(`settings typography follows shared group and field roles at ${width}px across font scales`, async () => {
+    const page = await open('settings', 'startup', {loggedIn:true, settings:{font_scale:1.15}}, {width, height:800});
+    const font = locator => locator.evaluate(node => parseFloat(getComputedStyle(node).fontSize));
+    function near(actual, expected, description) {
+      assert.ok(Math.abs(actual - expected) <= 0.1, `${description}: expected ${expected.toFixed(2)}px, got ${actual}px`);
+    }
+    try {
+      const pane = page.locator('#settingsPane');
+      for (const scale of [1.15, 0.9, 1.3]) {
+        await page.locator('[data-page=settings]').click();
+        await page.locator('.sitem[data-section=startup]').click();
+        await page.evaluate(scale => Settings.save({font_scale:scale}, false), scale);
+        const scaled = normal => Math.max(12, normal * scale / 1.15);
+        const heading = await font(pane.getByRole('heading', {name:'启动与托盘', exact:true}));
+        const label = await font(pane.getByText('开机静默启动', {exact:true}));
+        near(heading, scaled(16), 'group heading');
+        near(label, scaled(14), 'field label');
+        near(await font(pane.locator('.set-hint:visible').first()), scaled(12), 'field hint');
+        near(await font(pane.getByRole('combobox', {name:'提示音', exact:true})), scaled(14), 'field value');
+        near(await font(pane.getByRole('button', {name:'测试通知', exact:true})), scaled(12.5), 'compact action');
+
+        await page.locator('.sitem[data-section=data]').click();
+        for (const title of ['目录', '下载', '视频读取', '队列节奏']) {
+          const header = pane.getByText(title, {exact:true}).and(pane.locator('h3, .settings-section-fold > summary'));
+          near(await font(header), heading, title);
+        }
+        const downloadRow = pane.locator('.set-row').filter({has:page.getByText('下载目录', {exact:true})});
+        near(await font(downloadRow.locator('.path-text')), scaled(14), 'directory value');
+        if (scale === 1.15) {
+          await page.locator('[data-page=faq]').click();
+          near(await font(page.locator('#page-faq').getByRole('heading', {name:'下载与任务', exact:true})), heading, 'FAQ group');
+          await page.locator('[data-page=subscription]').click();
+          const subscription = page.locator('#page-subscription');
+          near(await font(subscription.getByRole('heading', {name:'云端积分', exact:true})), heading, 'subscription group');
+          for (const id of ['subscriptionTools','subscriptionConnectionDetails']) {
+            const details = subscription.locator('#' + id);
+            if (!await details.evaluate(node => node.open)) await details.locator(':scope > summary').click();
+          }
+          near(await font(subscription.getByText('服务地址', {exact:true})), label, 'subscription field');
+        }
+      }
+      assert.deepEqual(page.errors, []);
+    } finally { await page.close(); }
+  });
+}
+
+test('font size repairs a rejected preview and reflects a confirmed save after section reentry', async () => {
+  const page = await open('settings', 'ui', {settings:{font_scale:1}});
+  try {
+    await holdMock(page, 'save_settings');
+    const slider = page.getByRole('slider', {name:'界面字号'});
+    await slider.focus();
+    await slider.press('End');
+    await waitForRequest(page, 'save_settings', 1);
+    assert.equal(await slider.getAttribute('aria-busy'), 'true');
+    assert.equal(await page.evaluate(() => document.body.style.fontSize), '19.5px');
+    await releaseMock(page, 'save_settings', {ok:false, error:'写入失败'});
+    await page.waitForFunction(() => document.body.style.fontSize === '15px');
+    assert.equal(await slider.inputValue(), '1');
+    assert.equal(await slider.getAttribute('aria-valuetext'), '15px');
+    assert.equal(await slider.isEnabled(), true);
+    assert.equal(await slider.evaluate(control => control === document.activeElement), true);
+    await slider.press('End');
+    await waitForRequest(page, 'save_settings', 2);
+    await page.locator('.sitem[data-section=recognition]').click();
+    await page.locator('.sitem[data-section=ui]').click();
+    assert.equal(await slider.isDisabled(), true);
+    await releaseMock(page, 'save_settings', {font_scale:1.3});
+    await page.waitForFunction(() => document.querySelector('.fs-slider')?.value === '1.3');
+    assert.equal(await slider.isEnabled(), true);
+    assert.equal(await slider.getAttribute('aria-valuetext'), '20px');
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
+test('notification pack previews only confirmed choices; a failed preview keeps the saved selection', async () => {
+  const page = await open('settings', 'startup', {settings:{notification_sound_pack:'system'}});
+  try {
+    await page.evaluate(() => {
+      window.__previews = [];
+      __MOCK__.preview_notification_sound = (...args) => {
+        __previews.push(args);
+        return {ok:false, error:'声音设备暂不可用'};
+      };
+    });
+    await holdMock(page, 'save_settings');
+    const pack = page.getByRole('combobox', {name:'提示音', exact:true});
+    await pack.selectOption('crisp');
+    await waitForRequest(page, 'save_settings', 1);
+    await releaseMock(page, 'save_settings', {ok:false, error:'写入失败'});
+    await page.waitForFunction(() => !document.querySelector('[aria-label="提示音"]').disabled);
+    assert.equal(await pack.inputValue(), 'system');
+    assert.deepEqual(await page.evaluate(() => __previews), []);
+    await pack.selectOption('soft');
+    await waitForRequest(page, 'save_settings', 2);
+    await releaseMock(page, 'save_settings', {notification_sound_pack:'soft'});
+    await page.waitForFunction(() => !document.querySelector('[aria-label="提示音"]').disabled);
+    assert.equal(await pack.inputValue(), 'soft');
+    assert.equal(await pack.getAttribute('aria-invalid'), null);
+    assert.match(await page.locator('.toast').innerText(), /声音设备暂不可用/);
+    await pack.selectOption('custom');
+    await waitForRequest(page, 'save_settings', 3);
+    await page.locator('.sitem[data-section=ui]').click();
+    await page.locator('.sitem[data-section=startup]').click();
+    await releaseMock(page, 'save_settings', {notification_sound_pack:'custom'});
+    await page.waitForFunction(() => !document.querySelector('[aria-label="提示音"]').disabled);
+    const preview = page.getByRole('button', {name:'试听成功提示音', exact:true});
+    assert.equal(await preview.isVisible(), true);
+    assert.equal(await preview.isDisabled(), true);
+    assert.deepEqual(await page.evaluate(() => __previews), [['success','soft','']]);
+    await holdMock(page, 'pick_notification_sound');
+    await page.getByRole('button', {name:'选择成功提示音', exact:true}).click();
+    await waitForRequest(page, 'pick_notification_sound', 1);
+    await page.locator('.sitem[data-section=ui]').click();
+    await page.locator('.sitem[data-section=startup]').click();
+    await releaseMock(page, 'pick_notification_sound', {ok:true, settings:{notification_sound_success_path:'synthetic.wav'}});
+    await page.waitForFunction(() => !document.querySelector('[aria-label="试听成功提示音"]').disabled);
+    assert.equal(await page.getByRole('button', {name:'试听失败提示音', exact:true}).isDisabled(), true);
+    await preview.click();
+    await page.waitForFunction(() => __previews.length === 2);
+    assert.deepEqual(await page.evaluate(() => __previews.at(-1)), ['success','custom','synthetic.wav']);
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
 test('rejected settings do not change the switch or emit success; retry emits one acknowledgement',async()=>{
   const page=await open('settings','control');try{
     await page.evaluate(()=>{window.__realSave=__MOCK__.save_settings;__MOCK__.save_settings=()=>({ok:false,error:'测试保存失败'});});

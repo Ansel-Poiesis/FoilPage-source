@@ -49,6 +49,84 @@ test('reader loading and failed states cannot begin a blank edit',async()=>{
     assert(await p.locator('#editReaderBtn').isDisabled());assert.equal(await p.locator('.reader-editor').count(),0);assert.deepEqual(p.errors,[]);
   }finally{await p.close();}
 });
+
+test('a partial document labels preview copies and locates the current file for its version', async () => {
+  const p = await open({width: 710});
+  try {
+    const preview = '# 文本乙\n\n**留在可见范围内。**\n';
+    const file = 'C:\\fixture\\整理稿乙.md';
+    const reorganized = 'C:\\fixture\\重整稿乙.md';
+    await p.evaluate(({preview, file}) => {
+      const read = __MOCK__.get_reader;
+      window.__copiedPreviews = [];
+      window.__locatedFiles = [];
+      window.__finalPath = file;
+      navigator.clipboard.writeText = text => { __copiedPreviews.push(text); return Promise.resolve(); };
+      __MOCK__.get_reader = (id, tab) => {
+        if (id !== 'b' || tab === 'source') return read(id, tab);
+        return {ok: true, tab, text: preview, path: tab === 'final' ? __finalPath : 'raw.md', truncated: tab === 'final'};
+      };
+      __MOCK__.open_path = path => {
+        __locatedFiles.push(path);
+        return __locatedFiles.length === 1 ? {ok: true} : {ok: false, error: '文件不存在'};
+      };
+    }, {preview, file});
+    const notice = p.locator('#readerPreviewNotice');
+    await doc(p, 'a').click();
+    assert(await notice.isHidden());
+    await p.locator('#copyReaderBtn').click();
+    assert.deepEqual(await p.evaluate(() => __copiedPreviews), ['# 文本甲']);
+    await p.locator('#readerBack').click();
+    await doc(p, 'b').click();
+    await notice.getByRole('status').waitFor();
+    assert.equal(await notice.getByRole('status').textContent(), '当前显示部分文稿');
+    assert(await p.locator('#editReaderBtn').isDisabled());
+    assert(await p.locator('#copyReaderBtn').isHidden());
+    await notice.getByRole('button', {name: '复制可见部分'}).click();
+    await p.locator('#readerBody h1').click({button: 'right'});
+    await p.locator('.ctx-menu').getByRole('menuitem', {name: '复制可见部分'}).click();
+    assert.deepEqual(await p.evaluate(() => __copiedPreviews), ['# 文本甲', preview, preview]);
+    const locate = notice.getByRole('button', {name: '定位完整文稿'});
+    await p.evaluate(path => { window.__finalPath = path; }, reorganized);
+    await locate.click();
+    await p.waitForFunction(() => __locatedFiles.length === 1);
+    await locate.click();
+    await p.locator('#toast.err').waitFor();
+    assert.deepEqual(await p.evaluate(() => __locatedFiles), [reorganized, reorganized]);
+    assert.equal(await p.locator('#toast.err').textContent(), '文件不存在');
+    assert.equal(await p.locator('#readerBody h1').textContent(), '文本乙');
+
+    await p.evaluate(() => I18n.setLanguage('en'));
+    await notice.getByRole('button', {name: 'Copy visible text'}).waitFor();
+    assert.equal(await notice.evaluate(node => node.scrollWidth > node.clientWidth), false);
+    await p.evaluate(() => I18n.setLanguage('zh-CN'));
+    await p.locator('#compareReaderBtn').click();
+    assert(await notice.isHidden());
+    await p.locator('.reader-diff .diff-summary').waitFor();
+    assert.equal(await p.locator('.reader-diff .diff-summary').textContent(), '已读取的部分文稿内容一致');
+    assert(await p.locator('#copyReaderBtn').isDisabled());
+    await p.locator('#compareReaderBtn').click();
+    await notice.waitFor();
+    await p.evaluate(() => {
+      const read = __MOCK__.get_reader;
+      __MOCK__.get_reader = (id, tab) => {
+        __MOCK__.get_reader = read;
+        return new Promise(resolve => { window.__finishFileLookup = () => resolve(read(id, tab)); });
+      };
+    });
+    await locate.click();
+    await p.waitForFunction(() => window.__finishFileLookup);
+    await p.locator('#readerTabs').getByRole('button', {name: '原稿', exact: true}).click();
+    await p.waitForFunction(() => !document.getElementById('copyReaderBtn').disabled);
+    await p.evaluate(async () => { __finishFileLookup(); await new Promise(requestAnimationFrame); });
+    assert.deepEqual(await p.evaluate(() => __locatedFiles), [reorganized, reorganized]);
+    assert(await notice.isHidden());
+    await p.locator('#copyReaderBtn').click();
+    assert.deepEqual(await p.evaluate(() => __copiedPreviews), ['# 文本甲', preview, preview, preview]);
+    assert.deepEqual(p.errors, []);
+  } finally { await p.close(); }
+});
+
 test('raw-only documents select and save their available text version',async()=>{
   const p=await open();try{
     await p.evaluate(()=>{__docs[1].has_final=false;Library.refreshLight();__MOCK__.get_reader=(id,tab)=>({ok:true,tab,text:'# 原稿',revision:'raw-revision'});__MOCK__.update_reader_text=(...args)=>{window.__saved=args;return {ok:true};};});

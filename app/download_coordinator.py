@@ -109,12 +109,12 @@ def _both_channels_blocked(current: dict, error: dict) -> bool:
     return local_blocked and browser_forbidden
 
 
-def matching_submission_receipt(receipt: DownloadJob, url: str, transcribe: bool, *, allow_any_url: bool = False) -> DownloadJob:
+def matching_submission_receipt(receipt: DownloadJob, url: str, transcribe: bool, *, accepted_transcribe: bool, allow_any_url: bool = False) -> DownloadJob:
     """A receipt can replay its accepted request, never change its identity."""
     if not isinstance(transcribe, bool):
         raise DownloadAdapterError("invalid_options", "transcribe_after_download 必须是布尔值")
     normalized = validate_supported_url(url, allow_any_url=allow_any_url)
-    if receipt["url"] != normalized or bool(receipt["options"].get("transcribe_after_download")) != transcribe:
+    if receipt["url"] != normalized or accepted_transcribe != transcribe:
         raise DownloadAdapterError("invalid_client_request_id", "提交凭据与原任务不一致")
     return receipt
 
@@ -332,7 +332,7 @@ class DownloadCoordinator:
             media_hints.insert(0, media_hint)
         elif media_hints and not media_hint:
             media_hint = media_hints[0]
-        with self._submission_lock:
+        with self._submission_lock, self.controller.media_action_lock:
             request_id = merged.get("client_request_id", "")
             if request_id and self.store.client_request_cancelled(request_id):
                 self._erase_session(transient_session)
@@ -340,52 +340,39 @@ class DownloadCoordinator:
             receipt = self.store.find_by_client_request_id(request_id)
             if receipt is not None:
                 matching_submission_receipt(receipt, normalized, bool(merged.get("transcribe_after_download")),
+                    accepted_transcribe=self.store.accepted_transcription_intent(request_id, receipt),
                     allow_any_url=bool(self.controller.settings.get("allow_any_url", False)))
                 self._erase_session(transient_session)
                 return receipt
-            # 先生 2026-10-08：下载后再点转写，同一视频不得重复下载。
-            # ① 活跃任务未带转写 → 就地补置转写标志（下载完成后自然接转写）；
-            # ② 已完成（done）且媒体文件在 → 复用既有媒体提升转写
-            #    （enqueue_media + done→queued，0.12.3 起的既有提升通路），
-            #    不再创建新下载行。
-            if merged.get("transcribe_after_download"):
-                for existing in self.store.list(None, limit=500):
-                    if existing.get("url") != normalized:
+            transcribe = bool(merged.get("transcribe_after_download"))
+            active = self.store.list(_DEDUP_ACTIVE_STATUSES, url=normalized, limit=1)
+            if active:
+                existing = active[0]
+                if transcribe and not existing["options"].get("transcribe_after_download"):
+                    existing = self.store.promote_transcription(existing["id"])
+                self.store.remember_client_request(request_id, existing["id"], transcribe)
+                self._erase_session(transient_session)
+                return existing
+            if transcribe:
+                for existing in self.store.list(("done",), url=normalized, limit=500):
+                    if not existing.get("media_id") or not existing.get("downloaded_path"):
                         continue
-                    status = str(existing.get("status") or "")
-                    opts = dict(existing.get("options") or {})
-                    if status in _DEDUP_ACTIVE_STATUSES:
-                        if not opts.get("transcribe_after_download"):
-                            opts["transcribe_after_download"] = True
-                            promoted = self.store.transition(existing["id"], status, options=opts)
-                            self.store.remember_client_request(request_id, existing["id"])
-                            self._erase_session(transient_session)
-                            return promoted
+                    if not Path(existing["downloaded_path"]).is_file():
                         continue
-                    if status == "done" and existing.get("media_id") and existing.get("downloaded_path"):
-                        media_path = Path(str(existing["downloaded_path"]))
-                        if not media_path.is_file():
-                            continue
-                        queued = self.controller.enqueue_media([existing["media_id"]])
-                        linked = queued.created[0] if queued.created else self._active_job_for_media(existing["media_id"])
-                        if not linked:
-                            continue
-                        opts["transcribe_after_download"] = True
-                        promoted = self.store.transition(existing["id"], "queued", job_id=linked, options=opts)
-                        self.store.remember_client_request(request_id, existing["id"])
-                        self._erase_session(transient_session)
-                        self._wake.set()
-                        return promoted
-            # 同一 URL 已有活跃任务时复用：按钮无反馈期的连点、弹窗与页面
-            # 双入口会 otherwise 在数秒内产生 2–3 条必败重复行（2026-09-22
-            # library.db 18:25/18:36 同秒重复为证）。终态（done/failed/
-            # cancelled）不拦，重试语义不受影响。
-            for existing in self.store.list(_DEDUP_ACTIVE_STATUSES, limit=500):
-                if existing.get("url") == normalized and bool(existing["options"].get("transcribe_after_download")) == bool(merged.get("transcribe_after_download")):
-                    self.store.remember_client_request(request_id, existing["id"])
+                    queued = self.controller.enqueue_media([existing["media_id"]])
+                    linked = queued.created[0] if queued.created else self._active_job_for_media(existing["media_id"])
+                    if not linked:
+                        continue
+                    self.store.promote_transcription(existing["id"])
+                    promoted = self.store.transition(existing["id"], "queued", job_id=linked)
+                    self.store.remember_client_request(request_id, existing["id"], True)
                     self._erase_session(transient_session)
-                    return existing
+                    self._wake.set()
+                    return promoted
             item = self.store.create(normalized, title, platform, merged)
+            # Reserve the browser handoff before the local worker can claim it.
+            if mode == "browser":
+                item = self.store.transition(item["id"], "resolving")
             if transient_session:
                 with self._session_lock:
                     self._transient_sessions[item["id"]] = transient_session
@@ -730,6 +717,18 @@ class DownloadCoordinator:
                 previous["diagnostic"] = previous_diag
                 return self.store.transition(task_id, "failed", error=previous)
 
+            if current:
+                # startBrowserDownload's generic incident can arrive after its
+                # dedicated failure report, or after the next transfer started.
+                # An uncorrelated report cannot terminate that active transfer.
+                if (phase == "browser_download_start" and current["status"] == "awaiting_browser"
+                        and current["options"].get("mode") == "browser"
+                        and not current["options"].get("failure_history")):
+                    return self._record_browser_download_failure(
+                        task_id, phase=phase, browser_detail=message,
+                    )
+                return current
+
             if current is None:
                 if matched_live:
                     # The live task owns its own failure path; a receipt-less
@@ -836,7 +835,9 @@ class DownloadCoordinator:
         if current["options"].get("mode") == "browser":
             if current["status"] != "failed":
                 raise DownloadStateError("只有可重试的失败下载才能重试")
-            retried = self.store.retry(download_id)
+            with self._submission_lock:
+                self.store.retry(download_id)
+                retried = self.store.transition(download_id, "resolving")
             return self._resolve_browser_job(retried)
         item = self.store.retry(download_id)
         self._wake.set()
@@ -856,7 +857,6 @@ class DownloadCoordinator:
             )
             error.download_id = download_id
             raise error
-        self.store.transition(download_id, "resolving")
         try:
             if media_url:
                 resolved = self._browser_media_hint(item, media_url)
@@ -896,21 +896,17 @@ class DownloadCoordinator:
                 for name, value in raw_headers.items():
                     if str(name).lower() == "accept":
                         safe_headers[str(name)] = str(value)[:2048]
-            current = self.store.get(download_id)
-            if current is None or current["status"] == "cancelled" or current.get("cancel_requested"):
-                raise DownloadCancelled()
-            options = dict(current["options"])
-            attempted = list(options.get("browser_attempted") or [])
-            fingerprint = hashlib.sha256(download_url.encode("utf-8")).hexdigest()
-            if fingerprint not in attempted:
-                attempted.append(fingerprint)
-            options["browser_attempted"] = attempted[-8:]
-            self.store.transition(download_id, "awaiting_browser", options=options)
-            current = self.store.get(download_id)
-            if current is None:
-                raise DownloadAdapterError(
-                    "resolve_failed", "任务状态丢失", retryable=True,
-                )
+            with self.controller.media_action_lock:
+                current = self.store.get(download_id)
+                if current is None or current["status"] == "cancelled" or current.get("cancel_requested"):
+                    raise DownloadCancelled()
+                options = dict(current["options"])
+                attempted = list(options.get("browser_attempted") or [])
+                fingerprint = hashlib.sha256(download_url.encode("utf-8")).hexdigest()
+                if fingerprint not in attempted:
+                    attempted.append(fingerprint)
+                options["browser_attempted"] = attempted[-8:]
+                current = self.store.transition(download_id, "awaiting_browser", options=options)
             current["browser_download"] = {
                 "download_url": download_url,
                 "filename": filename,
@@ -1214,6 +1210,8 @@ class DownloadCoordinator:
             with self.controller.media_action_lock:
                 if cancelled():
                     raise DownloadCancelled()
+                # A second click may have upgraded the task while it transferred.
+                options = self.store.get(download_id)["options"]
                 imported = self.controller.import_files([str(media_path)])[0]
                 media_id = imported.item["id"]
                 self.store.transition(
@@ -1221,10 +1219,10 @@ class DownloadCoordinator:
                     bytes_done=media_path.stat().st_size,
                     bytes_total=media_path.stat().st_size,
                     downloaded_path=str(media_path), media_id=media_id,
-                    options={**item["options"], "download_content_sha256": imported.item["content_sha256"]},
+                    options={**options, "download_content_sha256": imported.item["content_sha256"]},
                     cover_path=cover_path, error=None,
                 )
-                if not item["options"]["transcribe_after_download"]:
+                if not options["transcribe_after_download"]:
                     self.store.transition(download_id, "done")
                     return
                 queued = self.controller.enqueue_media([media_id])
@@ -1480,6 +1478,15 @@ class DownloadCoordinator:
                 return
             if _both_channels_blocked(current, error):
                 error["message"] = f"{error['message']} {_BOTH_CHANNELS_GUIDANCE}"
+                # 签名年龄观测（先生 2026-11-18 风控波）：终态失败附上提交时
+                # 候选年龄与重捕获血缘，把「旧候选=必死」从推断变成数据。
+                diagnostic = dict(error.get("diagnostic") or {})
+                if current["options"].get("media_candidate_ages_ms"):
+                    diagnostic["candidate_ages_ms"] = current["options"]["media_candidate_ages_ms"]
+                if current["options"].get("recapture_of"):
+                    diagnostic["recapture_of"] = current["options"]["recapture_of"]
+                if diagnostic:
+                    error["diagnostic"] = diagnostic
             self.store.transition(download_id, "failed", error=error, options=failure_options)
 
     @staticmethod
@@ -1492,6 +1499,7 @@ class DownloadCoordinator:
             "share_body", "share_hashtags", "share_raw", "referer", "user_agent",
             "mode", "browser_fallback", "fallback_stage", "browser_attempted", "rejected_media",
             "cover_url", "gallery_images", "gallery_done",
+            "media_candidate_ages_ms", "recapture_of",
         }
         unknown = set(options) - allowed
         if unknown:
@@ -1509,6 +1517,19 @@ class DownloadCoordinator:
             values = options[field]
             if not isinstance(values, list) or len(values) > 8 or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value) for value in values):
                 raise DownloadAdapterError("invalid_options", "下载候选记录无效")
+        # 候选签名年龄（毫秒，仅观测）与自动重捕获的取代血缘（原任务 id）。
+        if "media_candidate_ages_ms" in options:
+            ages = options["media_candidate_ages_ms"]
+            if not isinstance(ages, list) or len(ages) > 8 or any(
+                not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 2**31 - 1
+                for value in ages
+            ):
+                raise DownloadAdapterError("invalid_options", "候选年龄观测值无效")
+        if "recapture_of" in options and (
+            not isinstance(options["recapture_of"], str)
+            or not re.fullmatch(r"[a-f0-9]{12}", options["recapture_of"])
+        ):
+            raise DownloadAdapterError("invalid_options", "重捕获血缘无效")
         if "browser_fallback" in options and not isinstance(options["browser_fallback"], bool):
             raise DownloadAdapterError("invalid_options", "browser_fallback 必须是布尔值")
         if options.get("fallback_stage") not in (None, "browser", "resolver"):

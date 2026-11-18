@@ -26,6 +26,7 @@ function event() {
 async function harness(options = {}) {
   let now = options.now ?? START_TIME;
   let latest = options.latest ?? RUNNING_VERSION;
+  let healthRevision = options.healthRevision;
   let popupOpen = Boolean(options.popupOpen);
   let healthHandler = options.healthHandler;
   let writeHandler = null;
@@ -96,7 +97,10 @@ async function harness(options = {}) {
     async fetch(url, init) {
       healthCalls.push({ url, at: now });
       if (healthHandler) return healthHandler(url, init);
-      return { ok: true, async json() { return { ok: true, extension_latest: latest }; } };
+      return { ok: true, async json() {
+        return { ok: true, extension_latest: latest,
+          ...(healthRevision === undefined ? {} : { extension_revision: healthRevision }) };
+      } };
     },
     async request(path, init) {
       requests.push({ path, init });
@@ -119,6 +123,7 @@ async function harness(options = {}) {
     ...context.fixture, saved, requests, healthCalls, reloads, alarms, timers,
     advance(ms) { now += ms; },
     setLatest(value) { latest = value; },
+    setHealthRevision(value) { healthRevision = value; },
     setPopup(value) { popupOpen = value; },
     setHealthHandler(value) { healthHandler = value; },
     setWriteHandler(value) { writeHandler = value; },
@@ -390,4 +395,42 @@ test('malformed or oversized client_config payloads are ignored without side eff
     assert.equal(fixture.saved.shengjianClientConfig, undefined, JSON.stringify(entry)?.slice(0, 40));
     assert.equal(fixture.reloads.length, 0);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 先生 2026-11-18：同版本号热修——内容指纹（extension_revision）变化即自
+// 重载；指纹相等静默；进行中任务/防抖护栏与版本通道同套。
+// ---------------------------------------------------------------------------
+const REVISION_A = 'a1b2c3d4e5f60718';
+const REVISION_B = 'b2c3d4e5f607189a';
+
+test('a changed content revision reloads without a version bump', async () => {
+  const fixture = await harness({ latest: RUNNING_VERSION, healthRevision: REVISION_A });
+  assert.equal(fixture.reloads.length, 1, 'unrecorded revision triggers one self-heal reload');
+  assert.equal(fixture.saved.shengjianExtensionRevision, REVISION_A);
+  fixture.setHealthRevision(REVISION_A);
+  fixture.advance(60_000);
+  await fixture.message();
+  assert.equal(fixture.reloads.length, 1, 'same revision stays silent');
+  fixture.setHealthRevision(REVISION_B);
+  fixture.advance(60_000);
+  await fixture.message();
+  assert.equal(fixture.reloads.length, 2, 'a new revision reloads again');
+  assert.equal(fixture.saved.shengjianExtensionRevision, REVISION_B);
+});
+
+test('an empty revision keeps the legacy version-only behavior', async () => {
+  const fixture = await harness({ latest: NEXT_VERSION, healthRevision: '' });
+  assert.equal(fixture.reloads.length, 1);
+  assert.equal(fixture.saved.shengjianExtensionRevision, undefined);
+});
+
+test('revision reload defers while the popup is open and retries after it closes', async () => {
+  const fixture = await harness({ latest: RUNNING_VERSION, healthRevision: REVISION_A, popupOpen: true });
+  assert.equal(fixture.reloads.length, 0, 'open popup defers the reload');
+  assert.equal(fixture.saved.shengjianExtensionRevision, undefined, 'a deferred check must not record the revision');
+  fixture.setPopup(false); fixture.advance(60_000);
+  await fixture.message();
+  assert.equal(fixture.reloads.length, 1);
+  assert.equal(fixture.saved.shengjianExtensionRevision, REVISION_A);
 });

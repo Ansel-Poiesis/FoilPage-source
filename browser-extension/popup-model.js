@@ -31,6 +31,8 @@ export function progressFor(task) {
 
 export function progressLabelFor(task) {
   if (task?.cancel_requested && !["done","failed","cancelled"].includes(task?.status)) return "等待连接后取消";
+  if (task?.status === "awaiting_browser" && task.error?.diagnostic?.fallback_pending) return "正在重试下载";
+  if (task?.status === "failed" && task.error?.code === "douyin_verification_required") return "抖音要求网页校验，请在视频页完成验证后重试";
   const name = task?.status === "done" && task?.job_id ? task.transcription_label || "转写成功" : statusNames[task?.status] || task?.status || "等待中";
   let label = name;
   if (['downloading', 'awaiting_browser', 'transcribing', 'running'].includes(task?.status) && Number.isFinite(Number(task?.progress)) && task.progress != null) {

@@ -177,6 +177,18 @@ def test_transcribe_intent_merges_into_the_active_download(receipt_coordinator):
     assert len(coordinator.store.list())==1
     assert transcribe['options']['transcribe_after_download'] is True
     assert coordinator.submit(SOURCE,options={'client_request_id':REQUEST_B,'transcribe_after_download':True})['id']==transcribe['id']
+    assert coordinator.submit(SOURCE,options={'client_request_id':REQUEST_A,'transcribe_after_download':False})['id']==download['id']
+    with pytest.raises(DownloadAdapterError, match='提交凭据与原任务不一致'):
+        coordinator.submit(SOURCE,options={'client_request_id':REQUEST_A,'transcribe_after_download':True})
+
+
+def test_download_only_after_transcribe_shares_the_active_task(receipt_coordinator):
+    coordinator = receipt_coordinator
+    first = coordinator.submit(SOURCE, options={'client_request_id': REQUEST_A, 'transcribe_after_download': True})
+    for _ in range(2):
+        download = coordinator.submit(SOURCE, options={'client_request_id': REQUEST_B, 'transcribe_after_download': False})
+        assert download['id'] == first['id'] and download['options']['transcribe_after_download']
+    assert len(coordinator.store.list()) == 1
 
 
 @pytest.mark.parametrize('body,title,body_status,title_status,label,failed',[

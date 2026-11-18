@@ -104,11 +104,12 @@
     if (!mount) return null;
     pill = document.createElement("div");
     pill.className = PILL_CLASS;
-    pill.setAttribute("role", "status");
     const stage = document.createElement("span");
     stage.className = "sj-stage";
     const num = document.createElement("span");
     num.className = "sj-num";
+    num.setAttribute("role", "progressbar");
+    num.setAttribute("aria-label", "视频下载进度");
     const numValue = document.createElement("b");
     numValue.textContent = "0";
     const numUnit = document.createElement("i");
@@ -125,9 +126,26 @@
     check.append(path);
     const text = document.createElement("span");
     text.className = "sj-text";
-    stage.append(num, check, text);
-    pill.append(stage);
+    text.setAttribute("role", "status");
+    const launch = document.createElement("a");
+    launch.className = "sj-launch";
+    launch.href = "foilpage://launch";
+    launch.textContent = "打开 FoilPage";
+    launch.addEventListener("click", (event) => event.stopPropagation());
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "sj-dismiss";
+    close.textContent = "×";
+    close.setAttribute("aria-label", "关闭提示");
+    stage.append(num, check, text, launch);
+    pill.append(stage, close);
     pill.addEventListener("click", () => dismissPill());
+    pill.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismissPill();
+    });
     const player = findPlayerMount();
     if (player?.parentElement === mount) mount.insertBefore(pill, player);
     else mount.prepend(pill);
@@ -144,25 +162,33 @@
     const pill = findPill();
     if (!pill) return;
     clearPillTimers();
+    if (pill.contains(document.activeElement)) {
+      document.querySelector(".shengjian-bili-button:not(:disabled)")?.focus({ preventScroll: true });
+    }
+    pill.inert = true;
     pill.classList.add("is-fading");
     pillTimers.fade = setTimeout(() => pill.remove(), 420);
   }
 
   function armPillHide(ms) {
     clearTimeout(pillTimers.hide);
-    pillTimers.hide = setTimeout(dismissPill, ms);
+    pillTimers.hide = setTimeout(() => {
+      if (!findPill()?.contains(document.activeElement)) dismissPill();
+    }, ms);
   }
 
   function showPillText(text, options = {}) {
     const pill = ensurePill();
     if (!pill) return;
     clearPillTimers();
+    pill.inert = false;
     pill.classList.remove("is-fading", "is-done", "is-percent");
     pill.classList.toggle("is-error", Boolean(options.error));
+    pill.classList.toggle("has-launch", Boolean(options.launch));
     const textEl = pill.querySelector(".sj-text");
     textEl.textContent = String(text || "");
     pill.title = String(options.title || textEl.textContent);
-    armPillHide(options.autoHideMs || pillHoldFor(text, options.error ? "error" : "text"));
+    if (!options.launch) armPillHide(options.autoHideMs || pillHoldFor(text, options.error ? "error" : "text"));
   }
 
   function tweenPillPercent(target, duration, onDone) {
@@ -192,9 +218,11 @@
     const pill = ensurePill();
     if (!pill) return;
     clearPillTimers();
-    pill.classList.remove("is-fading", "is-done", "is-error");
+    pill.inert = false;
+    pill.classList.remove("is-fading", "is-done", "is-error", "has-launch");
     pill.classList.add("is-percent");
     pill.querySelector(".sj-text").textContent = "";
+    pill.querySelector(".sj-num").setAttribute("aria-valuenow", String(target));
     pill.title = `正在下载 ${target}%`;
     tweenPillPercent(target, 480);
     // 进度消息停更（页面后台/任务卡住）时安静淡出，不常驻遮挡。
@@ -206,7 +234,8 @@
     const pill = ensurePill();
     if (!pill) return;
     const finish = () => {
-      pill.classList.remove("is-error");
+      pill.inert = false;
+      pill.classList.remove("is-error", "has-launch", "is-fading");
       pill.classList.add("is-percent", "is-done");
       pill.title = String(message);
       pill.querySelector('.sj-text').textContent = String(message);
@@ -227,7 +256,6 @@
 
   function applyPillStatus(message, error = false) {
     const status = pillStatusFor(message, error);
-    const pill = findPill();
     if (status.mode === "done") showPillDone(message);
     else if (status.mode === "percent") showPillPercent(status.percent);
     else showPillText(status.text, { error: status.mode === "error", title: message });
@@ -268,6 +296,7 @@
       showPillText("未识别当前视频，请在视频播放页重试", { error: true });
       return;
     }
+    feedbackRevision++;
     button.disabled = true;
     button.classList.add("is-busy");
     showPillText("正在提交…");
@@ -289,34 +318,34 @@
           showPillText("扩展已更新，请刷新页面后重试", { error: true });
           return;
         }
+        if (response?.ok && (response.job?.queued || response.job?.waiting_connection)) {
+          showPillText("任务已保留，等待 FoilPage 连接", { launch: true });
+          return;
+        }
         if (!response?.ok) {
+          if (response?.needs_connection === true) {
+            showPillText("FoilPage 未连接，请连接后重试", { error: true, launch: true, title: response.message });
+            return;
+          }
           if (response?.feedback_sent) return;
           showPillText(response?.message || "FoilPage 下载任务未能创建", { error: true });
           return;
         }
-        // Background sends accepted or offline-queued feedback exactly once.
+        // Background reports desktop acceptance separately.
       });
     };
-    // 先生 2026-11-15：B 站入口补齐与抖音页相同的提交预检——进行中阻止、
-    // 已完成确认、近窗失败确认。页面脚本没有确认卡组件，用原生 confirm。
     sendRuntimeMessage({ type: "shengjian-check-existing", url: canonicalUrl(videoId) }, (check) => {
       if (videoIdFromLocation() !== videoId) { restore(); return; }
       if (chrome.runtime.lastError || !check?.ok) { beginSubmission(); return; }
-      if (check.active) {
+      if (check.active && (action === "download" || check.activeTranscribing)) {
         restore();
         showPillText(check.activeTranscribing && action === "transcribe"
           ? "该视频已在处理中，转写会自动接续（进度见 FoilPage 任务页）"
           : "该视频正在处理中，无需重复提交（进度见 FoilPage 任务页）");
         return;
       }
-      const reasons = [];
-      if (check.done && action === "download") {
-        reasons.push("该视频已下载完成；重新下载将新增一份文件（需要文稿请点「转写」）");
-      }
-      if (check.recentFailure) {
-        reasons.push(`该视频刚失败过（${check.recentFailure.summary}），短时间内反复提交可能加剧平台拦截`);
-      }
-      if (reasons.length && !window.confirm(`${reasons.join("；")}。仍要提交吗？`)) {
+      if (check.done && action === "download"
+          && !window.confirm("该视频已下载完成，重新下载将新增一份文件。仍要提交吗？")) {
         restore();
         showPillText("已取消提交");
         return;
@@ -361,7 +390,9 @@
     if (!host.querySelector(".shengjian-bili-button[data-shengjian-action='transcribe']")) {
       host.append(makeButton("transcribe", "转写", "文"));
     }
+    const pill = findPill();
     if (gap) {
+      if (pill?.parentElement === host) player.parentElement.insertBefore(pill, player);
       if (host.parentElement !== bottom) bottom.insertBefore(host, right);
       host.className = 'shengjian-bili-host in-controls';
       host.style.removeProperty('width');
@@ -370,6 +401,7 @@
       host.style.left = Math.round(rr.left - br.left - 136) + 'px';
     } else {
       if (host.parentElement !== player.parentElement || host.nextElementSibling !== player) player.parentElement.insertBefore(host, player);
+      if (pill?.parentElement === player.parentElement) host.prepend(pill);
       host.className = 'shengjian-bili-host above-player';
       host.style.removeProperty('left');
       const rect = player.getBoundingClientRect();
@@ -382,18 +414,20 @@
   }
 
   // B 站是 SPA：路径变化后重新挂载，播放器就绪后再注入也可靠。
+  let feedbackRevision = 0;
   let restoredVideoId = "";
   function restoreTaskFeedback() {
     const videoId = videoIdFromLocation();
     if (!videoId || videoId === restoredVideoId) return;
     restoredVideoId = videoId;
+    const revision = ++feedbackRevision;
     sendRuntimeMessage({type:"shengjian-task-state",url:canonicalUrl(videoId)}, response => {
-      if (videoIdFromLocation() !== videoId || !response?.job) return;
+      if (revision !== feedbackRevision || videoIdFromLocation() !== videoId || !response?.job) return;
       const job = response.job;
       if (job.status === "done") showPillText(job.transcription_label || (job.job_id ? "已转写" : "已下载"),{error:job.transcription_error === true});
       else if (job.status === "failed") showPillText(job.download_complete ? "转写失败，请在 FoilPage 查看" : "下载失败，请在 FoilPage 查看",{error:true});
       else if (job.status === "cancelled") showPillText("任务已取消");
-      else if (job.queued || job.waiting_connection) showPillText("等待 FoilPage 连接，任务已保留");
+      else if (job.queued || job.waiting_connection) showPillText("任务已保留，等待 FoilPage 连接", { launch: true });
       else if (["transcribing","queued","imported"].includes(job.status)) showPillText("正在转写");
       else applyPillStatus(job.status === "downloading" ? `正在下载 ${Math.round(Number(job.progress || 0)*100)}%` : "正在下载");
     });
@@ -402,6 +436,8 @@
   const check = () => {
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
+      restoredVideoId = "";
+      clearPillTimers();
       document.querySelectorAll(".shengjian-bili-host, .shengjian-bili-pill").forEach((el) => el.remove());
     }
     if (!ensureControls()) {
@@ -421,6 +457,7 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "shengjian-toast") {
       if (message.taskUrl && message.taskUrl !== canonicalUrl(videoIdFromLocation())) return undefined;
+      feedbackRevision++;
       applyPillStatus(String(message?.message || ""), Boolean(message?.error));
       sendResponse?.({ ok: true });
     }

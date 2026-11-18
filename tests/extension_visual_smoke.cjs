@@ -49,26 +49,115 @@ async function verifyDouyinFeedbackStartup(browser) {
       await page.evaluate(()=>fixtureMessage({type:'shengjian-toast',taskUrl:'https://www.douyin.com/video/9999999999999999',stage:'failure',message:'下载失败，请在 FoilPage 查看',error:true},{},()=>{}));
       assert.equal(await text(),'下载成功','another video cannot overwrite the current result');
       assert.equal(await page.locator('.shengjian-feedback-host').count(),1,'status updates reuse one card');
-      const retryNotice='已提交下载（若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。）';
-      await page.evaluate(({url,message})=>fixtureMessage({type:'shengjian-toast',taskUrl:url,taskId:'fixture-submit',stage:'submitted',message,error:false},{},()=>{}),{url,message:retryNotice});
+      const retryNotice='下载失败，请在 FoilPage 查看（若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。）';
+      await page.evaluate(({url,message})=>fixtureMessage({type:'shengjian-toast',taskUrl:url,taskId:'abc123def456',stage:'failure',message,error:true},{},()=>{}),{url,message:retryNotice});
       await page.waitForTimeout(300);
       const retryGuide=await page.locator('.shengjian-feedback-host').evaluate(host=>{
         const root=host.shadowRoot;const card=root.querySelector('.card');const hint=root.querySelector('.hint');
         const cardRect=card.getBoundingClientRect(),captionRect=document.querySelector('.caption').getBoundingClientRect();
         return{main:root.querySelector('.text').textContent,hint:hint.textContent,visible:card.classList.contains('show'),actionable:hint.classList.contains('actionable'),fontSize:getComputedStyle(hint).fontSize,fontWeight:getComputedStyle(hint).fontWeight,coversCaption:cardRect.left<captionRect.right&&cardRect.right>captionRect.left&&cardRect.top<captionRect.bottom&&cardRect.bottom>captionRect.top,card:{top:cardRect.top,bottom:cardRect.bottom},caption:{top:captionRect.top,bottom:captionRect.bottom}};
       });
-      assert.equal(retryGuide.main,'已提交下载');
+      assert.equal(retryGuide.main,'下载失败，请在 FoilPage 查看');
       assert.equal(retryGuide.hint,'若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。');
-      assert.equal(retryGuide.visible,true,'the fallback steps remain visible with the submission receipt');
+      assert.equal(retryGuide.visible,true,'the retry guidance is visible on terminal failure');
       assert.equal(retryGuide.actionable,true,'the fallback steps use the emphasized hint style');
       assert.equal(retryGuide.fontSize,'13px');
       assert.equal(retryGuide.fontWeight,'600');
       assert.equal(retryGuide.coversCaption,false,`the taller action card remains outside the subtitle/caption area: ${JSON.stringify(retryGuide)}`);
       await page.screenshot({path:path.join(output,`douyin-retry-guide-${timing}.png`),fullPage:true});
+      for (const action of ['download','transcribe']) {
+        const click = await page.evaluate(action => {
+          let preflight;
+          chrome.runtime.sendMessage = (msg, cb) => {
+            if (msg.type === 'shengjian-check-existing') preflight = cb;
+          };
+          const start = performance.now();
+          document.querySelector(`.shengjian-${action} button`).click();
+          const text = document.querySelector('.shengjian-feedback-host').shadowRoot.querySelector('.text').textContent;
+          const elapsed = performance.now() - start;
+          preflight({ok:true,active:true,activeTranscribing:true});
+          return {text,elapsed};
+        }, action);
+        assert.equal(click.text,'正在提交…','the first click event updates visible status before preflight settles');
+        results.push({surface:`douyin-${action}-click`,synchronousFeedbackMs:click.elapsed});
+      }
       assert.deepEqual(errors,[]);results.push({surface:`douyin-startup-${timing}`,liveOutcomePreserved:true,lateHistoryIgnored:timing==='pending-history',otherVideoIgnored:true});
       results.push({surface:`douyin-retry-guide-${timing}`,mainNotice:retryGuide.main,actionableHint:true,visible:true});
     }finally{await page.close();}
   }
+}
+
+async function verifyCompactPlayerFeedback(browser, [id, label, url, script, stylesheet]) {
+  const page = await browser.newPage({ viewport: { width: 352, height: 700 }, reducedMotion: 'reduce' });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.route(url, route => route.fulfill({ contentType: 'text/html', body: playerHtml(label) }));
+    await page.addInitScript(() => {
+      globalThis.chrome = { runtime: {
+        getManifest: () => ({ version: 'fixture' }),
+        onMessage: { addListener(listener) { globalThis.fixtureMessage = listener; } },
+        sendMessage(_message, callback) { callback?.({ ok: true }); },
+      } };
+    });
+    await page.goto(url);
+    await page.addStyleTag({ content: '.layout{margin-inline:12px}.caption{white-space:normal;width:max-content;max-width:calc(100% - 44px)}' });
+    await page.addStyleTag({ path: path.join(root, stylesheet) });
+    if (id === 'douyin') await page.addScriptTag({ path: path.join(root, 'douyin-hosts.js') });
+    await page.addScriptTag({ path: path.join(root, script) });
+    const message = '正文转写成功，标题处理失败。文稿仍已保留，请在 FoilPage 任务页打开这条记录，核对原稿和整理稿，查看标题处理失败的具体原因。';
+    await page.evaluate(({ message, url }) => fixtureMessage({
+      type: 'shengjian-toast', stage: 'failure', taskId: 'abc123def456', taskUrl: url, message, error: true,
+    }, {}, () => {}), { message, url });
+    const selector = id === 'douyin' ? '.shengjian-feedback-host .card' : id === 'bilibili' ? '.shengjian-bili-pill' : '.shengjian-yt-pill';
+    const card = page.locator(selector);
+    const close = card.getByRole('button', { name: '关闭提示' });
+    await card.scrollIntoViewIfNeeded();
+    const layout = await card.evaluate((element, id) => {
+      const rect = element.getBoundingClientRect();
+      const picture = document.querySelector('video').getBoundingClientRect();
+      const text = element.querySelector(id === 'douyin' ? '.text' : '.sj-text');
+      return {
+        wraps: text.offsetHeight > parseFloat(getComputedStyle(text).lineHeight),
+        fits: rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight + 1,
+        pictureCovered: rect.top < picture.bottom && rect.bottom > picture.top,
+      };
+    }, id);
+    assert.ok(layout.wraps && layout.fits, `${id}: long feedback wraps within the window (${JSON.stringify(layout)})`);
+    if (id !== 'douyin') assert.equal(layout.pictureCovered, false, `${id}: feedback remains outside its picture`);
+    await page.screenshot({ path: path.join(output, `${id}-compact-error.png`), fullPage: true });
+    if (id === 'bilibili') {
+      await page.evaluate(() => {
+        const bar = document.querySelector('.bpx-player-control-bottom');
+        for (const side of ['left', 'right']) {
+          const group = document.createElement('div');
+          group.className = `bpx-player-control-bottom-${side}`;
+          group.style.cssText = `position:absolute;${side}:0;width:40px;height:36px`;
+          bar.append(group);
+        }
+      });
+      await page.locator('.shengjian-bili-host.in-controls').waitFor();
+      assert.equal(await card.evaluate(element => Boolean(element.closest('.bpx-player-container'))), false,
+        'Bilibili error remains outside the player when controls move into the native bar');
+    }
+    await close.focus();
+    await page.keyboard.press('Escape');
+    assert.equal(await card.evaluate(element => element.inert), true, `${id}: hidden feedback is immediately inert`);
+    if (id === 'douyin') {
+      assert.equal(await card.evaluate(element => {
+        const rect = element.getBoundingClientRect();
+        return document.elementFromPoint(rect.x + 10, rect.y + 10) === element.getRootNode().host;
+      }), false, 'closed feedback must release the underlying player');
+      for (let i = 0; i < 4; i++) {
+        await page.keyboard.press('Tab');
+        assert.equal(await card.evaluate(element => element.getRootNode().activeElement !== null), false);
+      }
+    } else {
+      assert.equal(await page.evaluate(() => document.activeElement.dataset.shengjianAction), 'download');
+    }
+    assert.deepEqual(errors, []);
+    results.push({ surface: `${id}-compact-error`, ...layout, dismissibleByKeyboard: true });
+  } finally { await page.close(); }
 }
 
 async function verifyDouyinPlayerLayout(browser) {
@@ -151,6 +240,125 @@ async function verifyDouyinPlayerLayout(browser) {
   }
 }
 
+async function verifyPopupPairing(browser, popupUrl) {
+  for (const configured of [true, false]) {
+    const page = await browser.newPage({viewport:{width:360,height:600},reducedMotion:'reduce'});
+    page.setDefaultTimeout(5000);
+    let allowed = false, authorized = false;
+    const attempts = [];
+    const token = 'fixture-token-for-browser-pairing-'.repeat(2);
+    try {
+      await page.addInitScript(storedToken => {
+        let current = storedToken;
+        globalThis.chrome = {
+          runtime:{getManifest:()=>({version:'0.1.5'}),sendMessage:async()=>({ok:true,tasks:[]})},
+          storage:{local:{
+            get:async()=>({localApiToken:current}),
+            set:async values=>{current=values.localApiToken;},
+          }},
+          tabs:{query:async()=>[{url:'https://www.youtube.com/watch?v=fixture123'}]},
+        };
+      }, configured ? token : '');
+      await page.route('http://127.0.0.1:18765/**', async route => {
+        const endpoint = new URL(route.request().url()).pathname;
+        const respond = (json, status = 200) => route.fulfill({
+          json, status, headers:{'access-control-allow-origin':'*'},
+        });
+        if (endpoint === '/health') {
+          return respond({service:'VideoToArticle',api_version:'1',configured:configured || authorized,extension_latest:'0.1.5'});
+        }
+        if (endpoint === '/v1/downloads') {
+          if (route.request().method() === 'OPTIONS') {
+            return authorized ? route.fulfill({status:204,headers:{'access-control-allow-origin':'*'}})
+              : respond({error:{code:'origin_denied',message:'扩展来源未授权'}},403);
+          }
+          return route.request().headers().authorization === `Bearer ${token}`
+            ? respond({jobs:[]}) : respond({error:{code:'unauthorized',message:'连接令牌无效'}},401);
+        }
+        if (endpoint === '/v1/show') {
+          assert.deepEqual(route.request().postDataJSON(),{page:'browser'});
+          return respond({shown:true});
+        }
+        attempts.push(endpoint);
+        if (configured && endpoint === '/v1/setup') {
+          return respond({error:{code:'origin_denied',message:'已有其他扩展与 FoilPage 连接'}},403);
+        }
+        if (!allowed) return respond({error:{code:'pairing_closed',message:'请先允许连接'}},403);
+        authorized = true;
+        return respond({token});
+      });
+
+      await page.goto(popupUrl);
+      await page.waitForFunction(() => document.querySelector('#connectionText').textContent === '未连接');
+      assert.equal(await page.locator('#pagePanel').isVisible(),false,'a saved but rejected token cannot expose page actions');
+      if (configured) {
+        assert.match(await page.locator('#message').textContent(),/重新配对/);
+        await page.locator('#connect').click();
+        await page.waitForFunction(() => !document.querySelector('#connect').disabled);
+        assert.equal(authorized,false,'switching cannot succeed before desktop approval');
+        await page.locator('#openApp').click();
+        await page.waitForFunction(() => document.querySelector('#message').textContent.includes('已在 FoilPage'));
+        assert.match(await page.locator('#message').textContent(),/重新配对/);
+      }
+      allowed = true;
+      await page.locator('#connect').click();
+      await page.waitForFunction(() => document.querySelector('#connectionText').textContent === '已连接');
+      await page.locator('#pagePanel').waitFor();
+      assert.equal(await page.locator('#openApp').isVisible(),false);
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      assert.deepEqual(attempts,configured ? ['/v1/pair','/v1/pair'] : ['/v1/setup']);
+    } finally {
+      await page.close();
+    }
+  }
+  results.push({surface:'popup-pairing',switchAfterApproval:true,firstSetup:true,rejectedToken:true});
+}
+
+async function verifyPlayerLaunch(browser, [id, label, url, script, stylesheet]) {
+  const page = await browser.newPage({viewport:{width:1024,height:840},reducedMotion:'reduce'});
+  page.setDefaultTimeout(6000);
+  try {
+    await page.route(url, route => route.fulfill({contentType:'text/html',body:playerHtml(label)}));
+    await page.addInitScript(() => {
+      window.submissions = [];
+      window.launches = [];
+      globalThis.chrome = {runtime:{getManifest:()=>({version:'0.1.5'}),onMessage:{addListener(){}},
+        sendMessage(message, callback) {
+          if (message.type !== 'shengjian-page-submit') { callback?.({ok:true}); return; }
+          window.submissions.push(message.transcribe);
+          callback(message.transcribe ? {ok:false,needs_connection:true}
+            : {ok:true,job:{id:'fixture-request',queued:true}});
+        },
+      }};
+      document.addEventListener('click', event => {
+        const link = event.target.closest('a[href="foilpage://launch"]');
+        if (!link) return;
+        event.preventDefault();
+        window.launches.push(navigator.userActivation.isActive);
+      }, true);
+    });
+    await page.goto(url);
+    await page.addStyleTag({path:path.join(root,stylesheet)});
+    if (id === 'douyin') await page.addScriptTag({path:path.join(root,'douyin-hosts.js')});
+    await page.addScriptTag({path:path.join(root,script)});
+    for (const action of ['download','transcribe']) {
+      const selector = `[data-shengjian-action="${action}"]`;
+      await page.locator(id === 'douyin' ? `${selector} button` : selector).first().click();
+      const open = page.getByText('打开 FoilPage',{exact:true});
+      if (id === 'douyin') {
+        assert.equal(await page.getByRole('dialog').getByRole('button', { name: '取消' }).evaluate(
+          button => button.getRootNode().activeElement === button), true);
+      }
+      await open.focus();
+      await page.keyboard.press('Enter');
+      const state = await page.evaluate(() => ({submissions:window.submissions, launches:window.launches}));
+      assert.deepEqual(state.submissions,action === 'download' ? [false] : [false,true]);
+      assert.deepEqual(state.launches,action === 'download' ? [true] : [true,true]);
+    }
+    results.push({surface:`${id}-open-desktop`,queuedDownload:true,needsPairingTranscribe:true,userActivation:true});
+  } finally { await page.close(); }
+}
+
 async function main(){
   await fs.mkdir(output,{recursive:true});
   const server = http.createServer(async(req,res)=>{
@@ -162,6 +370,7 @@ async function main(){
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const browser = await chromium.launch({headless:true});
   try {
+    await verifyPopupPairing(browser,`http://127.0.0.1:${server.address().port}/popup.html`);
     await verifyDouyinPlayerLayout(browser);
     await verifyDouyinFeedbackStartup(browser);
     for(const theme of ['light','dark']){
@@ -170,7 +379,8 @@ async function main(){
       await page.route('http://127.0.0.1:18765/**',route=>route.fulfill({contentType:'application/json',headers:{'access-control-allow-origin':'*'},body:JSON.stringify({ok:true,service:'VideoToArticle',api_version:'1',extension_latest:'0.14.0'})}));
       await page.goto(`http://127.0.0.1:${server.address().port}/popup.html`);
       await page.waitForSelector('.job-row');
-      assert.equal(await page.locator('#message').textContent(),'已连接 FoilPage，处理条件请在准备页检查','pairing does not prove account, model or software readiness');
+      assert.equal(await page.locator('#connectionText').textContent(),'已连接');
+      assert.equal(await page.locator('#connectionPanel').isHidden(),true,'confirmed pairing leaves the current video as the primary surface');
       const sizes=await page.locator('.page-btn').evaluateAll(buttons=>buttons.map(button=>button.getBoundingClientRect().height));
       assert.ok(sizes.every(size=>size>=44));
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
@@ -191,6 +401,11 @@ async function main(){
     await offline.waitForSelector('.job-cancel');
     assert.equal(await offline.locator('#connectionText').textContent(),'未连接');
     assert.equal(await offline.locator('#pagePanel').isVisible(),true,'paired offline popup retains page actions');
+    for (const selector of ['#pageDownload','#pageTranscribe']) {
+      await offline.locator(selector).click();
+      assert.match(await offline.locator('#pageState').textContent(),/任务已暂存/);
+      assert.equal(await offline.getByRole('link',{name:'打开 FoilPage'}).getAttribute('href'),'foilpage://launch');
+    }
     assert.ok((await offline.locator('#jobs').textContent()).includes('连接恢复后继续'));
     assert.equal(await offline.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     await offline.screenshot({path:path.join(output,'popup-offline-queue.png'),fullPage:true});
@@ -201,6 +416,8 @@ async function main(){
     await offline.close();
     const pages=[['douyin','抖音','https://www.douyin.com/video/1234567890123456','content.js','content.css'],['bilibili','B 站','https://www.bilibili.com/video/BV1fixture123','content-bili.js','content-bili.css'],['youtube','YouTube','https://www.youtube.com/watch?v=fixture123','content-youtube.js','content-youtube.css']];
     for(const [id,label,url,js,css] of pages){
+      await verifyPlayerLaunch(browser,[id,label,url,js,css]);
+      await verifyCompactPlayerFeedback(browser,[id,label,url,js,css]);
       const page=await browser.newPage({viewport:{width:1024,height:840},reducedMotion:'reduce'});
       page.on('pageerror',e=>console.log('PAGEERROR['+id+']:',e.message));
       await page.route(url,route=>route.fulfill({contentType:'text/html',body:playerHtml(label)}));

@@ -5,7 +5,7 @@
 window.MaterialNavigation = (() => {
   const history = [];
   const modules = {workbench: 'Workbench', videos: 'Videos', library: 'Library'};
-  const labels = {workbench: '任务', videos: '视频', library: '文本库'};
+  const labels = {workbench: '任务', videos: '视频', library: '文本库', import: '导入'};
   let lookupRequest = 0;
 
   function entered(view, navigation) {

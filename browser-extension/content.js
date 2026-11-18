@@ -34,7 +34,7 @@
       captureRetryGuides.delete(id);
       return String(message || "");
     }
-    if (stage !== "submitted" && stage !== "failure") return String(message || "");
+    if (stage !== "failure") return String(message || "");
     captureRetryGuides.delete(id);
     return `${String(message || "下载未成功")}（${CAPTURE_RETRY_GUIDE}）`;
   }
@@ -270,7 +270,16 @@
   // TTL 让采集数据过早过期，目标落入 resolver 又被平台校验拦截）。
   // 直链签名通常数小时内有效；即便个别过期，下载失败仍走既有回退。
   const CAPTURE_TTL_MS = 120 * 60 * 1000;
+  // 签名新鲜度分层（先生 2026-11-18 风控波复盘）：CDN 签名实际时效是分钟
+  // 级，2 小时档案里的旧签名大概率已死。≤FRESH_HINT_MS 视为新鲜优先使
+  // 用；>STALE_HINT_DEMOTE_MS 降到队尾只做兜底；提交时最新候选过龄则先
+  // 请求主世界刷新（页面自己的 detail 请求重放，拿全新签名）。
+  const FRESH_HINT_MS = 3 * 60 * 1000;
+  const STALE_HINT_DEMOTE_MS = 10 * 60 * 1000;
   const MAX_TRACKED_TARGETS = 20;
+  // 隔离侧维持 3：新快照替换旧 rendition 是既有契约（测试与实机取证都
+  // 按此语义）；候选面扩大放在 MAIN 档案（MAX_ARCHIVE_CANDIDATES），配
+  // 合刷新链路回灌，提交侧仍以新鲜度优先取前几条。
   const MAX_CAPTURED_PROGRESSIVE = 3;
   const MAX_CAPTURED_HLS = 1;
   const MAX_PERFORMANCE_ENTRIES = 240;
@@ -329,10 +338,9 @@
     }
   }
 
-  function rememberCover(videoId, coverUrl) {
+  function rememberCover(videoId, coverUrl, now = Date.now()) {
     if (!/^\d{10,24}$/.test(videoId) || !isDouyinCoverUrl(coverUrl)) return;
     const existing = capturedByTarget.get(videoId);
-    const now = Date.now();
     if (existing) {
       if (existing.coverUrl !== coverUrl || now - (existing.coverAt || 0) > CAPTURE_TTL_MS) {
         existing.coverUrl = coverUrl;
@@ -354,15 +362,14 @@
 
   // TASK-8.18 图集档案：每图 {urls:[候选…]}，候选已由 MAIN 世界按配置
   // 白名单/水印排序收窄；这里再做一道固定图片域复核（与桌面校验同口径）。
-  function rememberGallery(videoId, images) {
+  function rememberGallery(videoId, images, now = Date.now(), minimumCount = 0) {
     if (!/^\d{10,24}$/.test(videoId) || !Array.isArray(images) || !images.length) return;
     const clean = images
       .filter((image) => image && Array.isArray(image.urls) && image.urls.length
         && image.urls.every((url) => isDouyinCoverUrl(url)))
       .slice(0, 60);
-    if (!clean.length) return;
+    if (clean.length <= minimumCount) return;
     const existing = capturedByTarget.get(videoId);
-    const now = Date.now();
     if (existing) {
       existing.gallery = clean;
       existing.galleryAt = now;
@@ -421,68 +428,85 @@
     } catch { return false; }
   }
 
-  function rememberCapture(url, boundTarget = "") {
-    const target = boundTarget || captureTargetId(url);
-    const rank = rankMediaHint(url);
-    if (!rank) return;
-    if (target) {
-      const existing = capturedByTarget.get(target);
-      const now = Date.now();
-      const candidates = Array.isArray(existing?.candidates)
-        ? existing.candidates.filter((entry) => now - entry.at < CAPTURE_TTL_MS)
-        : [];
-      let playUrl = existing?.playAt && now - existing.playAt < CAPTURE_TTL_MS
-        ? (existing.playUrl || "")
-        : "";
-      let playAt = playUrl ? existing.playAt : 0;
+  function rememberBoundMedia(target, urls, fromMain, observedAt = Date.now()) {
+    const now = Date.now();
+    const existing = capturedByTarget.get(target);
+    const previous = (existing?.candidates || []).filter(entry => now - entry.at < CAPTURE_TTL_MS);
+    const candidates = new Map();
+    if (!fromMain) {
+      for (const entry of previous) candidates.set(mediaHintIdentity(entry.url), entry);
+    }
+    const hasPlay = existing?.playUrl && now - existing.playAt < CAPTURE_TTL_MS;
+    let playUrl = hasPlay ? existing.playUrl : "";
+    let playAt = hasPlay ? existing.playAt : 0;
+    let newPlay = false;
+    let accepted = false;
+    for (const url of urls) {
+      if (typeof url !== "string" || url.length > 4096) continue;
+      const rank = rankMediaHint(url);
+      if (!rank) continue;
+      const identified = captureTargetId(url);
+      if (identified && identified !== target) continue;
+      accepted = true;
       if (isPlayEndpointMedia(url)) {
-        if (!playUrl) {
+        if (!playUrl || (fromMain && !newPlay)) {
           playUrl = url;
-          playAt = now;
+          playAt = observedAt;
+          newPlay = true;
         }
       } else {
-        const identity = mediaHintIdentity(url);
-        const known = candidates.find((entry) => mediaHintIdentity(entry.url) === identity);
-        if (known) {
-          known.url = url;
-          known.at = now;
-        } else {
-          candidates.push({ url, at: now, rank });
+        const key = mediaHintIdentity(url);
+        const known = candidates.get(key);
+        // SSR and resource timing may repeatedly expose an older signature.
+        if (!known || (!fromMain && !known.fromMain)) {
+          candidates.set(key, { url, at: observedAt, rank, fromMain });
         }
       }
-      // Preserve the page's bitrate order (highest first), while replacing a
-      // same resource path with its freshest signature when the page refreshes.
-      const progressive = candidates.filter((entry) => entry.rank === 3)
-        .slice(0, MAX_CAPTURED_PROGRESSIVE);
-      const hls = candidates.filter((entry) => entry.rank === 1)
-        .slice(0, MAX_CAPTURED_HLS);
-      const retained = [...progressive, ...hls];
-      const primary = retained[0]?.url || playUrl;
-      capturedByTarget.set(target, {
-        url: primary,
-        at: now,
-        playUrl,
-        playAt,
-        candidates: retained,
-        // TASK-8.17：条目整体替换时保住已入库封面——同一视频后续无封面/
-        // 非法封面的捕获（SSR 扫描、信息流重放）不得抹掉早前的合法封面。
-        coverUrl: existing?.coverUrl || "",
-        coverAt: existing?.coverAt || 0,
-      });
-      while (capturedByTarget.size > MAX_TRACKED_TARGETS) {
-        const selected = activeVideo().videoId;
-        let oldest = "";
-        for (const [id, hit] of capturedByTarget) {
-          // A 24-item list would otherwise evict its first four videos from
-          // this 20-target cache, including the currently selected modal.
-          if (id === selected) continue;
-          if (!oldest || hit.at < capturedByTarget.get(oldest).at) oldest = id;
-        }
-        if (!oldest) break;
-        capturedByTarget.delete(oldest);
+    }
+    if (!accepted) return;
+    if (fromMain) {
+      // Preserve the latest complete response's ordering. Older entries only fill free slots.
+      for (const entry of previous) {
+        const key = mediaHintIdentity(entry.url);
+        if (!candidates.has(key)) candidates.set(key, entry);
       }
+    }
+    const ordered = [...candidates.values()];
+    // 组内分层新鲜优先（先生 2026-11-18 风控波）：MAIN（响应观测）条目始
+    // 终排在 SSR/资源时序补充之前——SSR 可能反复暴露旧签名，只能补位不
+    // 能领衔；同层内越新越好，容量有限时旧签名垫底。
+    const byTieredFresh = (left, right) => {
+      const tier = value => (value.fromMain ? 1 : 0);
+      if (tier(left) !== tier(right)) return tier(right) - tier(left);
+      return right.at - left.at;
+    };
+    const retained = [
+      ...ordered.filter((entry) => entry.rank === 3).sort(byTieredFresh).slice(0, MAX_CAPTURED_PROGRESSIVE),
+      ...ordered.filter((entry) => entry.rank === 1).sort(byTieredFresh).slice(0, MAX_CAPTURED_HLS),
+    ];
+    capturedByTarget.set(target, {
+      ...existing, url: retained[0]?.url || playUrl, at: now, playUrl, playAt, candidates: retained,
+    });
+    while (capturedByTarget.size > MAX_TRACKED_TARGETS) {
+      const selected = activeVideo().videoId;
+      let oldest = "";
+      for (const [id, hit] of capturedByTarget) {
+        if (id === selected) continue;
+        if (!oldest || hit.at < capturedByTarget.get(oldest).at) oldest = id;
+      }
+      if (!oldest) break;
+      capturedByTarget.delete(oldest);
+    }
+  }
+
+  function rememberCapture(url, boundTarget = "") {
+    const target = boundTarget || captureTargetId(url);
+    if (target) {
+      rememberBoundMedia(target, [url], false);
       return;
     }
+    const rank = rankMediaHint(url);
+    if (!rank) return;
     if (rankMediaHint(latestUnboundCapture.url) > rank && Date.now() - latestUnboundCapture.at < CAPTURE_TTL_MS) {
       return;
     }
@@ -510,19 +534,32 @@
       const videoId = String(item?.videoId || "");
       const url = String(item?.url || "");
       if (!/^\d{10,24}$/.test(videoId)) continue;
-      const candidates = Array.isArray(item?.candidates) ? item.candidates.slice(0, 8) : [];
-      for (const candidate of candidates) {
-        const value = String(candidate || "");
-        if (value.length <= 4096 && isDouyinMediaHint(value)) rememberCapture(value, videoId);
+      const existing = capturedByTarget.get(videoId);
+      const revision = Number.isSafeInteger(item.captureRevision) && item.captureRevision > 0
+        ? item.captureRevision : 0;
+      const now = Date.now();
+      const observedAt = Number.isSafeInteger(item.capturedAt) ? Math.min(now, item.capturedAt) : now;
+      if (now - observedAt >= CAPTURE_TTL_MS) continue;
+      if (existing?.captureNonce === expectedNonce && existing.captureRevision) {
+        if (revision < existing.captureRevision) continue;
+        if (revision === existing.captureRevision) {
+          // A short archive replay can arrive before the same snapshot's full gallery.
+          rememberGallery(videoId, item.gallery, observedAt, existing.gallery?.length || 0);
+          continue;
+        }
       }
-      const playUrl = String(item?.playUrl || "");
-      if (playUrl.length <= 4096 && isDouyinMediaHint(playUrl)) rememberCapture(playUrl, videoId);
-      if (url.length <= 4096 && isDouyinMediaHint(url)) rememberCapture(url, videoId);
+      const candidates = Array.isArray(item?.candidates) ? item.candidates.slice(0, 8) : [];
+      rememberBoundMedia(videoId, [...candidates, item.playUrl, url], true, observedAt);
       // TASK-8.17：封面独立于媒体地址入库（媒体地址过期不影响封面）。
       const coverUrl = String(item?.coverUrl || "");
-      if (coverUrl.length <= 4096) rememberCover(videoId, coverUrl);
+      if (coverUrl.length <= 4096) rememberCover(videoId, coverUrl, observedAt);
       // TASK-8.18：图集整组入库（候选已由 MAIN 按配置收窄）。
-      if (Array.isArray(item?.gallery) && item.gallery.length) rememberGallery(videoId, item.gallery);
+      if (Array.isArray(item?.gallery) && item.gallery.length) rememberGallery(videoId, item.gallery, observedAt);
+      const stored = capturedByTarget.get(videoId);
+      if (stored) {
+        stored.captureNonce = expectedNonce;
+        stored.captureRevision = revision;
+      }
     }
   }
 
@@ -557,11 +594,9 @@
       try {
         payload = JSON.parse(text);
       } catch {
-        const idMatch = text.match(/"aweme_id"\s*:\s*"(\d{10,24})"/) || text.match(/[?&]target=(\d{10,24})/);
+        // An arbitrary script may mention several works. Only the URL's own target can bind it.
         const urlMatch = text.match(/https:\/\/[^"\s\\]+(?:douyinvod|snssdk|amemv)[^"\s\\]*/);
-        if (idMatch && urlMatch && isDouyinMediaHint(urlMatch[0])) {
-          rememberCapture(urlMatch[0], idMatch[1]);
-        }
+        if (urlMatch && captureTargetId(urlMatch[0])) rememberCapture(urlMatch[0]);
         continue;
       }
       for (const hit of collectPlayAddrs(payload)) rememberCapture(hit.url, hit.videoId);
@@ -609,7 +644,7 @@
     scanEmbeddedStates();
   }
 
-  function capturedMediaUrl(videoId) {
+  function capturedMediaUrl(videoId, allowUnbound = true) {
     if (videoId) {
       const hit = capturedByTarget.get(String(videoId));
       if (hit && Date.now() - hit.at < CAPTURE_TTL_MS) {
@@ -619,6 +654,7 @@
             && hit.playUrl && isDouyinMediaHint(hit.playUrl)) return hit.playUrl;
       }
     }
+    if (!allowUnbound) return "";
     if (/\/(?:video|share\/video)\/\d{10,24}/.test(location.pathname)) {
       const { url, at } = latestUnboundCapture;
       if (url && Date.now() - at < CAPTURE_TTL_MS && isDouyinMediaHint(url)) return url;
@@ -646,13 +682,39 @@
     }
   }
 
-  function capturedMediaCandidates(videoId) {
+  function capturedMediaEntries(videoId) {
     if (!videoId) return [];
     const hit = capturedByTarget.get(String(videoId));
     if (!hit || Date.now() - hit.at >= CAPTURE_TTL_MS) return [];
     return (hit.candidates || [])
       .filter((entry) => Date.now() - entry.at < CAPTURE_TTL_MS && isDouyinMediaHint(entry.url))
-      .map((entry) => entry.url);
+      .sort((left, right) => {
+        // 新鲜优先：过龄候选降到队尾只做兜底；新鲜层内 MAIN（响应观测）
+        // 条目优先于 SSR/资源时序补充（SSR 可能反复暴露旧签名，只补位不
+        // 领衔），同层内 rank 高者（渐进 MP4 优先于 HLS）与更近观测优先。
+        const leftStale = Date.now() - left.at > STALE_HINT_DEMOTE_MS ? 1 : 0;
+        const rightStale = Date.now() - right.at > STALE_HINT_DEMOTE_MS ? 1 : 0;
+        if (leftStale !== rightStale) return leftStale - rightStale;
+        const tier = value => (value.fromMain ? 1 : 0);
+        if (tier(left) !== tier(right)) return tier(right) - tier(left);
+        if ((right.rank || 0) !== (left.rank || 0)) return (right.rank || 0) - (left.rank || 0);
+        return right.at - left.at;
+      });
+  }
+
+  function capturedMediaCandidates(videoId) {
+    return capturedMediaEntries(videoId).map((entry) => entry.url);
+  }
+
+  function capturedCandidateAgesMs(videoId) {
+    return capturedMediaEntries(videoId)
+      .map((entry) => Math.max(0, Math.round(Date.now() - entry.at)))
+      .slice(0, 8);
+  }
+
+  function newestCandidateAgeMs(videoId) {
+    const ages = capturedCandidateAgesMs(videoId);
+    return ages.length ? ages[0] : Infinity;
   }
 
   function mediaCandidatesFor(videoId, ...preferred) {
@@ -709,11 +771,51 @@
     } catch { /* MAIN 世界缺席时后台解析兜底，不影响任务 */ }
   }
 
+  // 主动刷新捕获（先生 2026-11-18）：请 MAIN 世界用页面自己的 detail 请求
+  // 原样再取一次，新签名经既有捕获消息管线回流档案。回执只报成败；地址
+  // 永不直接走 postMessage，白名单验证管线不变。
+  function requestCaptureRefresh(videoId, timeoutMs = 9000) {
+    const id = String(videoId || "");
+    const nonce = String(document.documentElement?.dataset?.shengjianMainNonce || "");
+    if (!id || !nonce || typeof window.postMessage !== "function") return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        try { window.removeEventListener("message", onResult); } catch { /* noop */ }
+        // 捕获消息经 flush 有 ~150ms 批处理延迟，稍候再放行读档。
+        setTimeout(() => resolve(value), value ? 350 : 0);
+      };
+      const onResult = (event) => {
+        const data = event?.data;
+        if (!data || data.source !== "shengjian-capture-refresh-result") return;
+        if (event.origin !== window.location.origin) return;
+        if (String(data.nonce || "") !== nonce || String(data.videoId || "") !== id) return;
+        finish(Boolean(data.ok));
+      };
+      window.addEventListener("message", onResult);
+      setTimeout(() => finish(false), timeoutMs);
+      try {
+        window.postMessage({ source: "shengjian-capture-refresh", nonce, videoId: id }, window.location.origin);
+      } catch {
+        finish(false);
+      }
+    });
+  }
+
+  // 最新候选过龄才刷新（有新鲜签名就不多打一次平台请求）。
+  async function maybeRefreshCapture(videoId) {
+    if (!videoId) return false;
+    if (newestCandidateAgeMs(videoId) <= FRESH_HINT_MS) return false;
+    return requestCaptureRefresh(videoId);
+  }
+
   function waitForMediaUrl(active, tries = 10, gapMs = 300) {
     scanCapturedSources();
     const first = resolveMediaUrl(active);
     if (first) return Promise.resolve(first);
-    if (active.videoId && !capturedByTarget.has(String(active.videoId))) requestCaptureReplay(active.videoId);
+    if (active.videoId && !capturedMediaUrl(active.videoId, false)) requestCaptureReplay(active.videoId);
     return new Promise((resolve) => {
       let remaining = tries;
       const lastVideoId = active.videoId;
@@ -795,7 +897,12 @@
       response_cover_nodes: status.coverNodes,
       response_cover_accepted: status.coverAccepted,
       captured_targets: capturedByTarget.size,
-      target_captured: Boolean(target.videoId && capturedByTarget.has(String(target.videoId))),
+      target_captured: Boolean(target.videoId && capturedMediaUrl(target.videoId, false)),
+      // 签名年龄观测（先生 2026-11-18 风控波定责）：>10min 的候选在抽签里
+      // 几乎必死；无新鲜候选即刷新信号。
+      newest_candidate_age_ms: target.videoId && Number.isFinite(newestCandidateAgeMs(target.videoId))
+        ? newestCandidateAgeMs(target.videoId) : null,
+      candidate_ages_ms: target.videoId ? capturedCandidateAgesMs(target.videoId) : [],
       target_cover_held: Boolean(target.videoId && coverUrlFor(String(target.videoId))),
       unbound_capture: Boolean(latestUnboundCapture.url),
       player_present: Boolean(video),
@@ -814,8 +921,8 @@
   }
 
   // —— 点击反馈信息窗（先生裁决：点击后弹窗告知，而非仅按钮文字变化）——
-  // 固定右下角浮层 + Shadow DOM 隔离站点样式；同一窗口就地更新状态
-  // （提交中 → 已加入 → 下载百分比 → 完成），完成后自动淡出；错误红点
+  // 贴近播放器进度条，使用 Shadow DOM 隔离站点样式；同一窗口就地更新回执，
+  // 完成后自动收起。错误标记
   // 常驻更久并给可执行指引；点击 × 或卡片任意处可立即关闭。按钮短标签
   // 保留为辅位提示。受限页面环境（无 body / 无 Shadow DOM）静默退回
   // 纯按钮文字，不影响提交链路。
@@ -827,50 +934,63 @@
     if (host) return host.shadowRoot || null;
     host = document.createElement('div');
     host.className = 'shengjian-feedback-host';
-    // A concise status card uses measured empty space outside the picture.
-    // The popup remains available when a full-screen player leaves no safe gap.
     host.style.cssText = 'position:fixed;top:16px;right:16px;z-index:2147483646;pointer-events:none;';
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML = `
       <style>
         .card{font:14px/1.55 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
-          width:max-content;min-width:200px;max-width:340px;box-sizing:border-box;
-          background:rgba(20,23,20,.82);backdrop-filter:blur(14px) saturate(1.2);
+          width:max-content;min-width:min(200px,calc(100vw - 16px));max-width:min(356px,calc(100vw - 16px));box-sizing:border-box;
+          background:rgba(33,47,39,.96);
           color:#eef3ed;border:1px solid rgba(154,205,174,.28);border-radius:12px;padding:11px 14px 12px;
           box-shadow:0 10px 34px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.06);
-          opacity:0;transform:translateY(10px);transition:opacity .2s ease,transform .26s cubic-bezier(.34,1.56,.64,1);
-          cursor:pointer;pointer-events:auto}
-        .card.show{opacity:1;transform:none}
+          visibility:hidden;opacity:0;transform:translateY(4px);transition:opacity .16s ease,transform .16s ease;
+          cursor:pointer;pointer-events:none}
+        .card.show{visibility:visible;opacity:1;transform:none;pointer-events:auto}
         .main{display:flex;align-items:flex-start;gap:9px;font-weight:600;color:#eef3ed}
         .dot{width:9px;height:9px;border-radius:50%;background:#9acdae;flex:none;margin-top:6px;
           box-shadow:0 0 6px rgba(154,205,174,.5)}
-        .text{flex:1;word-break:break-word}
-        .x{cursor:pointer;border:0;background:transparent;color:#94a096;font-size:15px;line-height:1;padding:2px 2px}
+        .text{flex:1;min-width:0;overflow-wrap:anywhere}
+        .x{flex:none;cursor:pointer;width:26px;height:26px;margin:-2px -4px 0 0;border:0;border-radius:6px;background:transparent;color:#c0d0c4;font-size:19px;line-height:1;padding:0}
+        .x:hover,.actions .no:hover{background:rgba(255,255,255,.09)}
         .card.error .dot{background:#f0909a;box-shadow:0 0 6px rgba(240,144,154,.5)}
-        .card.error{border-color:rgba(240,144,154,.4)}
-        .hint{margin:5px 0 0 18px;color:#94a096;font-size:12px;line-height:1.6;word-break:break-word}
+        .card.error{background:#443038;border-color:rgba(240,144,154,.5)}
+        .hint{margin:5px 0 0 18px;color:#c0d0c4;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
         .hint.actionable{color:#eef3ed;font-size:13px;font-weight:600}
-        .actions{display:none;gap:8px;margin:10px 0 0 18px}
-        .actions button{font:inherit;font-size:12.5px;border-radius:8px;padding:5px 12px;cursor:pointer;border:1px solid transparent}
+        .actions{display:none;flex-wrap:wrap;gap:8px;margin:10px 0 0 18px}
+        .actions button{font:inherit;font-size:12.5px;min-height:32px;border-radius:8px;padding:5px 12px;cursor:pointer;border:1px solid transparent}
         .actions .ok{background:#9acdae;color:#102016;border-color:#9acdae;font-weight:600}
         .actions .no{background:transparent;color:#c5d0c7;border-color:rgba(154,205,174,.35)}
+        button:focus-visible{outline:2px solid #cee7d5;outline-offset:2px}
+        @media(prefers-reduced-motion:reduce){.card{transition:none}}
       </style>
-      <div class="card" role="status" aria-live="polite">
-        <div class="main"><span class="dot"></span><span class="text"></span>
-          <button class="x" aria-label="关闭">×</button></div>
-        <div class="hint" hidden></div>
-        <div class="actions"><button class="no">取消</button><button class="ok">确认</button></div>
+      <div class="card" inert>
+        <div class="main"><span class="dot" aria-hidden="true"></span><span class="text" id="feedback-text" role="status" aria-live="polite"></span>
+          <button class="x" type="button" aria-label="关闭提示">×</button></div>
+        <div class="hint" id="feedback-hint" hidden></div>
+        <div class="actions"><button class="no" type="button">取消</button><button class="ok" type="button">确认</button></div>
       </div>`;
     const card = root.querySelector('.card');
-    const close = () => { card.classList.remove('show'); if (feedbackHideTimer) clearTimeout(feedbackHideTimer); };
+    const close = () => {
+      pendingConfirmResolver?.cancel();
+      card.classList.remove('show');
+      card.inert = true;
+      if (feedbackHideTimer) clearTimeout(feedbackHideTimer);
+    };
     root.querySelector('.x').onclick = (e) => { e.stopPropagation(); close(); };
     card.onclick = close;
+    card.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    });
     mount.appendChild(host);
     return root;
   }
 
   function showFeedbackWindow(message, error, holdMs) {
     try {
+      pendingConfirmResolver?.cancel();
       const root = ensureFeedbackWindow();
       if (!root) return;
       const card = root.querySelector('.card');
@@ -890,14 +1010,18 @@
         hint.classList.remove("actionable");
       }
       positionFeedbackCard(root);
-      requestAnimationFrame(() => card.classList.add('show'));
+      card.inert = false;
+      card.classList.add('show');
       clearTimeout(feedbackHideTimer);
-      feedbackHideTimer = setTimeout(() => card.classList.remove('show'), holdMs);
+      feedbackHideTimer = setTimeout(() => {
+        if (root.activeElement) return;
+        card.classList.remove('show');
+        card.inert = true;
+      }, holdMs);
     } catch { /* 受限环境退回按钮文字 */ }
   }
 
   function showToast(message, error = false) {
-    // Feedback uses measured empty space outside the video.
     // 页面有「下载/转写」两个按钮，旧实现用 querySelector 永远改第一个
     // 的文字——点下载会把红色报错落到「转写」按钮上，语义错位。按钮
     // 标签现在保持不变（交互禁用态 is-busy 除外），状态全部进窗口。
@@ -912,27 +1036,33 @@
     const host = root.host;
     if (!host) return;
     if (videoRect) {
-      const cardW = root.querySelector('.card').getBoundingClientRect().width || 280;
+      const cardRect = root.querySelector('.card').getBoundingClientRect();
+      const cardW = cardRect.width || 280;
       const centered = Math.round(videoRect.left + (videoRect.width - cardW) / 2);
       const left = Math.min(Math.max(8, centered), Math.max(8, innerWidth - cardW - 8));
       const hasActionableHint = root.querySelector('.hint')?.classList.contains('actionable');
       const bottomOffset = hasActionableHint ? 205 : 88;
-      const top = Math.max(8, Math.round(videoRect.bottom - bottomOffset));
+      const offset = Math.max(bottomOffset, cardRect.height + (cardRect.height > 80 ? 118 : 36));
+      const top = Math.max(8, Math.min(Math.round(videoRect.bottom - offset), innerHeight - cardRect.height - 8));
       host.style.cssText = `position:fixed;left:${left}px;top:${top}px;z-index:2147483646;pointer-events:none;`;
     } else {
-      host.style.cssText = 'position:fixed;top:16px;right:16px;z-index:2147483646;pointer-events:none;';
+      host.style.cssText = 'position:fixed;top:8px;right:8px;z-index:2147483646;pointer-events:none;';
     }
   }
 
   // 确认卡（先生 2026-10-08：同一视频重复下载须先确认）：主句+弱化次行+
   // 两个动作按钮；确认回调由调用方给出，取消/15 秒超时不提交。
   let pendingConfirmResolver = null;
-  function showConfirmWindow(mainText, hintText, confirmLabel, onConfirm) {
+  function showConfirmWindow(mainText, hintText, confirmLabel, onConfirm, trigger = null, timeoutMs = 15000) {
+    pendingConfirmResolver?.cancel();
     // 待决动作先登记（测试/诊断钩子可见），渲染失败时它就是「未决＝不提交」。
     let confirmTimer = null;
+    let close = () => {};
     const done = (confirmed) => {
-      if (pendingConfirmResolver && pendingConfirmResolver.done === done) pendingConfirmResolver = null;
+      if (pendingConfirmResolver?.done !== done) return;
+      pendingConfirmResolver = null;
       clearTimeout(confirmTimer);
+      close();
       if (confirmed && typeof onConfirm === 'function') onConfirm();
     };
     pendingConfirmResolver = { confirm: () => done(true), cancel: () => done(false), done };
@@ -946,17 +1076,35 @@
       const no = actions.querySelector('.no');
       clearTimeout(feedbackHideTimer);
       card.classList.remove('error');
+      card.setAttribute('role', 'dialog');
+      card.setAttribute('aria-labelledby', 'feedback-text');
+      card.setAttribute('aria-describedby', 'feedback-hint');
       root.querySelector('.text').textContent = String(mainText);
       const hint = root.querySelector('.hint');
       hint.textContent = String(hintText || '');
       hint.hidden = !hintText;
+      hint.classList.remove('actionable');
       ok.textContent = String(confirmLabel || '确认');
-      ok.onclick = () => { actions.style.display = 'none'; ok.onclick = null; no.onclick = null; card.classList.remove('show'); done(true); };
-      no.onclick = () => { actions.style.display = 'none'; ok.onclick = null; no.onclick = null; card.classList.remove('show'); done(false); };
+      close = () => {
+        actions.style.display = 'none';
+        ok.onclick = null;
+        no.onclick = null;
+        const returnFocus = root.activeElement;
+        card.classList.remove('show');
+        card.inert = true;
+        card.removeAttribute('role');
+        card.removeAttribute('aria-labelledby');
+        card.removeAttribute('aria-describedby');
+        if (returnFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
+      };
+      ok.onclick = (event) => { event.stopPropagation(); done(true); };
+      no.onclick = (event) => { event.stopPropagation(); done(false); };
       actions.style.display = 'flex';
       positionFeedbackCard(root);
-      requestAnimationFrame(() => card.classList.add('show'));
-      confirmTimer = setTimeout(() => { actions.style.display = 'none'; ok.onclick = null; no.onclick = null; card.classList.remove('show'); done(false); }, 15000);
+      card.inert = false;
+      card.classList.add('show');
+      if (trigger?.isConnected) no.focus({ preventScroll: true });
+      if (timeoutMs) confirmTimer = setTimeout(() => done(false), timeoutMs);
     } catch { /* 受限环境默认取消，不提交 */ }
   }
 
@@ -1007,9 +1155,15 @@
     // 直达提示告知合并结果（先生 2026-10-18：重复点击必须有反馈）。
     let mergedSubmitNotice = false;
     // 媒体读取与提交主体：确认（如需）通过后执行。
-    const beginSubmission = () => {
+    const beginSubmission = async () => {
       busy();
       const readStartedAt = Date.now();
+      // 提交前刷新（先生 2026-11-18）：候选过龄且播放器没有在播本视频时，
+      // 先请 MAIN 世界用页面自己的 detail 请求取一次新签名——旧签名提交
+      // 上去三通道全 403，是风控波期间失败率飙升的主因。刷新失败静默降级。
+      try {
+        if (!activeMediaUrl(video)) await maybeRefreshCapture(video.videoId);
+      } catch { /* 刷新失败照常提交，走既有回退 */ }
       const immediateMedia = resolveMediaUrl(video);
       const initialCandidates = mediaCandidatesFor(video.videoId, activeMediaUrl(video), immediateMedia);
       const initialPlayUrl = playEndpointFor(video.videoId, activeMediaUrl(video), immediateMedia);
@@ -1047,12 +1201,13 @@
             return;
           }
           if (!response?.ok) {
+            if (response?.needs_connection) { showOfflineLaunchCard(target.videoId, false, button); return; }
             if (response?.feedback_sent) return;
             showToast(decorateCaptureRetryNotice(response?.message || "图集任务未能创建：请确认 FoilPage 桌面端正在运行", target.videoId, "failure"), true);
             return;
           }
           const acceptedJob = response.job;
-          if (acceptedJob?.queued) { showOfflineLaunchCard(target.videoId); return; }
+          if (acceptedJob?.queued || acceptedJob?.waiting_connection) { showOfflineLaunchCard(target.videoId, true, button); return; }
           if (acceptedJob?.id) showTaskFeedbackOnce(acceptedJob.id, "submitted", "已提交图集下载", false, target.videoId);
         });
         return;
@@ -1061,7 +1216,7 @@
         // 记录页面采集阶段的缺失，但仍交给后台 resolver：后端已具备本次
         // 点击的一次性 Cookie 读取与规范详情页解析，页面守门不能截断任务。
         const status = mainWorldStatus();
-        const targetCaptured = Boolean(target.videoId && capturedByTarget.has(String(target.videoId)));
+        const targetCaptured = Boolean(target.videoId && capturedMediaUrl(target.videoId, false));
         const reasonCode = gateReason(status, { targetCaptured });
         const reason = gateMessage(status, { targetCaptured });
         rememberCaptureRetryGuide(target.videoId);
@@ -1095,6 +1250,7 @@
           title: target.title,
           mediaUrl: mediaCandidates[0] || playUrl || mediaUrl,
           mediaCandidates,
+          candidateAgesMs: capturedCandidateAgesMs(target.videoId),
           playUrl,
           coverUrl: coverUrlFor(target.videoId),
           transcribe: action === "transcribe",
@@ -1106,6 +1262,7 @@
             return;
           }
           if (!response?.ok) {
+            if (response?.needs_connection) { showOfflineLaunchCard(target.videoId, false, button); return; }
             if (response?.feedback_sent) return;
             showToast(decorateCaptureRetryNotice(response?.message || "下载任务未能创建：请确认 FoilPage 桌面端正在运行；留在本页让视频播放 2 秒后重试", target.videoId, "failure"), true);
             return;
@@ -1118,8 +1275,8 @@
           // reported as accepted——但必须告知去向（先生 2026-10-19：桌面端
           // 未连接时点击不能无反馈）：已暂存＋一键拉起 FoilPage。
           if (!acceptedJob?.id) return;
-          if (acceptedJob.queued) {
-            showOfflineLaunchCard(target.videoId);
+          if (acceptedJob.queued || acceptedJob.waiting_connection) {
+            showOfflineLaunchCard(target.videoId, true, button);
             return;
           }
           if (mergedSubmitNotice) {
@@ -1146,6 +1303,9 @@
     // 进行中且已带转写 → 提示后不再提交；进行中未带转写 → 照常提交
     // （服务端补置转写旗标），回执走合并直达提示。
     busy();
+    feedbackVideoId = video.videoId;
+    feedbackRevision++;
+    showToast("正在提交…");
     if (action === "download") {
       sendRuntimeMessage({ type: "shengjian-check-existing", url: detailUrl }, (check) => {
         if (chrome.runtime.lastError || !check?.ok) { beginSubmission(); return; }
@@ -1162,18 +1322,7 @@
             "重新下载将新增一份文件；需要文稿请点「转写」",
             "重新下载",
             beginSubmission,
-          );
-          return;
-        }
-        // 先生 2026-11-15：近窗失败确认——10 分钟内失败过的视频重提「下载」
-        // 要先确认（实机曾对同一视频反复提交积累 7 行失败记录）。
-        if (check.recentFailure) {
-          restore();
-          showConfirmWindow(
-            `该视频刚失败过（${check.recentFailure.summary}）`,
-            "短时间内反复提交可能加剧平台拦截。请先按任务页指引处理：刷新本页并让视频播放片刻、确认登录态、必要时断开 VPN，再决定是否重试。",
-            "仍要重新提交",
-            beginSubmission,
+            button,
           );
           return;
         }
@@ -1182,25 +1331,14 @@
       return;
     }
     sendRuntimeMessage({ type: "shengjian-check-existing", url: detailUrl }, (check) => {
-      if (chrome.runtime.lastError || !check?.ok || activeVideo().videoId !== video.videoId) { beginSubmission(); return; }
+      if (activeVideo().videoId !== video.videoId) { restore(); return; }
+      if (chrome.runtime.lastError || !check?.ok) { beginSubmission(); return; }
       if (check.active && check.activeTranscribing) {
         restore();
         showToast("该视频已在处理中，转写会自动接续（进度见 FoilPage 任务页）");
         return;
       }
       if (check.active) mergedSubmitNotice = true;
-      // 先生 2026-11-15：「转写」同样受近窗失败确认约束——反复点「转写」
-      // 是实机重复提交的主要形态（7 行失败记录全部带转写旗标）。
-      if (check.recentFailure) {
-        restore();
-        showConfirmWindow(
-          `该视频刚失败过（${check.recentFailure.summary}）`,
-          "短时间内反复提交可能加剧平台拦截。请先按任务页指引处理（刷新本页并让视频播放片刻、确认登录态）后再重试转写。",
-          "仍要重新提交",
-          beginSubmission,
-        );
-        return;
-      }
       beginSubmission();
     });
   }
@@ -1249,22 +1387,14 @@
     return null;
   }
 
-  /* 桌面端未连接时的暂存告知＋一键拉起（先生 2026-10-19）。点击后任务已进
-   * 扩展离线队列：拉起 FoilPage→本地服务上线→队列自动提交→回执照常送达。
-   * 先生 2026-11-16：①协议随品牌统一为 foilpage://（桌面双注册兼容旧名）；
-   * ②同一视频 60s 冷却，防止离线连点反复弹卡；③点启动后请后台监听上线，
-   * 20s 未上线给手动指引——协议处理器缺失时系统弹的是"找不到应用"错误窗，
-   * 扩展自身无法感知，只能靠超时兜底告知。 */
-  const offlineCardShownAt = new Map();
-  function showOfflineLaunchCard(videoId) {
-    const key = String(videoId || location.pathname);
-    const now = Date.now();
-    if (now - (offlineCardShownAt.get(key) || 0) < 60000) return;
-    offlineCardShownAt.set(key, now);
+  function showOfflineLaunchCard(videoId, queued = true, trigger = null) {
+    feedbackVideoId = videoId;
+    feedbackRevision++;
     showConfirmWindow(
       "FoilPage 桌面端未连接",
-      "任务已暂存到扩展。点「启动 FoilPage」后，恢复连接时会尝试自动提交；应用将以后台方式启动。若仍未开始，请在扩展弹窗查看任务状态。",
-      "启动 FoilPage",
+      queued ? "任务已保留。打开应用后，连接恢复时会继续处理。"
+        : "请打开 FoilPage，在「浏览器」页允许连接，配对后重试。",
+      "打开 FoilPage",
       () => {
         try {
           const launcher = document.createElement("a");
@@ -1273,14 +1403,16 @@
           document.body.appendChild(launcher);
           launcher.click();
           setTimeout(() => launcher.remove(), 1000);
-          showToast("正在启动 FoilPage…启动后任务会自动提交；若浏览器询问是否打开 FoilPage，请选择「打开」");
-          sendRuntimeMessage({ type: "shengjian-launch-attempt", videoId: key }, () => {});
+          showToast("正在打开 FoilPage…若浏览器询问，请选择「打开」。");
+          sendRuntimeMessage({ type: "shengjian-launch-attempt", videoId }, () => {});
         } catch {
-          showToast("无法自动启动：请手动打开 FoilPage 桌面端，任务会自动提交", true);
+          showToast("无法自动启动，请从开始菜单打开 FoilPage。", true);
         }
       },
+      trigger,
+      0,
     );
-    reportCaptureDiagnostic(captureDiagnostic("desktop_offline_queued", "", 0, activeVideo(), "offline_queue"));
+    if (queued) reportCaptureDiagnostic(captureDiagnostic("desktop_offline_queued", "", 0, activeVideo(), "offline_queue"));
   }
 
   /* 按钮被隐藏/移除时留痕（先生 2026-10-19 实例：个别视频页无按钮）——
@@ -1333,10 +1465,8 @@
   const taskFeedbackStages = new Map();
   function showTaskFeedbackOnce(taskId, stage, message, error = false, videoId = activeVideo().videoId) {
     const key = String(taskId || "");
-    // 终态失败与下载成功同级：未见过成功的任务显示失败提示；已显示
-    // 「下载成功」的任务不被迟到的失败覆盖（先生 2026-10-08 裁决，
-    // extension_visual_smoke 守护）。
-    const rank = stage === "download" || stage === "failure" ? 2 : 1;
+    // A recovered download supersedes its old failure; a late failure cannot replace success.
+    const rank = { submitted: 1, fallback: 2, failure: 3, download: 4 }[stage];
     if (key && (taskFeedbackStages.get(key) || 0) >= rank) return false;
     if (key) {
       taskFeedbackStages.delete(key);
@@ -1350,14 +1480,21 @@
   }
   function restoreTaskFeedback(videoId) {
     if (!videoId || videoId === feedbackVideoId) return;
+    pendingConfirmResolver?.cancel();
     feedbackVideoId = videoId;
     const revision = ++feedbackRevision;
     document.querySelector('.shengjian-feedback-host')?.remove();
+    for (const button of document.querySelectorAll('.shengjian-player-button')) {
+      button.title = button.getAttribute('aria-label');
+    }
     sendRuntimeMessage({type:"shengjian-task-state",url:`https://www.douyin.com/video/${videoId}`}, response => {
       if (activeVideo().videoId !== videoId || revision !== feedbackRevision || !response?.job) return;
       const job=response.job;
       if (job.download_complete) showTaskFeedbackOnce(job.id, "download", "下载成功", false, videoId);
-      else if (!["done", "failed", "cancelled"].includes(job.status) && !job.queued) showTaskFeedbackOnce(job.id, "submitted", "已提交下载", false, videoId);
+      else if (!["done", "failed", "cancelled"].includes(job.status)) {
+        if (job.queued || job.waiting_connection) showOfflineLaunchCard(videoId);
+        else showTaskFeedbackOnce(job.id, "submitted", "已提交下载", false, videoId);
+      }
     });
   }
   function syncControls() {
@@ -1419,7 +1556,11 @@
     childList: true,
     subtree: true,
   });
-  window.addEventListener("resize", queueSync, { passive: true });
+  window.addEventListener("resize", () => {
+    queueSync();
+    const root = document.querySelector('.shengjian-feedback-host')?.shadowRoot;
+    if (root?.querySelector('.card.show')) positionFeedbackCard(root);
+  }, { passive: true });
   window.addEventListener("message", acceptMainWorldCapture);
   setInterval(queueSync, 1200);
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -1428,16 +1569,15 @@
       const submissionRejected = message.stage === "failure" && !/^[a-f0-9]{12}$/.test(String(message.taskId || ""));
       const terminalTaskFailure = message.stage === "failure" && /^[a-f0-9]{12}$/.test(String(message.taskId || ""));
       const legacyReceipt = !message.stage && ["已提交下载", "下载成功"].includes(String(message.message || ""));
-      if (!["submitted", "download"].includes(message.stage) && !submissionRejected && !legacyReceipt && !terminalTaskFailure) return undefined;
+      if (!["submitted", "fallback", "download"].includes(message.stage) && !submissionRejected && !legacyReceipt && !terminalTaskFailure) return undefined;
       const stage = message.stage || (String(message.message || "") === "已提交下载" ? "submitted" : "download");
       const videoId = activeVideo().videoId;
-      if (stage === "submitted" || stage === "download") {
+      if (stage === "submitted" || stage === "download" || stage === "fallback") {
         // Direct response and background broadcast can race. The task-stage
         // guard keeps one receipt while allowing download success to replace
         // an earlier submission notice.
         showTaskFeedbackOnce(message.taskId, stage, message?.message || "", Boolean(message?.error), videoId);
       } else if (terminalTaskFailure) {
-        // 终态失败按同级提示：带 F5 重试指引，且不覆盖已达成的下载成功。
         showTaskFeedbackOnce(message.taskId, "failure", message?.message || "", Boolean(message?.error), videoId);
       } else {
         feedbackVideoId = videoId;
@@ -1450,24 +1590,85 @@
     if (message?.type === "shengjian-fresh-media") {
       // Requests for an original video may use only its captured cache. A
       // different current video must never lend it the current player URL.
+      // 先生 2026-11-18：档案里有新鲜签名（或播放器正用在播地址）时保持
+      // 原同步应答契约；候选过龄才先请求 MAIN 刷新再应答——重放档案里的
+      // 旧签名在风控波期间几乎必死，回退通道要的是「未参与过被拒请求的
+      // 新签名」。刷新失败（无近期 detail 请求/被平台拒）静默降级读档案。
       scanCapturedSources();
       const current = activeVideo();
       const expected = String(message.videoId || "");
       const active = expected && expected !== current.videoId
         ? {videoId:expected, title:"", root:null, playerMatchesTarget:false} : current;
-      sendResponse?.({
-        ok: true,
-        videoId: active.videoId,
-        title: active.title,
-        mediaUrl: resolveMediaUrl(active),
-        mediaCandidates: mediaCandidatesFor(active.videoId, activeMediaUrl(active)),
-        playUrl: playEndpointFor(active.videoId, activeMediaUrl(active), resolveMediaUrl(active)),
-        // TASK-8.17：离线重放/服务唤醒后按 aweme_id 重建提示时封面也要跟上。
-        coverUrl: coverUrlFor(active.videoId),
-        // TASK-8.18：图集重建同样带上（service worker 重启后队列提示丢失时）。
-        gallery: (galleryFor(active.videoId) || []).map((image) => image.urls.slice(0, 8)),
-      });
-      return undefined;
+      const respond = () => {
+        const playerUrl = activeMediaUrl(active);
+        const mediaUrl = playerUrl || capturedMediaUrl(active.videoId, !expected);
+        const mediaCandidates = mediaCandidatesFor(active.videoId, playerUrl, mediaUrl);
+        const playUrl = playEndpointFor(active.videoId, playerUrl, mediaUrl);
+        const gallery = (galleryFor(active.videoId) || []).map(image => image.urls.slice(0, 8));
+        sendResponse?.({
+          ok: Boolean(mediaUrl || playUrl || mediaCandidates.length || gallery.length),
+          activeTarget: active === current,
+          videoId: active.videoId,
+          title: active.title,
+          mediaUrl,
+          mediaCandidates,
+          candidateAgesMs: capturedCandidateAgesMs(active.videoId),
+          playUrl,
+          // TASK-8.17：离线重放/服务唤醒后按 aweme_id 重建提示时封面也要跟上。
+          coverUrl: coverUrlFor(active.videoId),
+          // TASK-8.18：图集重建同样带上（service worker 重启后队列提示丢失时）。
+          gallery,
+        });
+      };
+      const refreshTarget = String(active.videoId || expected || "");
+      const archiveAges = refreshTarget ? capturedCandidateAgesMs(refreshTarget) : [];
+      // 只有「确有过龄候选」才走异步刷新；从未捕获过的目标保持同步契约
+      // （空档案交给 resolver 兜底，重捕获重试链路另有专门刷新）。
+      const staleArchive = archiveAges.length > 0
+        && !activeMediaUrl(active)
+        && archiveAges[0] > FRESH_HINT_MS;
+      if (!staleArchive) {
+        respond();
+        return undefined;
+      }
+      void (async () => {
+        try { await requestCaptureRefresh(refreshTarget); } catch { /* 降级读档案 */ }
+        respond();
+      })();
+      return true;
+    }
+    if (message?.type === "shengjian-recapture-retry") {
+      // 先生 2026-11-18：终态双通道失败后的自动重捕获重试（每任务最多一
+      // 次，由后台调度与去重）。只在本页仍显示目标视频时执行；刷新拿新
+      // 签名后按正常提交链路重发（新凭据、新任务行；旧失败行由同 URL 成
+      // 功后的取代清理收尾）。转写意图不自动重试——重下载成功后任务页可
+      // 一键转写，避免自动链路误耗转写额度。
+      void (async () => {
+        const videoId = String(message.videoId || "");
+        const current = activeVideo();
+        if (!videoId || current.videoId !== videoId) { sendResponse?.({ ok: false }); return; }
+        showToast("正在重新获取下载地址，自动重试…");
+        try { await requestCaptureRefresh(videoId); } catch { /* 尽力而为 */ }
+        const playerUrl = activeMediaUrl(current);
+        const immediateMedia = playerUrl || capturedMediaUrl(videoId, false);
+        const mediaCandidates = mediaCandidatesFor(videoId, playerUrl, immediateMedia);
+        const playUrl = playEndpointFor(videoId, playerUrl, immediateMedia);
+        if (!mediaCandidates.length && !playUrl) { sendResponse?.({ ok: false }); return; }
+        sendRuntimeMessage({
+          type: "shengjian-page-submit",
+          url: `https://www.douyin.com/video/${videoId}`,
+          title: current.title,
+          mediaUrl: mediaCandidates[0] || playUrl || immediateMedia,
+          mediaCandidates,
+          candidateAgesMs: capturedCandidateAgesMs(videoId),
+          playUrl,
+          coverUrl: coverUrlFor(videoId),
+          transcribe: false,
+          recaptureOf: String(message.taskId || ""),
+        }, () => { /* 回执由既有任务通知链路负责 */ });
+        sendResponse?.({ ok: true });
+      })();
+      return true;
     }
     return undefined;
   });
@@ -1493,6 +1694,11 @@
     capturedByTarget,
     acceptMainWorldCapture,
     requestCaptureReplay,
+    requestCaptureRefresh,
+    maybeRefreshCapture,
+    capturedMediaEntries,
+    capturedCandidateAgesMs,
+    newestCandidateAgeMs,
     maybeShowPageStaleHint,
     mainWorldStatus,
     gateMessage,
