@@ -16,6 +16,9 @@ window.AppIcons = (() => {
     archive: '<rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v13h14V8m-9 5h4"/>',
     more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
     folder: '<path d="M3 7V5h7l2 3h9v12H3Z"/>',
+    play: '<path d="m8 5 11 7-11 7Z"/>',
+    video: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m10 9 5 3-5 3Z"/>',
+    document: '<path d="M6 3h8l4 4v14H6ZM14 3v5h4M9 12h6m-6 4h6"/>',
     back: '<path d="m14 5-7 7 7 7M7 12h14"/>',
   };
   return (name) => `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.more}</svg>`;

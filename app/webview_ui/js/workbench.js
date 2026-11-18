@@ -592,7 +592,12 @@ window.Workbench = (() => {
         </div>
         ${err ? `<div class="err"></div>` : ""}
         ${err && errorDetails ? `<details class="task-error-details"><summary>诊断详情（${errorCode}）</summary><div class="task-error-tools"></div><pre class="task-error-json"></pre></details>` : ""}
-        <div class="actions"></div>
+        <div class="actions task-detail-actions">
+          <div class="task-action-group task-primary-actions" role="group" aria-label="主要操作"></div>
+          <div class="task-action-group task-media-actions" role="group" aria-label="媒体操作"></div>
+          <div class="task-action-group task-file-actions" role="group" aria-label="文件操作"></div>
+          <div class="task-action-group task-management-actions" role="group" aria-label="任务管理"></div>
+        </div>
       </div>`;
     if (task.cover_path) {
       const bigCover = host.querySelector(".inspector-cover");
@@ -646,24 +651,30 @@ window.Workbench = (() => {
     }
 
     const actions = host.querySelector(".actions");
-    function addBtn(label, css, fn) {
+    const primaryActions = actions.querySelector('.task-primary-actions');
+    const mediaActions = actions.querySelector('.task-media-actions');
+    const fileActions = actions.querySelector('.task-file-actions');
+    const managementActions = actions.querySelector('.task-management-actions');
+    function addBtn(label, css, fn, group = managementActions, icon = '') {
       const b = document.createElement("button");
+      b.type = 'button';
       b.className = "btn " + css;
-      b.textContent = label;
+      if (icon) b.innerHTML = AppIcons(icon);
+      b.append(document.createTextNode(label));
       b.onclick = () => fn();
-      actions.appendChild(b);
+      group.appendChild(b);
       return b;
     }
-    addBtn("播放", "ghost small", () => AppApi.playMedia(task));
-    addBtn("打开位置", "ghost small", () => AppApi.openPath(task.source_path || task.downloaded_path));
+    addBtn("播放", "ghost small", () => AppApi.playMedia(task), mediaActions, 'play');
+    addBtn("打开位置", "ghost small", () => AppApi.openPath(task.source_path || task.downloaded_path), fileActions, 'folder');
     const resultPath = task.final_path || task.raw_path;
     if (resultPath && task.kind === 'transcription') {
-      addBtn('在文本库阅读', 'primary small', () => MaterialNavigation.go('library', {taskIds: [task.task_id]}));
+      addBtn('在文本库阅读', 'primary small', () => MaterialNavigation.go('library', {taskIds: [task.task_id]}), primaryActions, 'library');
     }
     if (MaterialNavigation.isVideo(task.source_path || task.downloaded_path)) {
-      const videoButton = addBtn('在视频库定位', 'ghost small', () => MaterialNavigation.openVideo(task.task_id, videoButton));
+      const videoButton = addBtn('在视频库定位', 'ghost small', () => MaterialNavigation.openVideo(task.task_id, videoButton), mediaActions, 'video');
     }
-    if (resultPath) addBtn("打开文本", "ghost small", () => AppApi.openPath(resultPath));
+    if (resultPath) addBtn("打开文本", "ghost small", () => AppApi.openPath(resultPath), fileActions, 'document');
     if (task.status === 'awaiting_browser') {
       const next = document.createElement('div'); next.className = 'task-next-action';
       next.textContent = '等待浏览器提供视频地址，请回到视频页面继续下载。';
@@ -673,29 +684,29 @@ window.Workbench = (() => {
           const result = await AppApi.openVideoPage(task.task_id);
           if (!result?.ok) toast(result?.error || '无法打开视频页面', 'error');
         } catch (_) { toast('无法打开视频页面，请重试', 'error'); }
-      });
+      }, primaryActions, 'browser');
     }
     if (task.kind === "download" && task.status === "done") {
-      addBtn("转写", "ghost small", () => {
+      addBtn("转写", "primary small", () => {
         AppApi.transcribeDownload(task.task_id).then((res) => {
           if (res && res.ok) toast("已加入转写队列");
           else if (res && res.already) toast(res.error || "该任务已在转写队列中，无需重复提交");
           else toast((res && res.error) || "无法开始转写", "error");
           refreshAll();
         });
-      });
+      }, primaryActions, 'document');
     } else if (task.kind === "download" && ["failed", "retryable", "cancelled"].includes(task.status)) {
       // 下载行的重试必须走下载轨：抖音失败行的签名/播放地址已失，
       // 桌面端无法自愈——引导回视频页重下；其余平台本地重试可成。
       if (task.platform === "douyin") {
-        addBtn("回视频页重下", "ghost small", () => {
+        addBtn("回视频页重下", "primary small", () => {
           AppApi.openVideoPage(task.task_id).then((res) => {
             if (res && res.ok) toast("已打开视频页：请点页面上的下载按钮（视频地址有时效，建议先收藏）");
             else toast((res && res.error) || "无法打开视频页", "error");
           }).catch(() => toast("无法打开视频页", "error"));
-        });
+        }, primaryActions, 'browser');
       } else {
-        addBtn("重试下载", "ghost small", () => {
+        addBtn("重试下载", "primary small", () => {
           AppApi.retryDownloads([task.task_id]).then((res) => {
             const n = res && res.retried ? res.retried.length : 0;
             const need = res && res.needs_page ? res.needs_page.length : 0;
@@ -704,23 +715,24 @@ window.Workbench = (() => {
             if (!n && !need) toast((res && res.error) || "该任务当前不可重试", "error");
             refreshAll();
           }).catch(() => toast("重试失败", "error"));
-        });
+        }, primaryActions, 'retry');
       }
     } else if (["failed", "retryable", "cancelled", "done"].includes(task.status)) {
-      addBtn(task.status === "done" ? "重新转写" : "重试转写", "ghost small", () => {
+      const retryGroup = task.status === 'done' || resultPath ? managementActions : primaryActions;
+      addBtn(task.status === "done" ? "重新转写" : "重试转写", retryGroup === primaryActions ? 'primary small' : 'ghost small', () => {
         AppApi.retranscribe([task.task_id]).then((res) => {
           const n = res && res.created ? res.created.length : 0;
           if (n) toast(`已重建 ${n} 个转写任务`);
           else toast("没有可重建的转写任务", "error");
           refreshAll();
         });
-      });
+      }, retryGroup, 'retry');
     }
     if (ACTIVE.includes(task.status)) {
-      addBtn("取消", "ghost small", () => AppApi.cancel([task.task_id]).then(refreshAll));
+      addBtn("取消", "ghost small", () => AppApi.cancel([task.task_id]).then(refreshAll), managementActions, 'stop');
     }
-    addBtn("删除", "danger small", () => deleteTask(task));
-    const secondary = [...actions.children].filter(button => !button.classList.contains('primary') && button.textContent !== '播放');
+    addBtn("删除", "danger small", () => deleteTask(task), managementActions, 'trash');
+    const secondary = [...actions.querySelectorAll('button')].filter(button => !primaryActions.contains(button) && button.textContent !== '播放');
     secondary.forEach(button => button.classList.add('task-secondary-action'));
     if (secondary.length) {
       const more = addBtn('更多操作', 'ghost small task-more-trigger', () => {
@@ -732,7 +744,7 @@ window.Workbench = (() => {
           button.onclick = () => { closeModal(); original.click(); };
           list.append(button);
         });
-      });
+      }, actions);
       more.setAttribute('aria-haspopup', 'dialog');
     }
   }
