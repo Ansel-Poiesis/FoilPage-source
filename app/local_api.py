@@ -161,8 +161,13 @@ _CAPTURE_DIAGNOSTIC_REASONS = {
     "detail_response_unavailable",
     "detail_request_not_seen",
     "player_url_not_ready",
+    # 按钮隐藏/移除留痕（先生 2026-10-19 起；2026-11-19 才被白名单放行
+    # ——此前这类上报全部被 400 静默丢弃，日志里零条即此因）。
+    "live_or_ad",
+    "no_player_target",
+    "invisible_container",
 }
-_CAPTURE_URL_SOURCES = {"", "player", "captured_media", "play_endpoint"}
+_CAPTURE_URL_SOURCES = {"", "player", "captured_media", "play_endpoint", "controls_sync", "offline_queue"}
 _DOWNLOAD_FAILURE_PHASES = {
     "desktop_dispatch", "desktop_authorization", "extension_authorization",
     "local_api_submit", "browser_download_start", "browser_download_interrupted",
@@ -178,7 +183,9 @@ def _sanitize_capture_diagnostic(body: dict[str, Any]) -> dict[str, Any]:
     outcome = body.get("outcome")
     reason = body.get("reason", "")
     url_source = body.get("url_source", "")
-    if not isinstance(outcome, str) or outcome not in {"url_missing", "url_captured"}:
+    if not isinstance(outcome, str) or outcome not in {
+        "url_missing", "url_captured", "controls_hidden", "desktop_offline_queued",
+    }:
         raise ValueError("采集诊断结果无效")
     if not isinstance(reason, str) or (reason and reason not in _CAPTURE_DIAGNOSTIC_REASONS):
         raise ValueError("采集诊断原因无效")
@@ -188,6 +195,12 @@ def _sanitize_capture_diagnostic(body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("采集诊断来源无效")
     if (outcome == "url_missing" and url_source) or (outcome == "url_captured" and not url_source):
         raise ValueError("采集诊断地址来源不一致")
+    # controls_hidden 带 reason＋固定来源；offline_queue 反之。此前这两类
+    # 上报因 outcome 不被接受而整条丢弃（零留痕的根因）。
+    if outcome == "controls_hidden" and (not reason or url_source != "controls_sync"):
+        raise ValueError("采集诊断阶段不一致")
+    if outcome == "desktop_offline_queued" and (reason or url_source != "offline_queue"):
+        raise ValueError("采集诊断阶段不一致")
 
     def bounded_int(name: str, maximum: int) -> int:
         value = body.get(name, 0)

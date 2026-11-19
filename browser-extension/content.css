@@ -85,3 +85,17 @@ xg-icon.shengjian-floating-control.shengjian-download {
   .shengjian-player-button { transition: none !important; }
   .shengjian-player-button.is-busy .shengjian-player-glyph { animation: none !important; }
 }
+
+/* 页面级固定兜底位（先生 2026-11-19「信息流部分视频无按钮」）：播放器
+   容器被折叠/遮挡时按钮退到视口右下角，任何形态的视频页都有入口。 */
+xg-icon.shengjian-page-floating {
+  position: fixed !important;
+  z-index: 2147483600 !important;
+  right: 16px !important;
+  bottom: 16px !important;
+  margin: 0 !important;
+}
+
+xg-icon.shengjian-page-floating.shengjian-download {
+  right: 74px !important;
+}

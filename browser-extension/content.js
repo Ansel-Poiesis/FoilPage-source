@@ -1379,6 +1379,9 @@
     return control;
   }
 
+  // 已判死容器（放置后不可见）在本页内不再尝试，直到 DOM 更换。
+  const rejectedContainers = new WeakSet();
+
   function playerControlTarget() {
     const active = activeVideo();
     const root = active.root;
@@ -1386,13 +1389,16 @@
     const player = video?.closest(".xgplayer")
       || video?.closest("[class*='xgplayer']") || root;
     const grids = Array.from(player?.querySelectorAll?.(".xg-right-grid") || document.querySelectorAll(".xg-right-grid"));
-    const grid = grids.find(isVisible);
+    const grid = grids.find(item => !rejectedContainers.has(item) && isVisible(item));
     if (grid) return { container: grid, anchor: grid.querySelector("xg-icon.xgplayer-autoplay-setting"), floating: false };
     const host = player || video?.parentElement || root;
-    if (host) return { container: host, anchor: null, floating: true };
+    if (host && !rejectedContainers.has(host)) return { container: host, anchor: null, floating: true };
     // 先生 2026-10-19：视频页绝不能没有入口——结构识别失败（如长视频页
     // 无 feed-active-video 容器）时退到页面级浮动按钮，而不是把按钮移除。
-    if (location.pathname.match(/\/(?:video|share\/video)\/\d{10,24}/) || (location.search || "").includes("modal_id=")) {
+    // 先生 2026-11-19：兜底扩大到信息流——只要已识别到目标视频（含滑动的
+    // 个别结构异常卡片），一律给页面级入口，绝不让按钮凭空消失。
+    if (activeVideo().videoId || location.pathname.match(/\/(?:video|share\/video)\/\d{10,24}/)
+        || (location.search || "").includes("modal_id=")) {
       return { container: document.body, anchor: null, floating: true };
     }
     return null;
@@ -1536,14 +1542,21 @@
     let transcribe = container.querySelector(`.${CONTROL_CLASS}.shengjian-transcribe`);
     if (!download) download = createControl("download", "下载", "↓");
     if (!transcribe) transcribe = createControl("transcribe", "转写", "文");
-    if (floating) {
-      if (getComputedStyle(container).position === "static") {
-        container.classList.add("shengjian-player-host");
+    const placeControls = (targetContainer, pageLevel) => {
+      download.classList.toggle("shengjian-page-floating", pageLevel);
+      transcribe.classList.toggle("shengjian-page-floating", pageLevel);
+      download.classList.toggle("shengjian-floating-control", floating && !pageLevel);
+      transcribe.classList.toggle("shengjian-floating-control", floating && !pageLevel);
+      if (floating && !pageLevel
+          && getComputedStyle(targetContainer).position === "static") {
+        targetContainer.classList.add("shengjian-player-host");
       }
-      download.classList.add("shengjian-floating-control");
-      transcribe.classList.add("shengjian-floating-control");
-      if (!download.parentElement) container.append(download);
-      if (!transcribe.parentElement) container.append(transcribe);
+      if (!download.parentElement) targetContainer.append(download);
+      if (!transcribe.parentElement) targetContainer.append(transcribe);
+    };
+    if (floating) {
+      placeControls(container, container === document.body);
+      verifyControlsVisible(container, download, transcribe);
       return;
     }
     container.dataset.shengjianGrid = "true";
@@ -1554,6 +1567,33 @@
       if (!container.contains(download)) container.prepend(download);
       if (!container.contains(transcribe)) container.insertBefore(transcribe, download.nextSibling);
     }
+    verifyControlsVisible(container, download, transcribe);
+  }
+
+  // 先生 2026-11-19「信息流部分视频无按钮」：容器存在但被折叠/遮挡时按
+  // 钮既看不见也点不到，此前无任何诊断。放置后校验可见性，失败即把该容
+  // 器记入本页黑名单并退到页面级固定浮动位；非可视环境（测试沙箱等
+  // body 宽度为 0）跳过校验。
+  function verifyControlsVisible(container, download, transcribe) {
+    if (container === document.body) return;
+    let measurable = false;
+    try {
+      measurable = Boolean(document.body) && document.body.getBoundingClientRect().width > 0;
+    } catch { /* noop */ }
+    if (!measurable) return;
+    try {
+      const rect = download.getBoundingClientRect();
+      if (rect.width >= 8 && rect.height >= 8 && rect.bottom > 0 && rect.top < window.innerHeight) return;
+    } catch { /* 校验失败按不可见处理 */ }
+    rejectedContainers.add(container);
+    reportControlsHiddenOnce("invisible_container");
+    download.remove();
+    transcribe.remove();
+    download.classList.remove("shengjian-floating-control");
+    transcribe.classList.remove("shengjian-floating-control");
+    download.classList.add("shengjian-page-floating");
+    transcribe.classList.add("shengjian-page-floating");
+    document.body.append(download, transcribe);
   }
 
   function queueSync() {

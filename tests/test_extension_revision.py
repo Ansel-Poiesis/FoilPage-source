@@ -125,3 +125,31 @@ def test_unresolvable_share_link_fails_fast(monkeypatch):
     with pytest.raises(DownloadAdapterError) as raised:
         local_api.canonicalize_douyin_share_url("https://v.douyin.com/BuwG3cVrBtI/")
     assert raised.value.code == "douyin_share_unresolvable"
+
+
+def _controls_hidden_body(reason="live_or_ad"):
+    body = _capture_diagnostic_body()
+    body.update({"outcome": "controls_hidden", "reason": reason, "url_source": "controls_sync"})
+    return body
+
+
+def test_controls_hidden_diagnostics_are_accepted_with_reason_and_source():
+    # 先生 2026-11-19：此前 controls_hidden/desktop_offline_queued 的 outcome
+    # 不在白名单，这类上报全部被 400 丢弃——按钮消失零留痕的根因。
+    cleaned = local_api._sanitize_capture_diagnostic(_controls_hidden_body("invisible_container"))
+    assert cleaned["outcome"] == "controls_hidden"
+    assert cleaned["reason"] == "invisible_container"
+    offline = _capture_diagnostic_body()
+    offline.update({"outcome": "desktop_offline_queued", "reason": "", "url_source": "offline_queue"})
+    cleaned_offline = local_api._sanitize_capture_diagnostic(offline)
+    assert cleaned_offline["outcome"] == "desktop_offline_queued"
+
+
+def test_controls_hidden_inconsistent_combos_are_rejected():
+    import pytest
+    for bad in (
+        _controls_hidden_body(""),                       # 缺 reason
+        {**_controls_hidden_body(), "url_source": ""},   # 缺固定来源
+    ):
+        with pytest.raises(ValueError):
+            local_api._sanitize_capture_diagnostic(bad)

@@ -2873,7 +2873,7 @@ test("switching videos clears both reused controls' old failure descriptions", a
   const buttons = labels.map(label => ({title:label, getAttribute:key => key === "aria-label" ? label : null}));
   const query = sandbox.document.querySelectorAll;
   sandbox.document.querySelectorAll = selector => selector === ".shengjian-player-button" ? buttons : query(selector);
-  sandbox.document.body.querySelector = () => ({parentElement:sandbox.document.body, classList:{add(){}}});
+  sandbox.document.body.querySelector = () => ({parentElement:sandbox.document.body, classList:{add(){}, toggle(){}, remove(){}}});
   sandbox.getComputedStyle = () => ({position:"relative"});
   let sync;
   sandbox.requestAnimationFrame = fn => {sync = fn;};
