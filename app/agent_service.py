@@ -61,8 +61,8 @@ def apply_agent_translation(
             vision_frames_value = 0
         updated.update({
             "content_mode": "article",
-            "prompt_version": "agent-v3-readable-fidelity",
-            "agent_prompt_version": "agent-v3-readable-fidelity",
+            "prompt_version": "agent-v4-clean-body-doubt-tail",
+            "agent_prompt_version": "agent-v4-clean-body-doubt-tail",
             "agent_editing_level": str(getattr(result, "editing_level", "") or settings.get("agent_editing_level") or "balanced"),
             "agent_profile": result.profile,
             "agent_model": stage.model if stage.mode == "hosted" else result.model,

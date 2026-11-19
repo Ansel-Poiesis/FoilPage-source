@@ -8,6 +8,7 @@ import re
 import hashlib
 import shutil
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -200,6 +201,9 @@ class DownloadCoordinator:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
+        # 代理隧道探针（先生 2026-11-19）：60s 节流；隧道关闭（含启动时本就
+        # 关闭）即统一重下被拦截的任务。
+        self._vpn_probe_at = 0.0
         self._submission_lock = threading.RLock()
         self._session_lock = threading.RLock()
         # Browser credentials are deliberately process-memory only. They are
@@ -1029,6 +1033,50 @@ class DownloadCoordinator:
             swept.append(item["id"])
         return swept
 
+    def retry_vpn_blocked_tasks(self, *, max_age_hours: float = 48.0, limit: int = 20) -> list[str]:
+        """代理关闭后统一重下（先生 2026-11-19）：收集带 vpn_tunnel 证据的
+        终态失败任务回队。限 48h 内、每任务 vpn_auto_retries 封顶 3 次，
+        防止 VPN 反复开关造成下载风暴。"""
+        cutoff = datetime.now() - timedelta(hours=max_age_hours)
+        retried: list[str] = []
+        for row in self.store.list(("failed",), limit=200):
+            error = row.get("error") or {}
+            if not (error.get("diagnostic") or {}).get("vpn_tunnel"):
+                continue
+            try:
+                requested = datetime.fromisoformat(str(row.get("requested_at") or ""))
+            except ValueError:
+                continue
+            if requested < cutoff:
+                continue
+            options = dict(row.get("options") or {})
+            if int(options.get("vpn_auto_retries") or 0) >= 3:
+                continue
+            try:
+                self.store.retry(row["id"])
+            except (DownloadNotFoundError, DownloadStateError):
+                continue
+            options["vpn_auto_retries"] = int(options.get("vpn_auto_retries") or 0) + 1
+            self.store.transition(row["id"], "received", options=options)
+            retried.append(row["id"])
+            if len(retried) >= limit:
+                break
+        if retried:
+            log.info("vpn tunnel cleared: auto-retried %d blocked downloads %s", len(retried), retried)
+        return retried
+
+    def _probe_vpn_state(self) -> None:
+        """每 60s 探一次隧道状态；不在世（含启动时本就不在）即统一重下。
+
+        重复探测是廉价空扫：失败任务只有带 vpn_tunnel 证据才会被收集，
+        而「带证据」只在隧道在世时产生——隧道关闭期间的失败不会被重放。"""
+        now = time.monotonic()
+        if now - self._vpn_probe_at < 60:
+            return
+        self._vpn_probe_at = now
+        if not active_vpn_tunnel():
+            self.retry_vpn_blocked_tasks()
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             # Handoff waits for a paired extension, not for a fixed wall-clock
@@ -1038,6 +1086,10 @@ class DownloadCoordinator:
                 self.sweep_stale_pending()
             except Exception:
                 log.exception("stale pending sweep failed")
+            try:
+                self._probe_vpn_state()
+            except Exception:
+                log.exception("vpn state probe failed")
             with self._submission_lock:
                 item = self.store.claim_next()
             if item is None:
@@ -1499,7 +1551,7 @@ class DownloadCoordinator:
             "share_body", "share_hashtags", "share_raw", "referer", "user_agent",
             "mode", "browser_fallback", "fallback_stage", "browser_attempted", "rejected_media",
             "cover_url", "gallery_images", "gallery_done",
-            "media_candidate_ages_ms", "recapture_of",
+            "media_candidate_ages_ms", "recapture_of", "vpn_auto_retries",
         }
         unknown = set(options) - allowed
         if unknown:
@@ -1530,6 +1582,13 @@ class DownloadCoordinator:
             or not re.fullmatch(r"[a-f0-9]{12}", options["recapture_of"])
         ):
             raise DownloadAdapterError("invalid_options", "重捕获血缘无效")
+        # 代理关闭后统一重下的每任务计数（先生 2026-11-19），封顶 3。
+        if "vpn_auto_retries" in options and (
+            not isinstance(options["vpn_auto_retries"], int)
+            or isinstance(options["vpn_auto_retries"], bool)
+            or not 0 <= options["vpn_auto_retries"] <= 3
+        ):
+            raise DownloadAdapterError("invalid_options", "代理自动重试计数无效")
         if "browser_fallback" in options and not isinstance(options["browser_fallback"], bool):
             raise DownloadAdapterError("invalid_options", "browser_fallback 必须是布尔值")
         if options.get("fallback_stage") not in (None, "browser", "resolver"):

@@ -54,7 +54,7 @@ def test_every_level_bans_traditional_output_and_quantifies_retention(level):
     prompt = _full_prompt(level)
     assert "简体中文" in prompt
     assert "成稿字数不少于原文的" in prompt
-    assert "〔待确认：原词 [mm:ss]〕" in prompt
+    assert "「？」原词 [mm:ss]" in prompt and "## 存疑" in prompt  # 2026-11-19 存疑文末化
 
 
 def test_light_level_forbids_merging_and_structured_forbids_reordering():
@@ -187,6 +187,89 @@ def test_doubt_markers_get_deterministic_timestamp_backfill():
     assert _backfill_doubt_timestamps("〔待确认：阿尔法〕", "没有定位标记的原文") == "〔待确认：阿尔法〕"
 
 
+def test_inline_doubt_markers_are_moved_to_end_section():
+    """2026-11-19 存疑文末化：正文无行内标记，清单集中文末并回填定位。"""
+    from engine.agent_client import _normalize_doubt_section
+
+    timestamped = "[0:12-0:15] 第一句话有存疑词阿尔法。" + chr(10) + "[1:03-1:08] 第二段提到直直木奶茶。"
+    markdown = ("# 标题" + chr(10) + chr(10) + "第一段〔待确认：阿尔法〕继续。"
+                + chr(10) + chr(10) + "第二段提到直直木〔待确认：直直木〕。")
+    out = _normalize_doubt_section(markdown, timestamped)
+    body = out.split("## 存疑", 1)[0]
+    assert "〔待确认" not in body and "「？」" not in body, "正文必须干净"
+    tail = out.split("## 存疑", 1)[1]
+    assert "- 「？」阿尔法 [0:12-0:15]" in tail
+    assert "- 「？」直直木 [1:03-1:08]" in tail
+    assert tail.count("- 「？」") == 2
+
+
+def test_end_doubt_section_is_normalized_and_capped():
+    """模型已按文末格式输出：保留并补定位，超 5 条截断。"""
+    from engine.agent_client import _normalize_doubt_section
+
+    timestamped = "[0:10-0:12] 词一的内容。" + chr(10) + "[0:20-0:22] 词二的内容。"
+    names = "一二三四五六七"
+    items = "".join(f"{chr(10)}- 「？」词{name}（推测：词{name}正）" for name in names)
+    markdown = "# 标题" + chr(10) + chr(10) + "正文。" + chr(10) + chr(10) + "## 存疑" + items
+    out = _normalize_doubt_section(markdown, timestamped)
+    body, tail = out.split("## 存疑", 1)
+    assert "「？」" not in body
+    assert "- 「？」词一 [0:10-0:12]（推测：词一正）" in tail, "漏定位的清单行按原文回填"
+    assert tail.count("- 「？」") == 5, "清单上限 5 条"
+
+
+def test_no_doubt_items_leave_no_section():
+    """无存疑词时不输出文末小节。"""
+    from engine.agent_client import _normalize_doubt_section
+
+    markdown = "# 标题" + chr(10) + chr(10) + "干净的正文。"
+    assert _normalize_doubt_section(markdown, "[0:10-0:12] 干净的正文。") == markdown
+
+
+def test_fabricated_numbers_ignore_end_doubt_section():
+    """存疑清单的 [mm:ss] 定位数字不是成文数字，不触发保真回退。"""
+    from engine.agent_client import _fabricated_numbers
+
+    raw = "有人提到直直木奶茶和电子肠这些词。" * 20
+    markdown = ("# 标题" + chr(10) + chr(10) + "正文提到直直木奶茶。" + chr(10) + chr(10)
+                + "## 存疑" + chr(10) + chr(10) + "- 「？」直直木 [12:03-12:08]（推测：植脂末）")
+    assert _fabricated_numbers(raw, markdown) == []
+
+
+def test_hosted_vision_gate_by_effective_model():
+    """2026-11-19 托管视觉：deepseek-flash 开、qwen 默认档与 byok deepseek 预设关。"""
+    from engine.agent_client import _vision_capable
+
+    hosted = {"agent_billing_mode": "hosted"}
+    assert _vision_capable({**hosted, "agent_model": "deepseek-flash"}) is True
+    assert _vision_capable({**hosted, "agent_model": "DeepSeek-Flash"}) is True
+    assert _vision_capable({**hosted, "agent_model": "qwen-plus"}) is False
+    assert _vision_capable({**hosted, "agent_model": "", "agent_hosted_model": "deepseek-flash"}) is True
+    assert _vision_capable({"agent_billing_mode": "byok", "agent_provider": "deepseek",
+                            "agent_model": "deepseek-chat"}) is False
+
+
+def test_rewrite_moves_inline_doubts_to_tail(tmp_path):
+    """端到端：模型输出行内标记时，成稿正文干净、清单在文末且不触发保真回退。"""
+    from unittest.mock import patch
+    from engine.agent_client import rewrite_transcript
+
+    settings = SettingsStore(base_dir=tmp_path).defaults()
+    settings.update(agent_api_key="k", agent_profile="knowledge",
+                    agent_editing_level="balanced", agent_vision_enabled=False)
+    raw = "大家讲到直直木这个词，还有别的细节。本地识别可以在家用电脑运行，成本很低，隐私不出本机。" * 3
+    article = ("<!-- FoilPage 标签: 测试 -->" + chr(10) + "# 标题" + chr(10) + chr(10)
+               + "正文讲直直木〔待确认：直直木〕与本地识别，细节保持原样，顺序与限定条件都不动，也不改写说话人的立场。"
+               + chr(10) + chr(10)
+               + "成稿继续展开原有的例子与限定条件，不写原文没有的数字，也不改变任何立场，成稿字数不少于原文的百分之八十五。")
+    with patch("engine.agent_client._chat", return_value=article):
+        result = rewrite_transcript(raw, settings)
+    assert result.fidelity_fallback is False
+    body = result.markdown.split("## 存疑")[0]
+    assert "〔待确认" not in body and "「？」" not in body
+    assert "- 「？」直直木" in result.markdown
+
+
 def test_fidelity_floor_is_tier_aware():
     """高填充口播的合法成文不因固定 55% 线被误判回退。"""
     from engine.agent_client import _FIDELITY_FLOORS, _needs_fidelity_fallback
@@ -245,11 +328,15 @@ def test_single_number_correction_survives_fabrication_floor(tmp_path):
 
 def test_doubt_marker_bar_and_cap_are_in_prompt():
     """2026-11-04 病例：5182 字成稿带 14 处待确认（含"鸡蛋""千万"这类常用词）。
-    标注必须抬高门槛并限量，专有名词通顺即放行。"""
+    2026-11-19 起存疑移到文末清单：上限 5 条、正文禁行内标记；错字规则覆盖生活专名。"""
     prompt = _full_prompt("balanced")
-    assert "全文不超过 3 处" in prompt
+    assert "全文不超过 5 处" in prompt
+    assert "正文中不得出现〔待确认〕" in prompt
     system = _writer_system_prompt_for_test()
     assert "搭配明显生硬的常用词按语境直接修正" in system  # 2026-11-17 优化版措辞
+    assert "淀粉肠" in system and "植脂末" in system  # 2026-11-19 生活专名领域词表
+    assert "不得照抄该段首句" in system  # 小标题不得与段首句重复
+    assert "有一句话说说" in _full_prompt("light")  # light 档口误叠字微修
 
 
 def _writer_system_prompt_for_test() -> str:

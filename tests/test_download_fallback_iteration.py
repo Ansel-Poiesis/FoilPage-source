@@ -511,3 +511,57 @@ def test_both_channel_failure_carries_candidate_age_and_lineage_diagnostic(coord
     diagnostic = failed["error"]["diagnostic"]
     assert diagnostic["candidate_ages_ms"] == [45000, 950000]
     assert diagnostic["recapture_of"] == "a1b2c3d4e5f6"
+
+
+def _terminal_failure(coordinator, url, *, code="source_rate_limited", tunnel="", retries=0):
+    item = coordinator.submit(url, options={"transcribe_after_download": False,
+                                            **({"vpn_auto_retries": retries} if retries else {})})
+    coordinator.store.transition(item["id"], "resolving")
+    diagnostic = {"vpn_tunnel": tunnel} if tunnel else {"phase": "download_failure"}
+    coordinator.store.transition(item["id"], "failed", error={
+        "code": code, "message": "B 站 412", "retryable": True, "diagnostic": diagnostic,
+    })
+    return item["id"]
+
+
+def test_vpn_blocked_tasks_retry_together_once_tunnel_clears(coordinator):
+    vpn_a = _terminal_failure(coordinator, "https://www.bilibili.com/video/BV1vpnBlockedAA", tunnel="WindscribeWireguard")
+    vpn_b = _terminal_failure(coordinator, "https://www.bilibili.com/video/BV1vpnBlockedBB", tunnel="WindscribeWireguard")
+    plain = _terminal_failure(coordinator, "https://www.bilibili.com/video/BV1plainFailCC", code="network_error")
+
+    retried = coordinator.retry_vpn_blocked_tasks()
+    assert set(retried) == {vpn_a, vpn_b}, "只重下带 vpn_tunnel 证据的任务"
+    assert coordinator.store.get(vpn_a)["status"] == "received"
+    assert coordinator.store.get(vpn_a)["options"]["vpn_auto_retries"] == 1
+    # 普通失败不被波及：仍为终态且未获得自动重试计数。
+    plain_row = coordinator.store.get(plain)
+    assert plain_row["status"] == "failed"
+    assert not plain_row["options"].get("vpn_auto_retries")
+
+
+def test_vpn_retry_is_capped_per_task(coordinator):
+    capped = _terminal_failure(coordinator, "https://www.bilibili.com/video/BV1vpnCappedAA",
+                                tunnel="t", retries=3)
+    assert coordinator.retry_vpn_blocked_tasks() == []
+    assert coordinator.store.get(capped)["status"] == "failed"
+    once = _terminal_failure(coordinator, "https://www.bilibili.com/video/BV1vpnCappedBB", tunnel="t")
+    assert coordinator.retry_vpn_blocked_tasks() == [once]
+    # 重下后再次因代理失败：额度内（第 2 次）仍可重试，第 3 次后封顶。
+    coordinator.store.transition(once, "resolving")
+    coordinator.store.transition(once, "failed", error={
+        "code": "source_rate_limited", "message": "代理又开了", "retryable": True,
+        "diagnostic": {"vpn_tunnel": "t"},
+    })
+    assert coordinator.retry_vpn_blocked_tasks() == [once]
+    coordinator.store.transition(once, "resolving")
+    coordinator.store.transition(once, "failed", error={
+        "code": "source_rate_limited", "message": "代理又开了", "retryable": True,
+        "diagnostic": {"vpn_tunnel": "t"},
+    })
+    assert coordinator.retry_vpn_blocked_tasks() == [once], "第 3 次仍在额度内"
+    coordinator.store.transition(once, "resolving")
+    coordinator.store.transition(once, "failed", error={
+        "code": "source_rate_limited", "message": "代理又开了", "retryable": True,
+        "diagnostic": {"vpn_tunnel": "t"},
+    })
+    assert coordinator.retry_vpn_blocked_tasks() == [], "第 3 次后封顶"

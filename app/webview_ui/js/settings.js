@@ -143,7 +143,7 @@ window.Settings = (() => {
   const CUSTOM_PROFILE_TEMPLATE = {
     id: "",
     name: "新的整理策略",
-    system_prompt: "你是 FoilPage 的原文保真校订编辑。保持原文顺序、语气、例子和限定条件，只修复明确的 ASR 错字、同音字、标点、断句和明显赘词；不确定时保留原词并标记待确认，禁止摘要、重排、扩写或编造。只输出 Markdown，第一行是一级标题。",
+    system_prompt: "你是 FoilPage 的原文保真校订编辑。保持原文顺序、语气、例子和限定条件，只修复明确的 ASR 错字、同音字、标点、断句和明显赘词；不确定时保留原词并记入文末「## 存疑」清单（每行 `- 「？」原词 [mm:ss]`），禁止摘要、重排、扩写或编造。只输出 Markdown，第一行是一级标题。",
     enabled: true,
     model: "",
     temperature: null,
@@ -747,8 +747,9 @@ window.Settings = (() => {
     }, { number: true });
     g.appendChild(row("超时（秒）", "", timeout));
     const visionToggle = toggleEl(!!s().agent_vision_enabled, () => save({ agent_vision_enabled: !s().agent_vision_enabled }), "agent_vision_enabled");
-    visionToggle.disabled = hostedMode;
-    g.appendChild(row("启用字幕视觉校对", hostedMode ? "托管目前仅支持文本；视觉核对需切换到自带密钥" : "发现视频帧字幕时，优先用画面核对含糊词；无法确认时保留原词并标记待确认", visionToggle));
+    // 2026-11-19 托管视觉：deepseek-flash 原生多模态可开；默认档（qwen-plus）
+    // 仍为纯文本，开关保持可切但运行时不生效（engine 侧按生效模型门控）。
+    g.appendChild(row("启用字幕视觉校对", hostedMode ? "deepseek-flash 托管档支持画面核对；默认档为纯文本，此开关不生效" : "发现视频帧字幕时，优先用画面核对含糊词；无法确认时保留原词并记入文末存疑清单", visionToggle));
     const visionModel = inputEl(s().agent_vision_model || PROVIDER_PRESETS.mimo.model, (v) => save({ agent_vision_model: v }));
     g.appendChild(row("视觉模型", `留空跟随主模型；建议与主模型同厂商（当前预设建议 ${PROVIDER_PRESETS.mimo.model}）`, visionModel));
     const visionFrames = inputEl(String(s().agent_vision_frame_count || 6), (v) => {
