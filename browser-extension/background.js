@@ -394,6 +394,7 @@ async function handleDesktopDouyinDownload(message) {
   desktopRequestsInFlight.add(requestId);
   let claimed = false;
   let session = null;
+  let capturePathUsed = false;
   let phase = "desktop_dispatch";
   try {
     // Claim before reading credentials. A reconnect or a second paired profile
@@ -402,14 +403,35 @@ async function handleDesktopDouyinDownload(message) {
       method: "POST", body: "{}",
     });
     claimed = true;
+    // 先生 2026-11-19「粘贴链接必败」：粘贴流程没有页面捕获，原样只交
+    // Cookie 会撞详情解析墙。按 videoId 复用已开标签的新鲜捕获；没有就
+    // 后台开一个标签等捕获（签名地址只能来自真实页面会话），候选随回执
+    // 交桌面走直下通道。
+    const canonicalVideoId = videoIdFromPageUrl(url);
+    const hasMedia = value => Boolean(value && (value.mediaUrl || (value.mediaCandidates || []).some(Boolean)));
+    let fresh = canonicalVideoId ? await askTabsForFreshMedia(canonicalVideoId).catch(() => null) : null;
+    if (canonicalVideoId && !hasMedia(fresh) && typeof chrome.tabs?.create === "function") {
+      await notifyTabs("正在后台打开视频页以获取下载地址…").catch(() => {});
+      try { await chrome.tabs.create({ url, active: false }); } catch { /* 开不了标签就只能走解析墙 */ }
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        fresh = await askTabsForFreshMedia(canonicalVideoId).catch(() => null);
+        if (hasMedia(fresh)) break;
+      }
+    }
     phase = "extension_authorization";
-    session = await oneShotDouyinSession();
+    if (hasMedia(fresh)) capturePathUsed = true;
+    else session = await oneShotDouyinSession();
     phase = "local_api_submit";
     const result = await request(`/v1/desktop-downloads/${requestId}`, {
       method: "POST",
       body: JSON.stringify({
-        browser_session: session,
+        browser_session: session || [],
         user_agent: String(globalThis.navigator?.userAgent || "").slice(0, 512),
+        ...(fresh?.mediaUrl ? { media_url: String(fresh.mediaUrl).slice(0, 4096) } : {}),
+        ...(Array.isArray(fresh?.mediaCandidates) && fresh.mediaCandidates.length
+          ? { media_candidates: fresh.mediaCandidates.slice(0, 8) } : {}),
       }),
     });
     const job = result?.job;
@@ -425,7 +447,7 @@ async function handleDesktopDouyinDownload(message) {
       title,
       phase,
       channel: "browser_extension",
-      code: session ? "extension_error" : "douyin_session_unavailable",
+      code: (session || capturePathUsed) ? "extension_error" : "douyin_session_unavailable",
       message: detail,
       diagnostic: {
         error_name: String(error?.name || "Error").slice(0, 80),

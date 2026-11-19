@@ -18,6 +18,7 @@ import pytest
 from app.controller import AppController
 from app.download_coordinator import DownloadCoordinator
 from app.local_api import LocalApiServer, MAX_BODY_BYTES
+from app import local_api
 from engine.downloader import DownloadAdapterError
 from engine.media_store import MediaTypeError
 from engine.settings import SettingsStore
@@ -366,7 +367,13 @@ def test_authorized_douyin_session_is_forwarded_without_echoing_secret() -> None
             controller.close()
 
 
-def test_desktop_douyin_link_is_pushed_to_paired_extension_for_one_shot_auth() -> None:
+def test_desktop_douyin_link_is_pushed_to_paired_extension_for_one_shot_auth(monkeypatch) -> None:
+    # 先生 2026-11-19：桌面粘贴的分享短链先在桌面侧规范化为详情页 URL，
+    # 扩展才可能按 videoId 开标签页捕获；扩展回执可携带媒体候选走直下。
+    monkeypatch.setattr(
+        local_api, "_resolve_share_redirect",
+        lambda url: "https://www.douyin.com/video/7678647295793307065?previous_page=web_code_link",
+    )
     with tempfile.TemporaryDirectory(prefix="local_api_desktop_douyin_") as temp:
         controller = logged_in_controller(SettingsStore(base_dir=Path(temp) / "data"))
         coordinator = StubCoordinator()
@@ -406,7 +413,7 @@ def test_desktop_douyin_link_is_pushed_to_paired_extension_for_one_shot_auth() -
             pushed = json.loads(client_file.read(frame_length).decode("utf-8"))
             assert pushed["type"] == "desktop-douyin-download"
             assert pushed["request_id"] == request_id
-            assert pushed["url"] == "https://v.douyin.com/short-id"
+            assert pushed["url"] == "https://www.douyin.com/video/7678647295793307065"
 
             status, claimed, _ = call(
                 server, "POST", f"/v1/desktop-downloads/{request_id}/claim",
@@ -422,12 +429,16 @@ def test_desktop_douyin_link_is_pushed_to_paired_extension_for_one_shot_auth() -
                         "path": "/", "secure": True,
                     }],
                     "user_agent": "test-agent",
+                    "media_url": "https://v26-web.douyinvod.com/video/tos/paste.mp4?sig=fresh",
+                    "media_candidates": ["https://v26-web.douyinvod.com/video/tos/paste.mp4?sig=fresh"],
                 },
             )
             thread.join(timeout=2)
             assert status == 202 and submitted["job"]["status"] == "received"
             assert outcome["job"]["id"] == submitted["job"]["id"]
-            assert coordinator.jobs[0]["url"] == "https://v.douyin.com/short-id"
+            assert coordinator.jobs[0]["url"] == "https://www.douyin.com/video/7678647295793307065"
+            assert coordinator.media_urls[0].startswith("https://v26-web.douyinvod.com/")
+            assert coordinator.media_candidates[0]
             assert coordinator.jobs[0]["title"] == "桌面粘贴"
             assert coordinator.jobs[0]["options"]["transcribe_after_download"] is False
             assert coordinator.sessions[0][0]["value"] == "secret"
@@ -749,13 +760,18 @@ def test_desktop_cookie_failure_is_written_as_a_download_task() -> None:
             controller.close()
 
 
-def test_desktop_extension_unavailable_failure_is_written_as_a_download_task() -> None:
+def test_desktop_extension_unavailable_failure_is_written_as_a_download_task(monkeypatch) -> None:
     with tempfile.TemporaryDirectory(prefix="local_api_desktop_unavailable_") as temp:
         controller = logged_in_controller(SettingsStore(base_dir=Path(temp) / "data"))
         coordinator = DownloadCoordinator(controller)
         server = LocalApiServer(controller, coordinator, port=0)
         server.start()
         server._notify_extension_clients = lambda _message: 0
+        # 分享短链在提交前先走桌面侧重定向解析（mock 掉真实网络）。
+        monkeypatch.setattr(
+            local_api, "_resolve_share_redirect",
+            lambda url: "https://www.douyin.com/video/1234567890123456?previous_page=web_code_link",
+        )
         try:
             with pytest.raises(DownloadAdapterError) as raised:
                 server.submit_douyin_link_from_desktop(
@@ -768,7 +784,7 @@ def test_desktop_extension_unavailable_failure_is_written_as_a_download_task() -
             assert task["status"] == "failed"
             assert task["error"]["code"] == "browser_extension_unavailable"
             assert task["error"]["diagnostic"]["phase"] == "desktop_dispatch"
-            assert task["url"] == "https://v.douyin.com/short-id"
+            assert task["url"] == "https://www.douyin.com/video/1234567890123456"
         finally:
             server.stop()
             controller.close()

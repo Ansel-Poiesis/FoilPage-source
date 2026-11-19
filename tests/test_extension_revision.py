@@ -89,3 +89,39 @@ def test_capture_diagnostic_rejects_bad_age_observability():
         body = _capture_diagnostic_body() | bad
         with pytest.raises(ValueError):
             local_api._sanitize_capture_diagnostic(body)
+
+
+def test_share_short_links_canonicalize_to_detail_pages(monkeypatch):
+    monkeypatch.setattr(local_api, "_resolve_share_redirect",
+        lambda url: "https://www.douyin.com/video/7678647295793307065?previous_page=web_code_link")
+    assert local_api.canonicalize_douyin_share_url("https://v.douyin.com/BuwG3cVrBtI/") \
+        == "https://www.douyin.com/video/7678647295793307065"
+    # 非分享链接原样透传（规范化绝不碰正常详情页）。
+    canonical = "https://www.douyin.com/video/7709327519954128162"
+    assert local_api.canonicalize_douyin_share_url(canonical) == canonical
+
+
+def test_note_share_links_and_failures(monkeypatch):
+    monkeypatch.setattr(local_api, "_resolve_share_redirect",
+        lambda url: "https://www.iesdouyin.com/share/note/7678647295793307065/")
+    assert local_api.canonicalize_douyin_share_url("https://v.douyin.com/noteXYZ/") \
+        == "https://www.douyin.com/note/7678647295793307065"
+
+
+def test_unresolvable_share_link_fails_fast(monkeypatch):
+    import pytest
+    from engine.downloader import DownloadAdapterError
+
+    def boom(url):
+        raise OSError("network down")
+
+    monkeypatch.setattr(local_api, "_resolve_share_redirect", boom)
+    with pytest.raises(DownloadAdapterError) as raised:
+        local_api.canonicalize_douyin_share_url("https://v.douyin.com/BuwG3cVrBtI/")
+    assert raised.value.code == "douyin_share_unresolvable"
+
+    monkeypatch.setattr(local_api, "_resolve_share_redirect",
+        lambda url: "https://www.iesdouyin.com/share/user/MS4wLjABAAAA")
+    with pytest.raises(DownloadAdapterError) as raised:
+        local_api.canonicalize_douyin_share_url("https://v.douyin.com/BuwG3cVrBtI/")
+    assert raised.value.code == "douyin_share_unresolvable"

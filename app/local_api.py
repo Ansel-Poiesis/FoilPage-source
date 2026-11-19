@@ -30,6 +30,50 @@ from engine.agent_protocol import AGENT_MAX_BODY_BYTES, AGENT_PROTOCOL_VERSION, 
 
 API_VERSION = "1"
 
+# 抖音分享短链（先生 2026-11-19「粘贴链接必败」）：短链没有页面捕获，
+# 原样提交只会落详情解析墙。桌面先跟随重定向拿规范详情页 URL，扩展才有
+# 机会按 videoId 复用/打开标签页取得签名候选。
+_DOUYIN_SHARE_HOSTS = ("v.douyin.com", "www.iesdouyin.com", "iesdouyin.com")
+_DOUYIN_SHARE_TIMEOUT_SECONDS = 8.0
+
+
+def _resolve_share_redirect(url: str) -> str:
+    """Follow the short-link redirect chain; desktop has no CORS constraints."""
+    import urllib.request
+    request = urllib.request.Request(url, method="GET", headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+    })
+    with urllib.request.urlopen(request, timeout=_DOUYIN_SHARE_TIMEOUT_SECONDS) as response:
+        return str(response.geturl())
+
+
+def canonicalize_douyin_share_url(url: str) -> str:
+    """Return the canonical /video/ or /note/ URL for douyin share links.
+
+    Non-share URLs pass through unchanged. Unresolvable share links raise a
+    readable error: submitting the raw short link is a guaranteed resolver
+    failure, so failing fast with guidance beats a wall error later.
+    """
+    parsed = urlsplit(str(url or ""))
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host not in _DOUYIN_SHARE_HOSTS:
+        return str(url or "")
+    try:
+        final = _resolve_share_redirect(str(url))
+    except (OSError, ValueError) as exc:
+        raise DownloadAdapterError(
+            "douyin_share_unresolvable",
+            "分享短链无法解析：请打开该视频页面后用页面上的按钮下载",
+        ) from exc
+    match = re.search(r"/(?:video|note)/(\d{10,24})", final)
+    if not match:
+        raise DownloadAdapterError(
+            "douyin_share_unresolvable",
+            "分享短链未指向视频详情页：请打开该视频页面后用页面上的按钮下载",
+        )
+    kind = "note" if "/note/" in final else "video"
+    return f"https://www.douyin.com/{kind}/{match.group(1)}"
+
 _EXTENSION_MANIFEST_CACHE: dict[str, str] = {"version": "", "at": 0.0}
 
 
@@ -574,6 +618,7 @@ class LocalApiServer:
             raise DownloadAdapterError(exc.code, str(exc)) from None
         if not self.running:
             raise DownloadAdapterError("service_unavailable", "FoilPage 本地服务未运行")
+        url = canonicalize_douyin_share_url(str(url)[:4096])
         request_id = secrets.token_hex(16)
         pending = {
             "id": request_id,
@@ -780,6 +825,14 @@ class LocalApiServer:
             user_agent = body.get("user_agent", "")
             if not isinstance(user_agent, str):
                 raise ValueError("浏览器信息无效")
+            # 先生 2026-11-19：扩展可随回执带回新鲜媒体候选（粘贴链接流程
+            # 自动开标签页捕获的签名地址），直下通道优先，解析墙仅兜底。
+            media_url = body.get("media_url", "")
+            if not isinstance(media_url, str):
+                media_url = ""
+            media_candidates = body.get("media_candidates")
+            if not isinstance(media_candidates, list):
+                media_candidates = None
             options = {
                 "quality": "best-available",
                 "audio_only": pending["transcribe"],
@@ -792,6 +845,7 @@ class LocalApiServer:
             job = self.coordinator.submit(
                 pending["url"], title=pending["title"], options=options,
                 session_cookies=body.get("browser_session"), mode="local",
+                media_url=media_url[:4096], media_candidates=media_candidates,
             )
             result = {"ok": True, "job": public_download_job(job)}
         except (DownloadAdapterError, DownloadStateError, ValueError) as exc:
