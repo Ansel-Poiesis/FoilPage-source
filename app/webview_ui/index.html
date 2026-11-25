@@ -12,6 +12,7 @@
 <link rel="stylesheet" href="css/onboarding.css">
 <link rel="stylesheet" href="css/setup.css">
 <link rel="stylesheet" href="css/settings-motion.css">
+<link rel="stylesheet" href="css/brand.css">
 </head>
 <body data-theme="dark">
 <a class="skip-link" href="#content">跳到主要内容</a>
@@ -30,7 +31,7 @@
   </aside>
   <main class="main">
     <header class="topbar window-drag-region">
-      <button id="materialBack" class="icon-btn material-back" type="button" aria-label="返回" title="返回" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg></button>
+      <button id="materialBack" class="icon-btn material-back" type="button" aria-label="返回" title="返回" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg><span></span></button>
       <div class="topbar-copy window-drag-region">
         <h1 class="title" id="pageTitle" tabindex="-1">任务</h1>
       </div>
@@ -60,6 +61,7 @@
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <div id="modalRoot"></div>
 <div id="onboardingRoot"></div>
+<script src="js/ui-contract.js"></script>
 <script src="js/native-select.js"></script>
 <script src="js/api.js"></script>
 <script src="js/markdown.js"></script>
@@ -70,9 +72,11 @@
 <script src="js/material-navigation.js"></script>
 <script src="js/text-diff.js"></script>
 <script src="js/workbench.js"></script>
+<script src="js/library-model.js"></script>
 <script src="js/library.js"></script>
 <script src="js/videos.js"></script>
 <script src="js/faq-data.js"></script>
+<script src="js/settings-model.js"></script>
 <script src="js/settings.js"></script>
 <script src="vendor/micromodal.min.js"></script>
 <script src="js/terms-metadata.js"></script>

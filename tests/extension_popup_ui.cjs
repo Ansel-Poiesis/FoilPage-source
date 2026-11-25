@@ -74,7 +74,7 @@ async function openPopup(browser, options = {}) {
     const url = new URL(route.request().url());
     if (url.origin === popupOrigin) {
       const name = url.pathname.slice(1);
-      if (!['popup.html','popup.css','popup.js','popup-model.js','api.js','icons/icon-32.png','icons/icon-48.png','icons/icon-128.png'].includes(name)) {
+      if (!['popup.html','brand.css','popup.css','popup.js','popup-model.js','ui-contract.js','api.js','icons/icon-32.png','icons/icon-48.png','icons/icon-128.png'].includes(name)) {
         return route.abort();
       }
       const contentType = name.endsWith('.css') ? 'text/css'

@@ -9,6 +9,7 @@ import { browserFallbackMediaUrls } from '../browser-extension/fallback-policy.j
 import { pickDouyinResolveCookies } from '../browser-extension/douyin-cookies.js';
 
 const sha256Hex = value => createHash('sha256').update(String(value)).digest('hex');
+const contractSource = await readFile(new URL('../browser-extension/ui-contract.js', import.meta.url), 'utf8');
 
 async function harness(initial) {
   const saved = {}; const sent = []; const calls = []; let job = initial;
@@ -33,6 +34,7 @@ async function harness(initial) {
       if(path.endsWith('/fallback')) { job={...job,status:'awaiting_browser',error:null};return{job:{...job,browser_download:{download_url:'https://v26-web.douyinvod.com/video/tos/fresh.mp4',filename:'fixture.mp4'}}}; }
       return {job};},
   };
+  vm.runInNewContext(contractSource,context);
   vm.runInNewContext(source+'\nglobalThis.fixture={watchLocalTask,pollLocalTask,restoreWatchedTasks,rememberBrowserDownload,takeBrowserDownload};',context);
   await new Promise(resolve=>setImmediate(resolve));
   return {saved,sent,calls,setJob(value){job=value;},...context.fixture};

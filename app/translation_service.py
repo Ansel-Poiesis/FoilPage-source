@@ -15,12 +15,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import uuid
 from pathlib import Path
 from typing import Mapping
 
-from engine.agent_client import AgentError, AgentStage, chat_completion, settle_agent_stages
+from engine.agent_client import AgentError, AgentStage, chat_completion, settle_agent_stages, _check_cancel
 
 TRANSLATION_PROMPT_VERSION = "translation-v1-zh-en"
 _MAX_BATCH_CHARS = 8000
@@ -99,16 +100,27 @@ def _parse_translations(reply: str, count: int) -> list[str]:
     except json.JSONDecodeError:
         start, end = reply.find("{"), reply.rfind("}")
         if start < 0 or end <= start:
-            raise AgentError("翻译返回格式无效")
-        payload = json.loads(reply[start:end + 1])
+            error = AgentError("翻译返回格式无效")
+            error.code = "translation_invalid_response"
+            raise error from None
+        try:
+            payload = json.loads(reply[start:end + 1])
+        except json.JSONDecodeError:
+            error = AgentError("翻译返回格式无效")
+            error.code = "translation_invalid_response"
+            raise error from None
     values = payload.get("translations") if isinstance(payload, dict) else None
     if not isinstance(values, list) or len(values) != count:
-        raise AgentError("翻译段落数与输入不一致")
+        error = AgentError("翻译段落数与输入不一致")
+        error.code = "translation_segment_mismatch"
+        raise error
     cleaned: list[str] = []
     for item in values:
         value = str(item if item is not None else "").strip()
         if not value:
-            raise AgentError("翻译存在空段落")
+            error = AgentError("翻译存在空段落")
+            error.code = "translation_empty_segment"
+            raise error
         cleaned.append(value)
     return cleaned
 
@@ -130,12 +142,38 @@ def _translate_batch(settings: Mapping[str, object], segments: list[str], target
     return _parse_translations(reply, len(segments))
 
 
-def translation_paths(raw_path: Path, target: str) -> tuple[Path, Path]:
+def translation_paths(raw_path: Path, target: str, run_id: str = "") -> tuple[Path, Path]:
     stem = raw_path.stem.removesuffix("_raw")
+    if run_id:
+        if not re.fullmatch(r"[a-f0-9]{24}|[a-f0-9]{32}", run_id):
+            raise ValueError("翻译运行标识无效")
+        stem += f"_译文_{target}.{run_id}"
+    else:
+        stem += f"_译文_{target}"
     return (
-        raw_path.parent / f"{stem}_译文_{target}.md",
-        raw_path.parent / f"{stem}_译文_{target}.segments.json",
+        raw_path.parent / f"{stem}.md",
+        raw_path.parent / f"{stem}.segments.json",
     )
+
+
+def discard_translation(manifest: Mapping[str, object]) -> None:
+    """Remove only this run's generated pair, never a previous flat-name result."""
+    run_id = str(manifest.get("translation_run_id") or "")
+    if not re.fullmatch(r"[a-f0-9]{24}|[a-f0-9]{32}", run_id):
+        return
+    raw = Path(str(manifest.get("raw_path") or "")).expanduser()
+    if not raw.is_absolute():
+        return
+    expected = translation_paths(raw, str(manifest.get("translation_lang") or ""), run_id)
+    for key, path in zip(("translation_path", "translation_segments_path"), expected):
+        candidate = Path(str(manifest.get(key) or "")).expanduser()
+        if candidate == path and candidate.resolve().parent == raw.resolve().parent and not candidate.is_symlink():
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                # A Windows reader can still hold the old file. Text cleanup
+                # recognizes generated run filenames and can collect it later.
+                pass
 
 
 def translate_article(
@@ -150,10 +188,14 @@ def translate_article(
     """
     if direction not in ("auto", "zh-en", "en-zh"):
         raise AgentError("翻译方向无效")
-    source_value = manifest.get("final_path") or manifest.get("raw_path")
-    source = Path(str(source_value or "")).expanduser() if source_value else None
-    if source is None or not source.is_file():
+    sources = (
+        (tab, Path(str(path)).expanduser())
+        for tab in ("final", "raw") if (path := manifest.get(f"{tab}_path"))
+    )
+    match = next(((tab, path) for tab, path in sources if path.is_file()), None)
+    if match is None:
         raise AgentError("未找到可翻译的文本")
+    source_tab, source = match
     try:
         markdown = source.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -164,43 +206,73 @@ def translate_article(
     target = _target_language(markdown, direction)
     effective = dict(settings)
     operation_id = str(effective.get("_agent_operation_id") or uuid.uuid4().hex)
+    run_id = str(effective.get("_translation_run_id") or uuid.uuid4().hex)
+    cancel_check = effective.get("_cancel_check")
+    source_revision = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+    checkpoint = effective.get("_translation_checkpoint")
+    if checkpoint:
+        checkpoint(source_revision=source_revision, source_tab=source_tab,
+                   direction=direction, prompt_version=TRANSLATION_PROMPT_VERSION)
     # 计费：托管模式搭 body 阶段（服务端白名单限制），input_text 传全文。
-    stage = AgentStage(effective, "body", markdown, operation_id)
-    with stage:
-        translations: list[str] = []
-        batch: list[str] = []
-        batch_chars = 0
+    stage = AgentStage(effective, "body", markdown, operation_id, cancel_check=cancel_check)
+    output_base = Path(str(manifest.get("raw_path") or source)).expanduser()
+    article_path, segments_path = translation_paths(output_base, target, run_id)
+    try:
+        with stage:
+            effective = stage.settings
+            if checkpoint:
+                checkpoint(model=stage.model, billing_mode=stage.mode)
+            translations: list[str] = []
+            batch: list[str] = []
+            batch_chars = 0
 
-        def run_batch(current: list[str]) -> list[str]:
-            try:
-                return _translate_batch(effective, current, target)
-            except AgentError:
-                # 段数错位偶发：原批重问一次，仍失败才判失败。
-                return _translate_batch(effective, current, target)
+            def run_batch(current: list[str]) -> list[str]:
+                _check_cancel(cancel_check)
+                try:
+                    return _translate_batch(effective, current, target)
+                except AgentError as exc:
+                    if exc.code != "translation_segment_mismatch":
+                        raise
+                    # 段数错位偶发：原批重问一次，仍失败才判失败。
+                    _check_cancel(cancel_check)
+                    return _translate_batch(effective, current, target)
 
-        for segment in segments:
-            if batch and (len(batch) >= _MAX_BATCH_SEGMENTS or batch_chars + len(segment) > _MAX_BATCH_CHARS):
+            for segment in segments:
+                if batch and (len(batch) >= _MAX_BATCH_SEGMENTS or batch_chars + len(segment) > _MAX_BATCH_CHARS):
+                    translations.extend(run_batch(batch))
+                    batch, batch_chars = [], 0
+                batch.append(segment)
+                batch_chars += len(segment)
+            if batch:
                 translations.extend(run_batch(batch))
-                batch, batch_chars = [], 0
-            batch.append(segment)
-            batch_chars += len(segment)
-        if batch:
-            translations.extend(run_batch(batch))
-        article_path, segments_path = translation_paths(Path(str(manifest["raw_path"])), target)
-        from app.agent_service import _atomic_write
-        _atomic_write(article_path, "\n\n".join(translations) + "\n")
-        _atomic_write(segments_path, json.dumps(
-            [{"src": src, "dst": dst} for src, dst in zip(segments, translations)],
-            ensure_ascii=False, indent=2) + "\n")
+            from app.agent_service import _atomic_write
+            _check_cancel(cancel_check)
+            # Both files are private to this attempt until the caller publishes
+            # their paths together in the database manifest.
+            _atomic_write(segments_path, json.dumps(
+                [{"src": src, "dst": dst} for src, dst in zip(segments, translations)],
+                ensure_ascii=False, indent=2) + "\n")
+            _atomic_write(article_path, "\n\n".join(translations) + "\n")
+    except BaseException:
+        for generated in (article_path, segments_path):
+            try:
+                generated.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
     detected = detect_language(markdown)
     updated = dict(manifest)
     updated.update({
         "translation_status": "done",
         "translation_direction": direction if direction != "auto" else f"{detected}-{target}",
         "translation_lang": target,
+        "translation_source_tab": source_tab,
         "translation_path": str(article_path),
         "translation_segments_path": str(segments_path),
         "translation_error": "",
+        "translation_run_id": run_id,
+        "translation_source_revision": source_revision,
+        "translation_prompt_version": TRANSLATION_PROMPT_VERSION,
     })
     return updated
 

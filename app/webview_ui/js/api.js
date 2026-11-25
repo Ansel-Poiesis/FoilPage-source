@@ -4,6 +4,7 @@
 'use strict';
 
 window.AppApi = (() => {
+  const {errorInfo} = globalThis.FoilPageContract;
   /* pywebview 的注入发生在页面加载早期，可能晚于本脚本执行：
      inWebview 必须每次调用时动态判定，不能一次性缓存。 */
   function bridgeReady() {
@@ -12,14 +13,48 @@ window.AppApi = (() => {
       && typeof window.pywebview.api.get_bootstrap === "function";
   }
 
+  class AppApiError extends Error {
+    constructor(code, message, operation, options = {}) {
+      super(message);
+      this.name = "AppApiError";
+      this.code = code;
+      this.category = errorInfo(code, options.status).category;
+      this.operation = operation;
+      this.retryable = options.retryable === true;
+      this.diagnostic = {operation, stage: "bridge", error_code: code, category: this.category};
+      if (Number.isInteger(options.status) && options.status >= 100 && options.status <= 599) {
+        this.status = options.status;
+        this.diagnostic.status = options.status;
+      }
+    }
+  }
+
+  function normalizeFailure(name, failure) {
+    if (failure instanceof AppApiError) return failure;
+    const suppliedCode = failure && typeof failure.code === "string" ? failure.code : "";
+    const code = /^[A-Za-z0-9_.-]{1,64}$/.test(suppliedCode)
+      ? suppliedCode
+      : failure && failure.name === "AbortError" ? "cancelled" : "bridge_error";
+    return new AppApiError(
+      code,
+      code === "cancelled" ? "操作已取消" : "应用操作未完成，请重试",
+      name,
+      {status: failure && failure.status, retryable: code !== "bridge_error" && failure && failure.retryable === true},
+    );
+  }
+
   async function call(name, ...args) {
-    if (bridgeReady()) {
-      return await window.pywebview.api[name](...args);
+    try {
+      if (bridgeReady()) {
+        return await window.pywebview.api[name](...args);
+      }
+      if (window.__MOCK__ && typeof window.__MOCK__[name] === "function") {
+        return await window.__MOCK__[name](...args);
+      }
+    } catch (failure) {
+      throw normalizeFailure(name, failure);
     }
-    if (window.__MOCK__ && typeof window.__MOCK__[name] === "function") {
-      return await window.__MOCK__[name](...args);
-    }
-    throw new Error("bridge unavailable: " + name);
+    throw new AppApiError("bridge_unavailable", "bridge unavailable: " + name, name);
   }
 
   return {
@@ -112,6 +147,7 @@ window.AppApi = (() => {
     transcribeDownload: (id) => call("transcribe_download", id),
     deleteTasks: (ids) => call("delete_tasks", ids),
     deleteTexts: (ids) => call("delete_texts", ids),
+    deleteLibraryItems: (ids, removeRecords) => call("delete_library_items", ids, removeRecords),
     deleteFiles: (ids) => call("delete_files", ids),
     clearCompleted: () => call("clear_completed"),
     setCategory: (ids, cat) => call("set_category", ids, cat),

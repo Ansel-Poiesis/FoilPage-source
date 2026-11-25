@@ -946,27 +946,27 @@
       <style>
         .card{font:14px/1.55 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
           width:max-content;min-width:min(200px,calc(100vw - 16px));max-width:min(356px,calc(100vw - 16px));box-sizing:border-box;
-          background:rgba(33,47,39,.96);
-          color:#eef3ed;border:1px solid rgba(154,205,174,.28);border-radius:12px;padding:11px 14px 12px;
+          background:var(--fp-content-bg);
+          color:var(--fp-content-text);border:1px solid var(--fp-content-border);border-radius:12px;padding:11px 14px 12px;
           box-shadow:0 10px 34px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.06);
           visibility:hidden;opacity:0;transform:translateY(4px);transition:opacity .16s ease,transform .16s ease;
           cursor:pointer;pointer-events:none}
         .card.show{visibility:visible;opacity:1;transform:none;pointer-events:auto}
-        .main{display:flex;align-items:flex-start;gap:9px;font-weight:600;color:#eef3ed}
-        .dot{width:9px;height:9px;border-radius:50%;background:#9acdae;flex:none;margin-top:6px;
-          box-shadow:0 0 6px rgba(154,205,174,.5)}
+        .main{display:flex;align-items:flex-start;gap:9px;font-weight:600;color:var(--fp-content-text)}
+        .dot{width:9px;height:9px;border-radius:50%;background:var(--fp-content-dot);flex:none;margin-top:6px;
+          box-shadow:0 0 6px var(--fp-content-dot-glow)}
         .text{flex:1;min-width:0;overflow-wrap:anywhere}
         .x{flex:none;cursor:pointer;width:26px;height:26px;margin:-2px -4px 0 0;border:0;border-radius:6px;background:transparent;color:#c0d0c4;font-size:19px;line-height:1;padding:0}
         .x:hover,.actions .no:hover{background:rgba(255,255,255,.09)}
         .card.error .dot{background:#f0909a;box-shadow:0 0 6px rgba(240,144,154,.5)}
-        .card.error{background:#443038;border-color:rgba(240,144,154,.5)}
-        .hint{margin:5px 0 0 18px;color:#c0d0c4;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
-        .hint.actionable{color:#eef3ed;font-size:13px;font-weight:600}
+        .card.error{background:var(--fp-content-error-bg);border-color:var(--fp-content-error-border)}
+        .hint{margin:5px 0 0 18px;color:var(--fp-content-hint);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+        .hint.actionable{color:var(--fp-content-text);font-size:13px;font-weight:600}
         .actions{display:none;flex-wrap:wrap;gap:8px;margin:10px 0 0 18px}
         .actions button{font:inherit;font-size:12.5px;min-height:32px;border-radius:8px;padding:5px 12px;cursor:pointer;border:1px solid transparent}
-        .actions .ok{background:#9acdae;color:#102016;border-color:#9acdae;font-weight:600}
-        .actions .no{background:transparent;color:#c5d0c7;border-color:rgba(154,205,174,.35)}
-        button:focus-visible{outline:2px solid #cee7d5;outline-offset:2px}
+        .actions .ok{background:var(--fp-content-dot);color:var(--fp-content-on-accent);border-color:var(--fp-content-dot);font-weight:600}
+        .actions .no{background:transparent;color:var(--fp-content-secondary-text);border-color:var(--fp-content-button-border)}
+        button:focus-visible{outline:2px solid var(--fp-content-focus);outline-offset:2px}
         @media(prefers-reduced-motion:reduce){.card{transition:none}}
       </style>
       <div class="card" inert>

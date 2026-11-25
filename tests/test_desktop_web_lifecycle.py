@@ -80,6 +80,19 @@ def test_expiry_daily_dedup_is_scoped_to_account_and_outcome():
     assert app._notify_bubble.call_count == 4
 
 
+def test_desktop_worker_environment_freezes_selected_network_route() -> None:
+    app = _lifecycle_app()
+    app.controller.settings = {
+        "download_proxy_policy": "custom",
+        "download_proxy_url": "http://127.0.0.1:7890",
+    }
+    with mock.patch.dict(desktop_web.os.environ, {"HTTP_PROXY": "http://127.0.0.1:1"}, clear=True):
+        environment = app._worker_environment()
+    assert environment["FOILPAGE_WORKER_NETWORK_POLICY"] == "custom"
+    assert environment["HTTP_PROXY"] == environment["ALL_PROXY"] == "http://127.0.0.1:7890"
+    assert environment["NO_PROXY"] == "localhost,127.0.0.1,::1"
+
+
 def test_close_is_idempotent_and_stops_every_owned_component() -> None:
     app = _lifecycle_app()
     timer = app._push_timer

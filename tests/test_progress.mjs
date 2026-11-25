@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import fs from 'node:fs';
 const sandbox={window:{}};
+vm.runInNewContext(fs.readFileSync(new URL('../app/webview_ui/js/ui-contract.js',import.meta.url),'utf8'),sandbox);
 vm.runInNewContext(fs.readFileSync(new URL('../app/webview_ui/js/workbench.js',import.meta.url),'utf8'),sandbox);
 const {stageLines,pipeline,percent}=sandbox.window.Workbench.__progressInternals;
 const lines=task=>JSON.parse(JSON.stringify(stageLines(task)));

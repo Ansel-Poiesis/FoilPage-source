@@ -50,46 +50,7 @@
   // 浮动控件簇（按钮 + pill 一体），对站点改版最鲁棒。
   // ---------------------------------------------------------------------------
 
-  function pillStatusFor(message, error) {
-    const text = String(message || "");
-    if (error) {
-      return {
-        mode: "error",
-        text: /(?:正文|标题)处理失败/.test(text) ? text
-          : /刷新/.test(text) ? "请刷新页面后重试"
-          : /转写/.test(text) ? "转写失败，请在 FoilPage 查看"
-          : /导入/.test(text) ? "已下载，导入 FoilPage 失败"
-          : /回到原视频页|回原视频页/.test(text) ? "请回原视频页重试"
-          : /打开|未运行|未连接/.test(text) ? "请先打开 FoilPage"
-          : /运行时|JavaScript/.test(text) ? "需 JavaScript 运行时，见 FoilPage 设置"
-          : "下载失败，请在 FoilPage 查看",
-      };
-    }
-    if (/任务完成|已完成|下载成功|转写成功/.test(text)) return { mode: "done" };
-    const percent = text.match(/(\d+)%/);
-    if (percent) return { mode: "percent", percent: Math.max(0, Math.min(100, Number(percent[1]))) };
-    if (/转写/.test(text)) return { mode: "text", text: "正在转写" };
-    if (/解析/.test(text)) return { mode: "text", text: "正在解析" };
-    if (/浏览器下载中/.test(text)) return { mode: "text", text: "浏览器下载中" };
-    if (/已在处理|已合并/.test(text)) return { mode: "text", text: "已在处理中" };
-    if (/改用|切换|兜底/.test(text)) return { mode: "text", text: "已换通道重试" };
-    if (/已加入|已提交|已接收/.test(text)) return { mode: "text", text: "已提交下载" };
-    if (/提交|读取/.test(text)) return { mode: "text", text: "正在提交" };
-    // 兜底不再硬截 12 字（会截出病句）：去括号补充后整句交给 pill，
-    // 宽度与省略交给 CSS，title 保留全文。
-    return { mode: "text", text: text.replace(/（[^）]*）/g, "") };
-  }
-
-  // 驻留按内容长度伸缩（与抖音信息窗同一公式）：短确认 ~2.2s 即走，
-  // 长错误最长 8s（要读完指引）；完成固定 4.5s 看勾勾变形；进度态不计时。
-  const PILL_HOLD_MS = { done: 4500 };
-  function pillHoldFor(text, kind) {
-    const len = Math.max(1, String(text || "").replace(/（[^）]*）/g, "").length);
-    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-    if (kind === "done") return PILL_HOLD_MS.done;
-    if (kind === "error") return clamp(2600 + 280 * len, 4000, 8000);
-    return clamp(1200 + 220 * len, 2000, 4000);
-  }
+  const {pillStatusFor, pillHoldFor, PILL_HOLD_MS} = globalThis.FoilPageContract;
 
   const pillTimers = { hide: 0, fade: 0 };
   function findHost() {

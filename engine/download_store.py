@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS cancelled_download_requests (
 
 # 与 media_store 同款的组件版本登记：加列时在 _migrate() 里按版本逐级执行，
 # 保持桌面与 Worker 双进程同时开旧库安全。版本 2 = cover_path（TASK-8.17）。
-_COMPONENT_VERSION = 2
+SCHEMA_VERSION = 2
 
 
 class DownloadStoreError(RuntimeError):
@@ -118,9 +118,9 @@ class DownloadStore:
                 "SELECT version FROM app_schema WHERE component='downloads'"
             ).fetchone()
             current = row["version"] if row else 0
-            if current > _COMPONENT_VERSION:
+            if current > SCHEMA_VERSION:
                 raise DownloadStoreError(
-                    f"下载库版本 {current} 高于当前程序支持版本 {_COMPONENT_VERSION}，请先升级应用"
+                    f"下载库版本 {current} 高于当前程序支持版本 {SCHEMA_VERSION}，请先升级应用"
                 )
             if current < 1:
                 self._conn.execute(
@@ -238,8 +238,7 @@ class DownloadStore:
             self._conn.execute("INSERT OR IGNORE INTO download_request_intents VALUES (?,?)",
                                (request_id, transcribe))
 
-    def list(self, statuses: Iterable[str] | None = None, *, limit: int = 100, url: str | None = None) -> list[DownloadJob]:
-        limit = max(1, min(int(limit), 500))
+    def list(self, statuses: Iterable[str] | None = None, *, limit: int | None = 100, url: str | None = None) -> list[DownloadJob]:
         selected = tuple(dict.fromkeys(statuses or ()))
         if any(status not in DOWNLOAD_STATUSES for status in selected):
             raise DownloadStateError("下载状态非法")
@@ -253,10 +252,27 @@ class DownloadStore:
             conditions.append("url=?")
             parameters.append(url)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        if limit is not None:
+            parameters.append(max(1, min(int(limit), 500)))
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT * FROM download_jobs{where} ORDER BY requested_at DESC, id DESC LIMIT ?",
-                (*parameters, limit),
+                f"SELECT * FROM download_jobs{where} ORDER BY requested_at DESC, id DESC"
+                + (" LIMIT ?" if limit is not None else ""),
+                parameters,
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def recovery_candidates(self) -> list[DownloadJob]:
+        """Find missing ASR links in the controller's shared database, without a UI limit."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT d.* FROM download_jobs AS d
+                  LEFT JOIN jobs AS j ON j.id=d.job_id
+                 WHERE d.status IN ('imported', 'queued', 'transcribing', 'done')
+                   AND j.id IS NULL
+                 ORDER BY d.requested_at, d.id
+                """
             ).fetchall()
         return [self._from_row(row) for row in rows]
 

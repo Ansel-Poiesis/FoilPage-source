@@ -48,10 +48,25 @@ def test_cli_explicit_retry_command_and_legacy_flag_both_dispatch(recording_clie
     assert recording_client[-1] == ("tasks.retry", {"task_id": TASK})
 
 
+@pytest.mark.parametrize("command", ["tasks", "documents"])
+def test_cli_listing_forwards_cursor_and_preserves_old_first_page(command, recording_client, capsys):
+    assert cli.main([command, "list", "--query", "同名资料", "--limit", "200", "--cursor", "previous_page"]) == 0
+    capsys.readouterr()
+    expected = {"query": "同名资料", "limit": 200, "cursor": "previous_page"}
+    if command == "tasks":
+        expected["status"] = ""
+    assert recording_client[-1] == (command + ".list", expected)
+    assert cli.main([command, "list"]) == 0
+    capsys.readouterr()
+    assert "cursor" not in recording_client[-1][1]
+
+
 @pytest.mark.parametrize("arguments", [
     ["documents", "read", "../../settings.json"],
     ["documents", "update", TASK, "--expected-revision", "stale", "--input-file", "ignored.txt"],
     ["tasks", "list", "--limit", "201"],
+    ["tasks", "list", "--cursor", "not valid!"],
+    ["documents", "list", "--cursor", "a" * 1025],
     ["documents", "update-metadata", TASK, "--expected-revision", REVISION],
     ["documents", "update-metadata", TASK, "--expected-revision", REVISION, "--title", " "],
     ["info", "--token", "synthetic-sensitive-argument"],

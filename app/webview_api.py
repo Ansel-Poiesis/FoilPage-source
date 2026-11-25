@@ -19,7 +19,7 @@ WEBVIEW_API_METHODS = frozenset({
     "buyer_verification_stop", "cache_status", "cancel_account_login",
     "cancel_tasks", "check_subscription_service", "check_update", "cleanup_cache",
     "cleanup_orphans", "clear_completed", "complete_account_login", "data_reconcile",
-    "delete_all_models", "delete_files", "delete_model", "delete_tasks", "delete_texts",
+    "delete_all_models", "delete_files", "delete_library_items", "delete_model", "delete_tasks", "delete_texts",
     "delete_video", "download_from_url", "download_model", "email_login_start",
     "email_login_verify", "export_backup", "export_diagnostics", "export_subtitles",
     "get_account_devices", "get_agent_setup_guide", "get_agent_control_config", "get_batch_agent_status",

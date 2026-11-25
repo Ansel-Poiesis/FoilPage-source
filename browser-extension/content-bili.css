@@ -106,10 +106,10 @@
   min-height: 34px !important;
   gap: 8px !important;
   padding: 4px 5px 4px 11px !important;
-  border: 1px solid #53695b !important;
+  border: 1px solid var(--fp-pill-border) !important;
   border-radius: 10px !important;
-  background: #26362d !important;
-  color: #eef5ef !important;
+  background: var(--fp-pill-bg) !important;
+  color: var(--fp-pill-text) !important;
   cursor: pointer !important;
   font-family: inherit !important;
   font-size: 12px !important;
@@ -237,9 +237,9 @@
 }
 
 .shengjian-bili-pill.is-error {
-  background: #472e36 !important;
-  border-color: #a6616f !important;
-  color: #ffe5ea !important;
+  background: var(--fp-pill-error-bg) !important;
+  border-color: var(--fp-pill-error-border) !important;
+  color: var(--fp-pill-error-text) !important;
 }
 
 .shengjian-bili-pill.is-fading {
@@ -276,7 +276,7 @@
 }
 
 /* Terminal copy names the actual outcome; the check supports the text. */
-.shengjian-bili-pill.is-done { background: #e3efe8 !important; color: #28563c !important; border-color: #b8d5c3 !important; }
+.shengjian-bili-pill.is-done { background: var(--fp-pill-done-bg) !important; color: var(--fp-pill-done-text) !important; border-color: var(--fp-pill-done-border) !important; }
 .shengjian-bili-pill.is-done .sj-stage { display: inline-flex !important; gap: 7px !important; align-items: center !important; }
 .shengjian-bili-pill.is-done .sj-num { display: none !important; }
 .shengjian-bili-pill.is-done .sj-text { display: inline-block !important; }

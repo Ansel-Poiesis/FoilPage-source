@@ -1,21 +1,21 @@
 /* Copyright (c) 2026 Ansel | SPDX-License-Identifier: MPL-2.0 */
 :root {
   color-scheme: light dark;
-  --paper: #eef1e9;
-  --surface: #f8faf4;
-  --wash: #e8eee3;
-  --line: #d2dacf;
-  --ink: #24362d;
-  --muted: #57695d;
-  --accent: #36664c;
-  --primary: #254b36;
-  --primary-hover: #326046;
-  --on-primary: #f8fbf6;
-  --success-bg: #dceade;
-  --warn: #7d4e25;
-  --warn-bg: #f4eadd;
-  --error: #973746;
-  --error-bg: #f6e8e9;
+  --paper: var(--fp-popup-paper);
+  --surface: var(--fp-popup-surface);
+  --wash: var(--fp-popup-wash);
+  --line: var(--fp-popup-line);
+  --ink: var(--fp-popup-ink);
+  --muted: var(--fp-popup-muted);
+  --accent: var(--fp-popup-accent);
+  --primary: var(--fp-popup-primary);
+  --primary-hover: var(--fp-popup-primary-hover);
+  --on-primary: var(--fp-popup-on-primary);
+  --success-bg: var(--fp-popup-success-bg);
+  --warn: var(--fp-popup-warn);
+  --warn-bg: var(--fp-popup-warn-bg);
+  --error: var(--fp-popup-error);
+  --error-bg: var(--fp-popup-error-bg);
   font: 14px/1.5 "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   color: var(--ink);
   background: var(--paper);
@@ -84,15 +84,6 @@ button svg { inline-size: 16px; block-size: 16px; flex: none; }
 .job-error:empty { margin: 0; }
 .version { margin-block-start: 10px; text-align: end; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #222d27; --surface: #2a382f; --wash: #334339; --line: #46574c;
-    --ink: #edf3eb; --muted: #b6c5b7; --accent: #b3d9b8;
-    --primary: #c5e2c4; --primary-hover: #d9eed8; --on-primary: #21332a;
-    --success-bg: #344b3a; --warn: #f1c39b; --warn-bg: #44372e;
-    --error: #f6b6be; --error-bg: #4b353b;
-  }
-}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
 }

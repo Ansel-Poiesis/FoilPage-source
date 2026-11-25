@@ -1,5 +1,6 @@
 # Copyright (c) 2026 Ansel
 # SPDX-License-Identifier: MPL-2.0
+import logging
 import re
 from unittest.mock import patch
 
@@ -21,6 +22,65 @@ def test_every_level_requests_paragraphs_headings_and_emphasis(level):
     combined = _writer_system_prompt("knowledge") + _editing_level_prompt(level)
     assert "分段" in combined and "小标题" in combined and "**加粗**" in combined
     assert "成稿" in _editing_level_prompt(level) or "论述点" in _editing_level_prompt(level)
+
+
+def test_layout_rules_ask_for_short_paragraphs_and_bold_in_every_paragraph():
+    """2026-11-25 先生反馈成稿分段少、加粗少：段落收紧到 1-3 句，加粗从"至多一处"
+    改为每段 1-2 处且整句优先。"""
+    system = _writer_system_prompt("knowledge")
+    assert "每段 1-3 句" in system and "至多一处" not in system
+    assert "每段 1-2 处" in system and "整句加粗" in system
+
+
+def test_bold_rule_forbids_rewriting_the_bolded_sentence():
+    """2026-11-25：长文保真降级的疑似诱因是加粗时顺手改写数字——规则明令一字不改。"""
+    assert "被加粗的句子连同数字一字不改" in _writer_system_prompt("knowledge")
+
+
+def test_fidelity_fallback_records_why_it_downgraded(tmp_path, caplog):
+    """2026-11-25：长文降级时好时坏却无从定位——触发项写入结果与日志，供清单落盘。"""
+    settings = SettingsStore(base_dir=tmp_path).defaults()
+    settings.update(agent_api_key="test-key", agent_profile="knowledge", agent_editing_level="balanced", agent_vision_enabled=False)
+    source = "这一段没有任何数字的原话。" * 40
+    caplog.set_level(logging.INFO, logger="shengjian.agent")
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n" + source + "另外还有 37 和 58。"):
+        result = rewrite_transcript(source, settings)
+    assert result.fidelity_fallback is True and result.fidelity_fallback_reason == "numbers"
+    assert any("保真降级" in record.getMessage() and "reason=numbers" in record.getMessage() for record in caplog.records)
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n只有一句。"):
+        assert rewrite_transcript(source, settings).fidelity_fallback_reason == "short"
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n只有一句，多了 37 和 58。"):
+        assert rewrite_transcript(source, settings).fidelity_fallback_reason == "numbers+short"
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n" + source):
+        result = rewrite_transcript(source, settings)
+    assert result.fidelity_fallback is False and result.fidelity_fallback_reason == ""
+
+
+def test_long_paragraphs_are_split_at_sentence_ends_without_touching_words():
+    """2026-11-25 实测：提示词写明每段 1-3 句后，deepseek-flash 在 1.8 万字成稿上仍写出
+    9.3 句/段。代码层按句数硬兜底：只加空行不改字，加粗范围内部不切，小数点不算句末。"""
+    from engine.agent_client import _split_long_paragraphs
+
+    line = "第一句。第二句。第三句。第四句。**第五句是重点。**第六句。"
+    split = _split_long_paragraphs(line)
+    assert split == "第一句。第二句。第三句。\n\n第四句。**第五句是重点。**第六句。"
+    assert "".join(split.split()) == "".join(line.split())
+    assert _split_long_paragraphs("一。二。三。**四。五。**六。") == "一。二。三。\n\n**四。五。**六。"
+    assert _split_long_paragraphs("**重点句。**普通句。另一个重点**在这里**。再一句。最后一句？") == \
+        "**重点句。**普通句。另一个重点**在这里**。\n\n再一句。最后一句？"
+    assert _split_long_paragraphs("小数 3.5 和 3.14 不算句末。二。三。四。") == "小数 3.5 和 3.14 不算句末。二。三。\n\n四。"
+    protected = "# 标题\n\n- 一。二。三。四。\n\n```一。二。三。四。\n```\n\n> 引用一。二。三。四。\n\n<!-- FoilPage 标签: 一 -->"
+    assert _split_long_paragraphs(protected) == protected
+    assert _split_long_paragraphs("一。二。") == "一。二。"
+
+
+def test_rewrite_splits_model_paragraphs_that_exceed_three_sentences(tmp_path):
+    settings = SettingsStore(base_dir=tmp_path).defaults()
+    settings.update(agent_api_key="test-key", agent_profile="knowledge", agent_editing_level="balanced", agent_vision_enabled=False)
+    wall = "第一句。第二句。第三句。第四句。第五句。"
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n" + wall):
+        result = rewrite_transcript(wall, settings)
+    assert result.markdown.endswith("## 小节\n\n第一句。第二句。第三句。\n\n第四句。第五句。\n")
 
 
 def test_fallback_formats_without_dropping_or_reordering_sentences():

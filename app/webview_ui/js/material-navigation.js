@@ -18,10 +18,11 @@ window.MaterialNavigation = (() => {
     const back = document.getElementById('materialBack');
     const destination = history.at(-1);
     back.hidden = !destination;
-    back.title = back.getAttribute('aria-label') || '';
     if (destination) {
-      back.title = '返回' + labels[destination.view];
-      back.setAttribute('aria-label', back.title);
+      const label = '返回' + labels[destination.view];
+      back.title = label;
+      back.setAttribute('aria-label', label);
+      back.querySelector('span').textContent = label;
     }
     back.onclick = () => {
       const entry = history.at(-1);
@@ -37,7 +38,7 @@ window.MaterialNavigation = (() => {
     return /\.(mp4|mkv|mov|avi|wmv|flv|m4v|mpeg|mpg|ts|mts|m2ts|3gp|webm)$/i.test(path || '');
   }
 
-  async function openVideo(taskId, button) {
+  async function openVideo(taskId, button, selectedId = taskId) {
     const serial = ++lookupRequest, from = AppState.currentView;
     button.disabled = true;
     try {
@@ -45,7 +46,7 @@ window.MaterialNavigation = (() => {
       if (serial !== lookupRequest || AppState.currentView !== from) return;
       const current = from === 'library' ? Library.currentTaskId()
         : AppState.selected.size === 1 ? [...AppState.selected][0] : null;
-      if (current !== taskId) return;
+      if (current !== selectedId) return;
       if (!result?.ok || !Array.isArray(result.items)) throw new Error(result?.error || '无法读取视频库');
       const item = result.items.find(video => video.task_ids?.includes(taskId));
       if (!item) { toast('该素材当前未登记在视频库中', 'error'); return; }

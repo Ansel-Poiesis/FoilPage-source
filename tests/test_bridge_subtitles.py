@@ -57,6 +57,9 @@ def test_export_subtitles_writes_srt(tmp_path) -> None:
         ],
     )
     bridge = _make_bridge([_task("j1", str(raw))])
+    bridge.controller.settings["output_dir"] = str(tmp_path)
+    reader = bridge.get_reader("job:j1", "raw")
+    assert reader["ok"] and reader["has_subtitle_timeline"] is True
     dest = tmp_path / "out.srt"
     res = bridge.export_subtitles("job:j1", "srt", str(dest))
     assert res["ok"] is True
@@ -100,6 +103,9 @@ def test_export_subtitles_missing_segments_reports_guidance(tmp_path) -> None:
     raw.parent.mkdir(parents=True, exist_ok=True)
     raw.write_text("旧转写无时间轴", encoding="utf-8")
     bridge = _make_bridge([_task("old", str(raw))])
+    bridge.controller.settings["output_dir"] = str(tmp_path)
+    reader = bridge.get_reader("job:old", "raw")
+    assert reader["ok"] and reader["has_subtitle_timeline"] is False
     res = bridge.export_subtitles("job:old", "srt", str(tmp_path / "x.srt"))
     assert res["ok"] is False
     assert res["code"] == "no_segments"

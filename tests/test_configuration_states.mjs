@@ -462,19 +462,139 @@ test('link drafts and single pending submission persist across navigation; rejec
 test('failed data checks and rejected orphan cleanup never report empty or cleaned data, and allow retry',async()=>{
   const page=await open('settings','data');try{
     await page.evaluate(()=>{
-      window.__cleanupCalls=0;window.__checkFails=true;
+      window.__checkFails=true;
       __MOCK__.data_reconcile=()=>__checkFails?{ok:false,error:'自检读取失败'}:{ok:true,stale_fixed:[],orphan_outputs:[{name:'测试产物',path:'C:\\fixture\\orphan.md'}],orphan_downloads:[]};
-      __MOCK__.cleanup_orphans=async()=>{++__cleanupCalls;await new Promise(resolve=>setTimeout(resolve,120));return __cleanupCalls===1?{ok:false,error:'清理失败，请重试'}:{ok:true,removed_outputs:[],removed_downloads:[]};};
     });
-    await page.getByRole('button',{name:'运行数据自检'}).click();await page.waitForFunction(()=>__configurationToasts.length===1);
-    assert.equal(await page.locator('.reconcile-box').textContent(),'自检读取失败');assert.equal(await page.getByText('未发现孤儿产物。',{exact:true}).count(),0);
-    await page.evaluate(()=>{__checkFails=false;});await page.getByRole('button',{name:'运行数据自检'}).click();
-    await page.locator('.reconcile-box .btn').waitFor();await page.locator('.reconcile-box .btn').click();await page.locator('#dlgOk').click();
-    await page.waitForFunction(()=>__configurationToasts.length===3);assert.equal(await page.evaluate(()=>__configurationToasts.at(-1).kind),'error');
-    assert.match(await page.locator('.reconcile-box').textContent(),/测试产物/);assert.equal(await page.locator('.reconcile-box .btn').isDisabled(),false);
-    await page.locator('.reconcile-box .btn').click();await page.locator('#dlgOk').click();await page.waitForFunction(()=>__configurationToasts.length===4);
+    await holdMock(page,'cleanup_orphans');
+    const scan=page.getByRole('button',{name:'运行数据自检',exact:true});
+    const clean=page.getByRole('button',{name:'清理所选',exact:true});
+    const candidate=page.getByRole('checkbox',{name:'测试产物',exact:true});
+    await scan.click();await page.waitForFunction(()=>__configurationToasts.length===1);
+    assert.equal(await page.locator('.reconcile-box').textContent(),'自检读取失败');
+    assert.equal(await page.getByText('未发现可清理的残留文件。',{exact:true}).count(),0);
+    await page.evaluate(()=>{__checkFails=false;});await scan.click();
+    assert(await candidate.isChecked());
+    await clean.click();await page.locator('#dlgOk').click();
+    await waitForRequest(page,'cleanup_orphans',1);
+    assert(await page.locator('.reconcile-box .reconcile-cleanup').isDisabled());
+    assert(await candidate.isDisabled());
+    assert(await scan.isDisabled());
+    await releaseMock(page,'cleanup_orphans',{ok:false,error:'清理失败，请重试'});
+    await page.waitForFunction(()=>__configurationToasts.length===3);
+    assert.deepEqual(await page.evaluate(()=>__configurationToasts.at(-1)),{message:'清理失败，请重试',kind:'error'});
+    assert(await candidate.isChecked());
+    assert(await clean.isEnabled());
+    await clean.click();await page.locator('#dlgOk').click();
+    await waitForRequest(page,'cleanup_orphans',2);
+    await releaseMock(page,'cleanup_orphans',{ok:true,removed_outputs:[],removed_downloads:[]});
+    await page.waitForFunction(()=>__configurationToasts.length===4);
     assert.match(await page.evaluate(()=>__configurationToasts.at(-1).message),/未被清理/);assert.equal(await page.evaluate(()=>__configurationToasts.some(item=>item.message==='已清理')),false);
+    assert(await candidate.isChecked());
     await shot(page,'settings-data-cleanup-rejected');assert.deepEqual(page.errors,[]);
+  }finally{await page.close();}
+});
+
+test('residue cleanup previews the default range and sends only the confirmed selection',async()=>{
+  const page=await open('settings','data');try{
+    await page.evaluate(()=>{
+      window.__cleanupRequests=[];
+      __MOCK__.data_reconcile=()=>({ok:true,stale_fixed:[],
+        orphan_outputs:[
+          {name:'已勾选的转写目录',path:'C:\\fixture\\output',kind:'cleared_output',bytes:24},
+          {name:'要保留的转写目录',path:'C:\\fixture\\keep',kind:'output',bytes:40},
+        ],
+        orphan_downloads:[{name:'旧下载.mp4',path:'C:\\fixture\\download.mp4',kind:'download',bytes:1024}]});
+      __MOCK__.cleanup_orphans=(outputs, downloads)=>{
+        __cleanupRequests.push([outputs, downloads]);
+        return {ok:true,removed_outputs:outputs,removed_downloads:[]};
+      };
+    });
+    const output=page.getByRole('checkbox',{name:'已勾选的转写目录',exact:true});
+    const kept=page.getByRole('checkbox',{name:'要保留的转写目录',exact:true});
+    const download=page.getByRole('checkbox',{name:'旧下载.mp4',exact:true});
+    const clean=page.getByRole('button',{name:'清理所选',exact:true});
+    await page.getByRole('button',{name:'运行数据自检',exact:true}).click();
+    assert(await output.isChecked());
+    assert(await kept.isChecked());
+    assert.equal(await download.isChecked(),false);
+    await page.getByRole('button',{name:'全选',exact:true}).click();
+    assert(await download.isChecked());
+    await page.getByRole('button',{name:'取消全选',exact:true}).click();
+    assert(await clean.isDisabled());
+    await output.check();
+    await download.check();
+    await clean.click();
+    await page.locator('#dlgCancel').click();
+    assert.deepEqual(await page.evaluate(()=>__cleanupRequests),[]);
+    assert(await output.isChecked());
+    assert(await download.isChecked());
+    await clean.click();
+    await page.locator('#dlgOk').click();
+    await output.waitFor({state:'detached'});
+    assert.deepEqual(await page.evaluate(()=>__cleanupRequests),[[['C:\\fixture\\output'],['C:\\fixture\\download.mp4']]]);
+    assert(await download.isChecked(),'the rejected file remains selected for another attempt');
+    assert.equal(await kept.isChecked(),false,'an unchecked file stays unchecked after a partial cleanup');
+    assert.equal(await page.evaluate(()=>__configurationToasts.at(-1).kind),'error');
+    assert.deepEqual(page.errors,[]);
+  }finally{await page.close();}
+});
+
+test('saved cleanup preferences apply on the next scan and confirmation stays local to residue cleanup',async()=>{
+  const page=await open('settings','data',{settings:{confirm_delete:false}});try{
+    await page.evaluate(()=>{
+      const originalSave=__MOCK__.save_settings;
+      window.__residueSaves=[];
+      window.__cleanupRequests=[];
+      __MOCK__.save_settings=changes=>{
+        __residueSaves.push(changes);
+        return originalSave(changes);
+      };
+      __MOCK__.data_reconcile=()=>({ok:true,stale_fixed:[],
+        orphan_outputs:[{name:'转写过程目录',path:'C:\\fixture\\process'}],
+        orphan_downloads:[{name:'历史下载.mp4',path:'C:\\fixture\\historical.mp4'}]});
+      __MOCK__.cleanup_orphans=(outputs,downloads)=>{
+        __cleanupRequests.push([outputs,downloads]);
+        return {ok:true,removed_outputs:outputs,removed_downloads:downloads};
+      };
+    });
+    const scan=page.getByRole('button',{name:'运行数据自检',exact:true});
+    const clean=page.getByRole('button',{name:'清理所选',exact:true});
+    const preset=page.getByLabel('默认勾选范围',{exact:true});
+    const confirm=page.getByRole('switch',{name:'清理残留前确认',exact:true});
+    const output=page.getByRole('checkbox',{name:'转写过程目录',exact:true});
+    const download=page.getByRole('checkbox',{name:'历史下载.mp4',exact:true});
+    assert.equal(await preset.inputValue(),'outputs');
+    assert.equal(await confirm.getAttribute('aria-checked'),'true');
+    for (const [value,outChecked,dlChecked] of [['none',false,false],['all',true,true],['downloads',false,true]]) {
+      await preset.selectOption(value);
+      await page.waitForFunction(value=>AppState.settings.residue_cleanup_default===value,value);
+      await scan.click();
+      assert.equal(await output.isChecked(),outChecked,value);
+      assert.equal(await download.isChecked(),dlChecked,value);
+      assert.deepEqual(await page.evaluate(()=>__cleanupRequests),[],'scanning never removes any files');
+    }
+    await clean.click();
+    await page.locator('#dlgCancel').click();
+    await confirm.click();
+    await page.waitForFunction(()=>AppState.settings.confirm_residue_cleanup===false);
+    await page.locator('.sitem[data-section=ui]').click();
+    await page.locator('.sitem[data-section=data]').click();
+    assert.equal(await preset.inputValue(),'downloads');
+    assert.equal(await confirm.getAttribute('aria-checked'),'false');
+    assert.equal(await page.evaluate(()=>AppState.settings.confirm_delete),false);
+    assert.deepEqual(await page.evaluate(()=>__residueSaves),[
+      {residue_cleanup_default:'none'},{residue_cleanup_default:'all'},
+      {residue_cleanup_default:'downloads'},{confirm_residue_cleanup:false},
+    ]);
+    await scan.click();
+    assert.equal(await output.isChecked(),false);
+    assert(await download.isChecked());
+    await clean.click();
+    await download.waitFor({state:'detached'});
+    assert.deepEqual(await page.evaluate(()=>__cleanupRequests),[[[],['C:\\fixture\\historical.mp4']]]);
+    assert.equal(await page.locator('#dlgOk').count(),0);
+    assert(await output.isVisible());
+    assert.deepEqual(page.errors,[]);
   }finally{await page.close();}
 });
 

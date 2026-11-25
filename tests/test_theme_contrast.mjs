@@ -65,9 +65,11 @@ test("app.css 每套主题的 faint/muted 对比度 ≥ 4.5:1", async () => {
   assert.ok(count >= 9, `应覆盖深/白岩主题与 8 套社区主题，实际 ${count} 组`);
 });
 
-test("product.css 两套主题的 faint/muted 对比度 ≥ 4.5:1", async () => {
-  const count = await assertThemeContrast("app/webview_ui/css/product.css", "product.css");
-  assert.ok(count >= 2, `实际 ${count} 组`);
+test("product.css 不再拥有主题令牌", async () => {
+  const css = await readFile(new URL("../app/webview_ui/css/product.css", import.meta.url), "utf8");
+  assert.equal(themeBlocks(css).length, 0);
+  assert.doesNotMatch(css, /--(?:bg|surface|text|primary|neo-light):/);
+  assert.doesNotMatch(css, /--foilpage-(?:forest|jade|ivory|copper)/);
 });
 
 test("应用内 toast 具备 aria 播报语义且错误态升级为 alert", async () => {

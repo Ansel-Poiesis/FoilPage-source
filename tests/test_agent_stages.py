@@ -10,6 +10,7 @@ import pytest
 from app.worker import Worker
 from engine.agent_client import AgentError, AgentResult
 from engine.queue_store import QueueStore
+from engine.service_http import network_policy_for
 from engine.settings import SettingsStore, SettingsValidationError
 from account_auth_fixtures import grant_account
 from test_agent_service import FakeResponse
@@ -80,6 +81,38 @@ def test_four_independent_switches_snapshot_and_byok_never_debits(tmp_path, body
         assert reopened.get_manifest("stages")["body_status"] == job["body_status"]
     finally:
         reopened.close()
+
+
+def test_worker_network_route_is_ephemeral_and_never_persisted(tmp_path, monkeypatch):
+    store = QueueStore(str(tmp_path / "q.db"))
+    _enqueue(store, tmp_path)
+    manifest = _manifest(tmp_path)
+    captured = {}
+
+    def fake_agent(value, settings, **_kwargs):
+        captured.update(settings)
+        return {**value, "agent_status": "done", "body_status": "done"}
+
+    monkeypatch.setattr("run_engine.run", lambda *_args, **_kwargs: dict(manifest))
+    monkeypatch.setattr("app.agent_service.apply_agent_translation", fake_agent)
+    route = "http://fixture-user:fixture-pass@127.0.0.1:7890"
+    worker = Worker(
+        store,
+        worker_id="test",
+        agent_settings=grant_account({"agent_enabled": True, "title_optimization_enabled": False}, tmp_path),
+        network_policy=network_policy_for("custom", route),
+    )
+    try:
+        assert worker.step()
+        assert captured["_proxy_route"] == route
+        assert "_proxy_route" not in worker.agent_settings
+        saved = str(store.get_manifest("stages"))
+        manifest_file = Path(manifest["final_path"]).with_name("sample_manifest.json")
+        persisted = saved + manifest_file.read_text(encoding="utf-8")
+        assert "_proxy_route" not in persisted
+        assert "fixture-pass" not in persisted
+    finally:
+        store.close()
 
 
 def test_body_failure_does_not_prevent_title_or_discard_asr(tmp_path):
@@ -249,6 +282,69 @@ def test_byok_http_failures_have_safe_actionable_codes(status, code):
               "fixture-key", [{"role": "user", "content": "原稿"}], cancel_check=None)
     assert caught.value.code == code
     assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("route", [None, "", "http://fixture-user:fixture-pass@127.0.0.1:7890"])
+def test_byok_agent_uses_frozen_proxy_route(route):
+    from engine.agent_client import _chat
+
+    captured = {}
+
+    def fake_urlopen(_request, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse({"choices": [{"message": {"content": "整理结果"}}]})
+
+    settings = {"agent_base_url": "https://fixture.invalid", "agent_model": "fixture"}
+    if route is not None:
+        settings["_proxy_route"] = route
+    with mock.patch("engine.agent_client.urlopen", side_effect=fake_urlopen):
+        assert _chat(settings, "fixture-key", [{"role": "user", "content": "原稿"}], cancel_check=None) == "整理结果"
+    if route is None:
+        assert "proxy_route" not in captured
+    else:
+        assert captured["proxy_route"] == route
+
+
+def test_byok_agent_rejects_socks_route_without_exposing_credentials():
+    from engine.agent_client import _chat
+    from engine.service_http import ServiceHttpError
+
+    failure = ServiceHttpError("proxy_unsupported", "unsupported")
+    with (
+        mock.patch("engine.service_http.open_response", side_effect=failure),
+        pytest.raises(AgentError) as caught,
+    ):
+        _chat(
+            {"agent_base_url": "https://fixture.invalid", "_proxy_route": "socks5://fixture:secret@127.0.0.1:1080"},
+            "fixture-key",
+            [{"role": "user", "content": "原稿"}],
+            cancel_check=None,
+        )
+    assert caught.value.code == "agent_proxy_unsupported"
+    assert caught.value.retryable is False
+    assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("route", ["", "http://fixture-user:fixture-pass@127.0.0.1:7890"])
+def test_hosted_agent_uses_frozen_proxy_route(route):
+    from engine.agent_client import AgentStage
+
+    captured = {}
+
+    def fake_urlopen(_request, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse({"ok": True})
+
+    stage = AgentStage({
+        "agent_billing_mode": "hosted",
+        "subscription_server_url": "https://pay.fixture.invalid",
+        "_agent_device_id": "fixture-device",
+        "_proxy_route": route,
+    }, "body", "原稿", "fixture-operation")
+    stage._configure_hosted()
+    with mock.patch("engine.agent_client.urlopen", side_effect=fake_urlopen):
+        assert stage._post("abort", {}) == {"ok": True}
+    assert captured["proxy_route"] == route
 
 
 def test_worker_persists_safe_auth_failure_and_keeps_transcript(tmp_path):

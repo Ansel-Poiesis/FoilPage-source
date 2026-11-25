@@ -22,6 +22,7 @@ function createFixtureConsole() {
 const APP_VERSION = (
   await readFile(new URL("../app/bridge.py", import.meta.url), "utf8")
 ).match(/APP_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/)[1];
+const contractSource = await readFile(new URL("../browser-extension/ui-contract.js", import.meta.url), "utf8");
 
 const storage = {};
 globalThis.chrome = {
@@ -141,7 +142,7 @@ test("manifest requests only the scoped authorization capability", async () => {
   assert.equal(manifest.content_scripts.length, 4);
   assert.deepEqual(manifest.content_scripts[0], {
     matches: ["https://*.douyin.com/*", "https://douyin.com/*"],
-    js: ["douyin-hosts.js", "content.js"], css: ["content.css"], run_at: "document_start",
+    js: ["douyin-hosts.js", "content.js"], css: ["brand.css", "content.css"], run_at: "document_start",
   });
   // MAIN-world partner observes the page's own aweme detail/feed JSON so the
   // extension can still see a progressive MP4 when the logged-in player hands
@@ -154,7 +155,7 @@ test("manifest requests only the scoped authorization capability", async () => {
   // B 站内容脚本只提交页面 URL 走本地 yt-dlp 轨，不声明 cookies 用途。
   assert.deepEqual(manifest.content_scripts[2], {
     matches: ["https://*.bilibili.com/*", "https://bilibili.com/*"],
-    js: ["content-bili.js"], css: ["content-bili.css"], run_at: "document_idle",
+    js: ["ui-contract.js", "content-bili.js"], css: ["brand.css", "content-bili.css"], run_at: "document_idle",
   });
   assert.doesNotMatch(JSON.stringify(manifest), /webRequest|debugger|douyinvod|bytecdn/iu);
   for (const relativePath of Object.values(manifest.icons)) {
@@ -936,6 +937,7 @@ test("bilibili page helper extracts video ids and never touches cookies", async 
   sandbox.window.top = sandbox;
   sandbox.window.addEventListener = () => {};
   vm.createContext(sandbox);
+  vm.runInContext(contractSource, sandbox, { filename: "ui-contract.js" });
   vm.runInContext(source, sandbox, { filename: "content-bili.js" });
   const internals = sandbox.__shengjianBiliInternals;
   assert.ok(internals?.videoIdFromLocation, "content-bili.js must expose videoIdFromLocation");
@@ -2049,6 +2051,7 @@ test("bilibili pill maps backend progress texts onto pill states", async () => {
   sandbox.window.top = sandbox;
   sandbox.window.addEventListener = () => {};
   vm.createContext(sandbox);
+  vm.runInContext(contractSource, sandbox, { filename: "ui-contract.js" });
   vm.runInContext(source, sandbox, { filename: "content-bili.js" });
   const internals = sandbox.__shengjianBiliInternals;
   assert.ok(internals?.pillStatusFor, "content-bili.js must expose pillStatusFor");
@@ -2144,13 +2147,17 @@ test("youtube page helper extracts video ids across watch/shorts/youtu.be", asyn
     sandbox.window = sandbox;
     sandbox.window.top = sandbox;
     sandbox.window.addEventListener = () => {};
+    vm.createContext(sandbox);
     return sandbox;
+  };
+  const loadYoutube = sandbox => {
+    vm.runInContext(contractSource, sandbox, { filename: "ui-contract.js" });
+    vm.runInContext(source, sandbox, { filename: "content-youtube.js" });
   };
 
   // watch 页：从 query 提取 v 并给出规范 watch URL。
   const watch = buildSandbox("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLxyz&t=42s");
-  vm.createContext(watch);
-  vm.runInContext(source, watch, { filename: "content-youtube.js" });
+  loadYoutube(watch);
   const internals = watch.__shengjianYoutubeInternals;
   assert.ok(internals?.videoIdFromLocation, "content-youtube.js must expose videoIdFromLocation");
   assert.equal(internals.videoIdFromLocation(), "dQw4w9WgXcQ");
@@ -2159,18 +2166,15 @@ test("youtube page helper extracts video ids across watch/shorts/youtu.be", asyn
 
   // Shorts / youtu.be 短链 / 非视频页。
   const shorts = buildSandbox("https://www.youtube.com/shorts/abcdefghijk");
-  vm.createContext(shorts);
-  vm.runInContext(source, shorts, { filename: "content-youtube.js" });
+  loadYoutube(shorts);
   assert.equal(shorts.__shengjianYoutubeInternals.videoIdFromLocation(), "abcdefghijk");
 
   const shortLink = buildSandbox("https://youtu.be/dQw4w9WgXcQ?si=tag");
-  vm.createContext(shortLink);
-  vm.runInContext(source, shortLink, { filename: "content-youtube.js" });
+  loadYoutube(shortLink);
   assert.equal(shortLink.__shengjianYoutubeInternals.videoIdFromLocation(), "dQw4w9WgXcQ");
 
   const home = buildSandbox("https://www.youtube.com/feed/subscriptions");
-  vm.createContext(home);
-  vm.runInContext(source, home, { filename: "content-youtube.js" });
+  loadYoutube(home);
   assert.equal(home.__shengjianYoutubeInternals.videoIdFromLocation(), "");
 
   // 状态语言与 B 站同构：错误 → 可操作文案；JS 运行时缺失有专门提示。
@@ -2192,6 +2196,8 @@ test("manifest registers youtube content script with least-privilege hosts", asy
   assert.ok(youtubeEntry, "content-youtube.js must be registered in the manifest");
   assert.deepEqual(youtubeEntry.matches, ["https://www.youtube.com/*", "https://m.youtube.com/*", "https://youtu.be/*"]);
   assert.ok(youtubeEntry.css?.includes("content-youtube.css"), "youtube entry must carry its stylesheet");
+  assert.equal(youtubeEntry.js[0], "ui-contract.js");
+  assert.equal(youtubeEntry.css[0], "brand.css");
   for (const host of youtubeEntry.matches) {
     assert.ok(manifest.host_permissions.includes(host), `host_permissions must include ${host}`);
   }
@@ -2210,9 +2216,9 @@ test("manifest registers youtube content script with least-privilege hosts", asy
 // ---------------------------------------------------------------------------
 test("bili and youtube pills share one notification state language", async () => {
   const read = (name) => readFile(new URL(`../browser-extension/${name}`, import.meta.url), "utf8");
-  const [biliCss, ytCss, douyinCss, biliJs, ytJs, popupCss] = await Promise.all([
+  const [biliCss, ytCss, douyinCss, biliJs, ytJs, popupCss, contract] = await Promise.all([
     read("content-bili.css"), read("content-youtube.css"), read("content.css"),
-    read("content-bili.js"), read("content-youtube.js"), read("popup.css"),
+    read("content-bili.js"), read("content-youtube.js"), read("popup.css"), read("ui-contract.js"),
   ]);
 
   // 状态语言：百分比态只留数字（隐藏文字）。
@@ -2242,17 +2248,17 @@ test("bili and youtube pills share one notification state language", async () =>
     assert.match(css, /prefers-reduced-motion/);
   }
 
-  // 驻留口径：两站同一公式，按内容长度伸缩（短确认 2-4s / 错误 4-8s / 完成 4.5s）。
+  // 两站只保留 DOM 生命周期，状态解析与驻留公式由同一纯契约拥有。
   for (const js of [biliJs, ytJs]) {
-    assert.match(js, /function pillHoldFor\(/, "pills must compute hold from content length");
-    assert.match(js, /clamp\(2600 \+ 280 \* len, 4000, 8000\)/, "error hold must scale 4-8s");
-    assert.match(js, /clamp\(1200 \+ 220 \* len, 2000, 4000\)/, "text hold must scale 2-4s");
-    assert.doesNotMatch(js, /PILL_HOLD_MS = \{ text:/, "static hold durations must be gone");
+    assert.match(js, /const \{pillStatusFor, pillHoldFor, PILL_HOLD_MS\} = globalThis\.FoilPageContract/);
+    assert.doesNotMatch(js, /function pill(?:Status|Hold)For\(/);
     assert.doesNotMatch(js, /text\.slice\(0,\s*12\)/, "fallback must not hard-truncate into broken phrases");
-    // 关键分类两站齐备（导入失败/回原页/JS 运行时/已合并/换通道）。
-    for (const phrase of ["已下载，导入 FoilPage 失败", "请回原视频页重试", "需 JavaScript 运行时，见 FoilPage 设置", "已在处理中", "已换通道重试"]) {
-      assert.ok(js.includes(phrase), `missing shared classification: ${phrase}`);
-    }
+  }
+  assert.match(contract, /function pillHoldFor\(/);
+  assert.match(contract, /clamp\(2600 \+ 280 \* length, 4000, 8000\)/, "error hold must scale 4-8s");
+  assert.match(contract, /clamp\(1200 \+ 220 \* length, 2000, 4000\)/, "text hold must scale 2-4s");
+  for (const phrase of ["已下载，导入 FoilPage 失败", "请回原视频页重试", "需 JavaScript 运行时，见 FoilPage 设置", "已在处理中", "已换通道重试"]) {
+    assert.ok(contract.includes(phrase), `missing shared classification: ${phrase}`);
   }
 
   // 抖音页内通知已统一走 Shadow DOM 信息窗：content.css 不再有页内通知样式。

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Ansel
 // SPDX-License-Identifier: MPL-2.0
-// Render the canonical FoilPage vector mark into PNG/ICO frames.
-// Small tray/extension sizes use a simpler optical variant from foilpage-small.svg.
+// Render the selected FoilPage artwork into PNG/ICO frames.
+// SVG sources embed the approved raster master; all sizes keep the same artwork.
 // Requires the project's pinned Playwright/Chromium. Run: node build/generate_icons.cjs
 const fs = require('node:fs');
 const path = require('node:path');
@@ -9,6 +9,8 @@ const {chromium} = require('playwright');
 const root = path.resolve(__dirname, '..');
 const iconDir = path.join(root, 'assets', 'icons');
 const crypto = require('node:crypto');
+const masterPath = path.join(iconDir, 'foilpage-master.png');
+const masterSource = fs.readFileSync(masterPath);
 const sourcePath = path.join(iconDir, 'foilpage-source.svg');
 const smallSourcePath = path.join(iconDir, 'foilpage-small.svg');
 const source = fs.readFileSync(sourcePath);
@@ -16,7 +18,7 @@ const smallSource = fs.readFileSync(smallSourcePath);
 const svg = source.toString('utf8');
 const smallSvg = smallSource.toString('utf8');
 const icoSizes = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256];
-const opticalSmallSizes = new Set([16, 20, 24]);
+const opticalSmallSizes = new Set();
 
 function packIco(frames) {
   const header = Buffer.alloc(6 + 16 * frames.length);
@@ -77,12 +79,14 @@ function packIco(frames) {
     fs.writeFileSync(path.join(audit, 'icon-build.json'), JSON.stringify({
       name: 'FoilPage', source: 'assets/icons/foilpage-source.svg', sourceSize: [512,512],
       sourceSha256: crypto.createHash('sha256').update(source).digest('hex'),
+      rasterMaster: 'assets/icons/foilpage-master.png', rasterMasterSize: [1254,1254],
+      rasterMasterSha256: crypto.createHash('sha256').update(masterSource).digest('hex'),
       opticalSmallSource: 'assets/icons/foilpage-small.svg',
       opticalSmallSourceSha256: crypto.createHash('sha256').update(smallSource).digest('hex'),
-      renderViewBox: [0,0,512,512], svgKind: 'native vector', opticalSmallSizes: [...opticalSmallSizes],
+      renderViewBox: [0,0,512,512], svgKind: 'embedded raster', opticalSmallSizes: [...opticalSmallSizes],
       icoSizes, pngSize: 512, transparent: true,
     }, null, 2));
-    process.stdout.write('FoilPage mark: main and small optical vectors rendered to transparent PNG/ICO assets.\n');
+    process.stdout.write('FoilPage mark: selected raster artwork rendered to transparent PNG/ICO assets.\n');
   } finally {
     await browser.close();
   }

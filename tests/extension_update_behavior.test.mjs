@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
+const contractSource = await readFile(new URL('../browser-extension/ui-contract.js', import.meta.url), 'utf8');
 const RUNNING_VERSION = '0.14.1';
 const NEXT_VERSION = '0.14.2';
 const TASK_ID = 'abc123def456';
@@ -123,6 +124,7 @@ async function harness(options = {}) {
   };
   let source = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
   source = source.replace(/^import .*;\r?\n/gm, '');
+  vm.runInNewContext(contractSource, context);
   vm.runInNewContext(source + '\nglobalThis.fixture = { selfUpdateCheck, withExtensionOperation, localTaskWatchers, inFlightBrowserDownloads, desktopRequestsInFlight, fallbacksInFlight, scheduleRecaptureRetry };', context);
   await settle();
   return {

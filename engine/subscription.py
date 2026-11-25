@@ -28,7 +28,8 @@ FREE_CONCURRENCY = 1
 # 订阅月长度：付费计时按 30 天自然月叠加（见 extend_subscription）。
 SUBSCRIPTION_MONTH_DAYS = 30
 
-QUOTA_NOTE = "1 积分 ≈ 2,000 字整理，更重模型 ×3 消耗"
+# 2026-11-25：标题阶段改为固定 1 个基数（服务端同步），不再按正文全文费率另计一次。
+QUOTA_NOTE = "正文 1 积分 ≈ 2,000 字整理，更重模型 ×3；标题优化每条另计 1 次基数"
 
 # 换算示例按实测口径组织：本机 184 条真实转写，字/分钟中位 345（长视频语速更慢）。
 QUOTA_EXAMPLES: tuple[tuple[str, str, str], ...] = (

@@ -22,6 +22,7 @@ from app.controller import AppController  # noqa: E402
 from app.process_manager import WorkerProcessManager, worker_command  # noqa: E402
 from app.worker import Worker  # noqa: E402
 from engine.model_manager import ModelManager, ModelManagerError  # noqa: E402
+from engine.queue_store import QueueStore  # noqa: E402
 from engine.settings import SettingsStore  # noqa: E402
 from model_cache_fixture import write_model_snapshot
 
@@ -193,6 +194,133 @@ def test_controller_recovers_and_cancels_browser_tasks() -> None:
             assert controller.downloads.get(item["id"])["status"] == "cancelled"
         finally:
             controller.close()
+
+
+def test_controller_recovers_all_orphans_behind_newer_terminal_history(tmp_path):
+    import sqlite3
+
+    settings = SettingsStore(base_dir=tmp_path / "data")
+    source = tmp_path / "recoverable.wav"
+    source.write_bytes(b"RIFF-recovery-history")
+    controller = AppController(settings)
+    try:
+        media_id = controller.import_files([str(source)])[0].item["id"]
+        download = controller.downloads.create(
+            "https://youtu.be/recovery", "older recoverable", "youtube",
+            {"transcribe_after_download": True},
+        )
+        controller.downloads.transition(download["id"], "resolving")
+        controller.downloads.transition(download["id"], "downloading")
+        controller.downloads.transition(
+            download["id"], "imported", media_id=media_id, downloaded_path=str(source),
+        )
+        database = controller.settings["database_path"]
+    finally:
+        controller.close()
+    with sqlite3.connect(database) as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(download_jobs)")]
+        template = list(connection.execute("SELECT * FROM download_jobs WHERE id=?", (download["id"],)).fetchone())
+        connection.execute("DELETE FROM download_jobs")
+        for index in range(1001):
+            row = template.copy()
+            row[columns.index("id")] = f"history-{index:04d}"
+            row[columns.index("requested_at")] = f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}"
+            row[columns.index("status")] = "imported" if index < 501 else "failed"
+            connection.execute("INSERT INTO download_jobs VALUES (" + ",".join("?" for _ in row) + ")", row)
+    reopened = AppController(settings)
+    try:
+        jobs = reopened.queue.list_jobs()
+        assert len(jobs) == 1
+        for index in range(501):
+            recovered = reopened.downloads.get(f"history-{index:04d}")
+            assert recovered["status"] == "queued"
+            assert recovered["job_id"] == jobs[0]["id"]
+        assert not reopened.downloads.recovery_candidates()
+        assert len(reopened.downloads.list(("failed",), limit=None)) == 500
+        tasks = reopened.task_rows()
+        assert len(tasks) == 501
+        assert {row["task_id"] for row in tasks} == {
+            jobs[0]["id"], *(f"history-{index:04d}" for index in range(501, 1001)),
+        }
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("component", ["media", "downloads", "queue"])
+def test_controller_refuses_future_shared_database_before_any_store_writes(tmp_path, component):
+    import sqlite3
+    from hashlib import sha256
+    from engine.download_store import DownloadStoreError
+    from engine.media_store import MediaStoreError
+    from engine.queue_store import QueueStoreError, SCHEMA_VERSION
+
+    settings = SettingsStore(base_dir=tmp_path / "data")
+    settings.save(settings.defaults())
+    settings.ensure_runtime_directories()
+    database = Path(settings.load()["database_path"])
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE app_schema (component TEXT PRIMARY KEY, version INTEGER NOT NULL)")
+        connection.execute("CREATE TABLE future_data (value TEXT)")
+        connection.execute("INSERT INTO future_data VALUES ('preserved')")
+        if component == "queue":
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+        else:
+            connection.execute("INSERT INTO app_schema VALUES (?, 99)", (component,))
+    connection.close()
+    fingerprint = sha256(database.read_bytes()).hexdigest()
+    error_type = {"media": MediaStoreError, "downloads": DownloadStoreError, "queue": QueueStoreError}[component]
+    with pytest.raises(error_type, match="高于当前支持版本"):
+        AppController(settings)
+    assert sha256(database.read_bytes()).hexdigest() == fingerprint
+    assert not database.with_name(database.name + "-wal").exists()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert connection.execute("SELECT value FROM future_data").fetchone()[0] == "preserved"
+        assert connection.execute("SELECT name FROM sqlite_master WHERE name IN ('media', 'jobs', 'download_jobs')").fetchall() == []
+    connection.close()
+
+
+@pytest.mark.parametrize("method, args, kwargs", [
+    ("import_files", ([],), {}),
+    ("import_folder", ("missing-folder",), {}),
+    ("import_paths", ([],), {}),
+    ("clear_media_library", (), {}),
+    ("clear_completed", (), {}),
+    ("set_result_categories", ([], "fixture"), {}),
+    ("set_job_tags", ("missing", []), {}),
+    ("update_document_metadata", ("missing",), {"expected_revision": "0" * 64}),
+    ("update_document_text", ("missing", "final", "fixture"), {}),
+    ("purge_orphan_output", ("missing-output",), {}),
+    ("purge_orphan_download", ("missing-download",), {}),
+    ("cleanup_cache", (), {}),
+    ("delete_texts", ([],), {}),
+    ("delete_library_items", ([],), {"remove_records": True}),
+    ("delete_files", ([],), {}),
+    ("delete_tasks", ([],), {}),
+    ("delete_download_tasks", ([],), {}),
+    ("delete_download_files", ([],), {}),
+    ("queue_download_for_transcription", ("missing",), {}),
+    ("enqueue_media", ([],), {}),
+    ("cancel_jobs", ([],), {}),
+    ("cancel_download_tasks", ([],), {}),
+    ("retry_download_tasks", ([],), {}),
+    ("requeue_jobs", ([],), {}),
+    ("retranscribe_jobs", ([],), {}),
+    ("save_settings", ({},), {}),
+])
+def test_controller_rejects_writes_while_backup_rollback_is_blocked(tmp_path, method, args, kwargs):
+    from engine.queue_store import QueueStateError
+
+    controller = AppController(SettingsStore(base_dir=tmp_path / "data"))
+    try:
+        controller._backup_restore_blocked = True
+        with pytest.raises(QueueStateError, match="备份恢复尚未完成"):
+            getattr(controller, method)(*args, **kwargs)
+        # Querying existing work remains available for diagnosis.
+        assert controller.job_rows() == []
+        assert controller.task_rows() == []
+    finally:
+        controller.close()
 
 
 def test_model_manager_detects_and_deletes_verified_cache() -> None:
@@ -381,6 +509,63 @@ def test_model_manager_rejects_incomplete_download() -> None:
                 manager.download("tiny", local_files_only=True)
 
 
+def test_worker_process_manager_refreshes_environment_only_on_explicit_start() -> None:
+    snapshots = [{"FOILPAGE_FIXTURE": "first"}, {"FOILPAGE_FIXTURE": "second"}]
+    provider = mock.Mock(side_effect=snapshots)
+    processes = []
+
+    def fake_popen(command, **kwargs):
+        process = mock.Mock(stdout=None)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        processes.append((command, kwargs["env"]))
+        return process
+
+    with (
+        mock.patch("app.process_manager.subprocess.Popen", side_effect=fake_popen),
+        mock.patch("app.process_manager.threading.Thread"),
+    ):
+        manager = WorkerProcessManager(["worker"], environment_provider=provider)
+        assert manager.start()
+        snapshots[0]["FOILPAGE_FIXTURE"] = "mutated-after-start"
+        assert processes[0][1]["FOILPAGE_FIXTURE"] == "first"
+        manager._process = None
+        assert manager.start()
+
+    assert provider.call_count == 2
+    assert processes[1][1]["FOILPAGE_FIXTURE"] == "second"
+    assert processes[0][1] is not processes[1][1]
+    assert all("second" not in command for command, _environment in processes)
+
+
+def test_worker_process_manager_auto_restart_reuses_frozen_environment() -> None:
+    provider = mock.Mock(return_value={"FOILPAGE_FIXTURE": "frozen"})
+    environments = []
+
+    def fake_popen(_command, **kwargs):
+        environments.append(kwargs["env"])
+        process = mock.Mock(stdout=None)
+        process.poll.return_value = None
+        process.wait.return_value = 1
+        return process
+
+    with (
+        mock.patch("app.process_manager.subprocess.Popen", side_effect=fake_popen) as popen,
+        mock.patch("app.process_manager.threading.Thread"),
+        mock.patch("app.process_manager.time.sleep"),
+    ):
+        manager = WorkerProcessManager(["worker"], environment_provider=provider)
+        assert manager.start()
+        manager._monitor_loop()
+        manager._stop_requested = True
+        manager._process = None
+
+    assert provider.call_count == 1
+    assert popen.call_count == 2
+    assert environments == [{"FOILPAGE_FIXTURE": "frozen"}] * 2
+    assert environments[0] is not environments[1]
+
+
 def test_worker_process_manager_streams_logs_and_stops() -> None:
     lines: list[str] = []
     states: list[str] = []
@@ -415,6 +600,8 @@ def test_worker_process_manager_streams_logs_and_stops() -> None:
 @pytest.mark.skipif(os.name != "nt", reason="SIGBREAK is Windows-specific")
 def test_real_worker_handles_sigbreak_gracefully() -> None:
     with tempfile.TemporaryDirectory(prefix="worker_sigbreak_") as temp:
+        database = Path(temp) / "queue.db"
+        QueueStore(database).close()
         lines: list[str] = []
         ready = threading.Event()
 
@@ -424,7 +611,7 @@ def test_real_worker_handles_sigbreak_gracefully() -> None:
                 ready.set()
 
         manager = WorkerProcessManager(
-            worker_command(ROOT, str(Path(temp) / "queue.db"), poll=0.05),
+            worker_command(ROOT, str(database), poll=0.05),
             log_callback=on_log,
             auto_restart=False,
         )
@@ -578,7 +765,7 @@ def test_controller_clear_completed_archives_done_jobs_only() -> None:
 
 
 def test_controller_delete_texts_preserves_video() -> None:
-    """删除文本：仅产物移除，任务记录、产物目录和源视频保留。"""
+    """删除文本：产物和空目录移除，任务记录和源视频保留。"""
     with tempfile.TemporaryDirectory(prefix="controller_delete_texts_") as temp:
         root = Path(temp)
         controller = AppController(SettingsStore(base_dir=root / "data"))
@@ -605,7 +792,7 @@ def test_controller_delete_texts_preserves_video() -> None:
             kept = controller.queue.get_job(job_id)
             assert kept is not None and kept["status"] == "done", "任务记录应保留"
             assert kept["raw_path"] is None and kept["final_path"] is None
-            assert job_out.is_dir(), "任务产物目录应保留"
+            assert not job_out.exists(), "没有其他文件时清理任务产物目录"
             assert not (job_out / "t_raw.md").exists() and not (job_out / "t.md").exists()
             assert source.exists(), "视频源文件应保留（可重新转写）"
             assert Path(job["output_dir"]).exists(), "输出根目录必须保留"

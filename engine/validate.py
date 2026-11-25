@@ -199,7 +199,8 @@ def validate_manifest(d: Manifest) -> None:
         raise ContractValidationError("Manifest.duration_sec 必须 >= 0")
     if d["backend"] not in _BACKENDS:
         raise ContractValidationError(f"Manifest.backend 非法: {d['backend']!r}")
-    for field in ("source_title", "agent_profile", "agent_model", "agent_status", "agent_prompt_version", "segments_path"):
+    for field in ("source_title", "agent_profile", "agent_model", "agent_status", "agent_prompt_version", "segments_path",
+                  "agent_fidelity_fallback_reason"):
         if field in d and not isinstance(d[field], str):
             raise ContractValidationError(f"Manifest.{field} 必须是字符串")
     if "agent_vision_used" in d and not isinstance(d["agent_vision_used"], bool):

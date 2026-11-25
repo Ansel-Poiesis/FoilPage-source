@@ -8,6 +8,7 @@ import { browserFallbackMediaUrls } from '../browser-extension/fallback-policy.j
 import { pickDouyinResolveCookies } from '../browser-extension/douyin-cookies.js';
 
 const SOURCE = await readFile(new URL('../browser-extension/background.js', import.meta.url),'utf8');
+const CONTRACT_SOURCE = await readFile(new URL('../browser-extension/ui-contract.js', import.meta.url),'utf8');
 const URL_A='https://www.douyin.com/video/1234567890123456';
 const VIDEO_A='1234567890123456';
 const MEDIA_A='https://v26-web.douyinvod.com/video/tos/original.mp4?signature=fixture';
@@ -53,6 +54,7 @@ async function harness({online=true,seed={},fresh=null,websocket=false,handler=n
     },
   };
   if(websocket)context.WebSocket=FakeWebSocket;
+  vm.runInNewContext(CONTRACT_SOURCE,context);
   vm.runInNewContext(SOURCE.replace(/^import .*;\r?\n/gm,'')+'\nglobalThis.fixture={submitPageDownload,submitAuthorizedDownload,flushSubmissionQueue,resumeBackgroundQueue,cancelQueuedTask,taskStateForUrl,status,watchLocalTask,pollLocalTask,restoreWatchedTasks,handleLocalTaskFailed,askTabsForFreshMedia,connectDesktopEvents,handleBrowserDownloadComplete,handleBrowserDownloadInterrupted,recoverBrowserDownloads,flushPendingImports,cancelOwnedBrowserDownloads,submissionQueue,localTaskWatchers,submitMediaHints,queuedMediaHints};',context);
   await settle();
   return {saved,sent,calls,transfers,timers,sockets,jobs,refs,chrome,...context.fixture,

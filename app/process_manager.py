@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 def _send_windows_stop_signal(process: subprocess.Popen[str]) -> None:
@@ -51,11 +51,14 @@ class WorkerProcessManager:
         log_callback: Callable[[str], None] | None = None,
         state_callback: Callable[[str], None] | None = None,
         auto_restart: bool = True,
+        environment_provider: Callable[[], Mapping[str, str] | None] | None = None,
     ) -> None:
         self.command = list(command)
         self.log_callback = log_callback or (lambda _line: None)
         self.state_callback = state_callback or (lambda _state: None)
         self.auto_restart = auto_restart
+        self._environment_provider = environment_provider
+        self._environment: dict[str, str] | None = None
         self._process: subprocess.Popen[str] | None = None
         self._stop_requested = False
         self._lock = threading.RLock()
@@ -87,6 +90,9 @@ class WorkerProcessManager:
                 return False
             self._stop_requested = False
             self._crash_restarts = 0
+            if self._environment_provider is not None:
+                environment = self._environment_provider()
+                self._environment = dict(environment) if environment is not None else None
             return self._spawn_locked()
 
     def _spawn_locked(self) -> bool:
@@ -111,6 +117,7 @@ class WorkerProcessManager:
             bufsize=1,
             creationflags=creationflags,
             startupinfo=startupinfo,
+            env=dict(self._environment) if self._environment is not None else None,
         )
         self._started_at = time.monotonic()
         self.state_callback("running")

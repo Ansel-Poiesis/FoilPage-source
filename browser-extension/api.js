@@ -1,15 +1,21 @@
 // Copyright (c) 2026 Ansel
 // SPDX-License-Identifier: MPL-2.0
+import "./ui-contract.js";
+
 const API_BASE = "http://127.0.0.1:18765";
 const REQUEST_TIMEOUT_MS = 30000;
+const {errorInfo} = globalThis.FoilPageContract;
 
 export class LocalApiError extends Error {
-  constructor(message, { code = "local_api_error", status = 0, detail = "" } = {}) {
+  constructor(message, { code = "local_api_error", status = 0, detail = "", retryable } = {}) {
     super(message);
+    const info = errorInfo(code, status, retryable);
     this.name = "LocalApiError";
-    this.code = code;
+    this.code = info.code;
+    this.category = info.category;
     this.status = status;
     this.detail = detail;
+    this.retryable = info.retryable;
   }
 }
 
@@ -43,8 +49,11 @@ export async function health() {
   let response;
   try {
     response = await fetchWithTimeout(`${API_BASE}/health`, { cache: "no-store" });
-  } catch {
-    throw new Error("请先打开 FoilPage 桌面端");
+  } catch (error) {
+    if (error instanceof LocalApiError) throw error;
+    throw new LocalApiError("请先打开 FoilPage 桌面端", {
+      code: "local_api_unavailable", detail: error?.name || "NetworkError",
+    });
   }
   if (!response.ok) throw new Error("本地服务不可用");
   const data = await response.json().catch(() => ({}));
@@ -63,12 +72,15 @@ export async function pair() {
       headers: { "Content-Type": "application/json" },
       body: "{}"
     });
-  } catch {
-    throw new Error("请先打开 FoilPage 桌面端");
+  } catch (error) {
+    if (error instanceof LocalApiError) throw error;
+    throw new LocalApiError("请先打开 FoilPage 桌面端", {
+      code: "local_api_unavailable", detail: error?.name || "NetworkError",
+    });
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new LocalApiError(data?.error?.message || `连接失败 ${response.status}`, {
-    code: data?.error?.code, status: response.status,
+    code: data?.error?.code, status: response.status, retryable: data?.error?.retryable,
   });
   if (typeof data.token !== "string" || data.token.length < 32) {
     throw new Error("FoilPage 返回了无效连接凭据");
@@ -90,12 +102,15 @@ export async function setup() {
         worker_auto_start: true
       })
     });
-  } catch {
-    throw new Error("请先启动一次 FoilPage 桌面端");
+  } catch (error) {
+    if (error instanceof LocalApiError) throw error;
+    throw new LocalApiError("请先启动一次 FoilPage 桌面端", {
+      code: "local_api_unavailable", detail: error?.name || "NetworkError",
+    });
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new LocalApiError(data?.error?.message || `配置失败 ${response.status}`, {
-    code: data?.error?.code, status: response.status,
+    code: data?.error?.code, status: response.status, retryable: data?.error?.retryable,
   });
   if (typeof data.token !== "string" || data.token.length < 32) {
     throw new Error("FoilPage 返回了无效连接凭据");
@@ -132,6 +147,7 @@ export async function request(path, options = {}) {
       code: data?.error?.code || "local_api_http_error",
       status: response.status,
       detail: data?.error?.message || "",
+      retryable: data?.error?.retryable,
     },
   );
   return data;

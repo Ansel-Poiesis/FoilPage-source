@@ -158,15 +158,17 @@ window.ConfirmDiscard = {
 window.ConfirmDelete = {
   run(opts) {
     const s = AppState.settings || {};
-    if (s.confirm_delete === false) {
+    if (s[opts.settingKey || "confirm_delete"] === false) {
       opts.onConfirm();
       return;
     }
+    const optOut = opts.settingKey ? "" :
+      '<label class="dlg-check"><input type="checkbox" id="dlgNoAsk"><span>不再提醒，下次直接删除</span></label>';
     const mask = openModal(
       "确认删除",
       `<div class="dlg-delete">
          <div class="dlg-text" id="dlgText"></div>
-         <label class="dlg-check"><input type="checkbox" id="dlgNoAsk"><span>不再提醒，下次直接删除</span></label>
+         ${optOut}
        </div>`,
       `<button class="btn ghost" id="dlgCancel">取消</button>
        <button class="btn danger" id="dlgOk">删除</button>`
@@ -175,7 +177,7 @@ window.ConfirmDelete = {
       opts.message || "确定要删除选中的内容吗？相关文件将一并移除，删除后不可恢复。";
     mask.querySelector("#dlgCancel").onclick = closeModal;
     mask.querySelector("#dlgOk").onclick = () => {
-      const noAsk = mask.querySelector("#dlgNoAsk").checked;
+      const noAsk = mask.querySelector("#dlgNoAsk")?.checked;
       if (noAsk) {
         AppApi.saveSettings({ confirm_delete: false }).then((settings) => {
           if (!settings || settings.ok === false || typeof settings.confirm_delete !== 'boolean') throw new Error('settings not saved');

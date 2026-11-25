@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 """BYOK 服务商预设库合同（先生 2026-11-16）。
 
-单一真源在 engine/settings.py 的 AGENT_PROVIDER_PRESETS；UI（settings.js
+单一真源在 engine/settings.py 的 AGENT_PROVIDER_PRESETS；UI（settings-model.js
 PROVIDER_PRESETS）必须与之逐项一致——本文件用与版本标记检查同款的静态
 锁定，防止两份清单漂移。另覆盖：预设切换清空旧 Key 的桥接规则、视觉能
 力查表、托管模型白名单放宽后的形态校验。
@@ -35,15 +35,15 @@ def test_preset_table_covers_the_ten_providers() -> None:
 
 
 def test_ui_provider_list_matches_the_source_of_truth() -> None:
-    source = (ROOT / "app/webview_ui/js/settings.js").read_text(encoding="utf-8")
-    match = re.search(r"const PROVIDER_PRESETS = \{(.*?)\n  \};", source, re.S)
-    assert match, "settings.js 未找到 PROVIDER_PRESETS"
-    js_ids = set(re.findall(r"^\s{4}([a-z]+):\s*\{", match.group(1), re.M))
+    source = (ROOT / "app/webview_ui/js/settings-model.js").read_text(encoding="utf-8")
+    match = re.search(r"const PROVIDER_PRESETS = \{(.*?)\n\s*\};", source, re.S)
+    assert match, "settings-model.js 未找到 PROVIDER_PRESETS"
+    js_ids = set(re.findall(r"^\s+([a-z]+):\s*\{", match.group(1), re.M))
     assert js_ids == set(AGENT_PROVIDER_PRESETS), (js_ids, set(AGENT_PROVIDER_PRESETS))
-    js_bases = dict(re.findall(r"^\s{4}([a-z]+):\s*\{[^}]*?base: \"([^\"]*)\"", match.group(1), re.M))
+    js_bases = dict(re.findall(r"^\s+([a-z]+):\s*\{[^}]*?base: \"([^\"]*)\"", match.group(1), re.M))
     for pid, preset in AGENT_PROVIDER_PRESETS.items():
         assert js_bases.get(pid) == preset["base_url"], pid
-    js_models = dict(re.findall(r"^\s{4}([a-z]+):\s*\{[^}]*?model: \"([^\"]*)\"", match.group(1), re.M))
+    js_models = dict(re.findall(r"^\s+([a-z]+):\s*\{[^}]*?model: \"([^\"]*)\"", match.group(1), re.M))
     for pid, preset in AGENT_PROVIDER_PRESETS.items():
         assert js_models.get(pid) == preset["model"], pid
 

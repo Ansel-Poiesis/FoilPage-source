@@ -44,6 +44,7 @@ def _parser() -> argparse.ArgumentParser:
     listing.add_argument("--query", default="")
     listing.add_argument("--status", default="")
     listing.add_argument("--limit", type=int, default=50)
+    listing.add_argument("--cursor", default="", help="上一页的 next_cursor，沿用相同筛选")
     for name in ("get", "cancel", "retry"):
         action = tasks.add_parser(name, help={"get": "读取任务", "cancel": "取消任务", "retry": "重试任务"}[name])
         action.add_argument("task_id")
@@ -56,6 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     docs_list = documents.add_parser("list", help="搜索文本库")
     docs_list.add_argument("--query", default="")
     docs_list.add_argument("--limit", type=int, default=50)
+    docs_list.add_argument("--cursor", default="", help="上一页的 next_cursor，沿用相同筛选")
     for name in ("read", "metadata", "update", "update-metadata"):
         action = documents.add_parser(name, help={
             "read": "读取正文及 revision", "metadata": "读取标题、标签与 revision",
@@ -182,7 +184,7 @@ def _operation(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         return "operations.call", {"operation": args.operation, "arguments": arguments, "confirm": args.confirm}
     if args.command == "tasks":
         if args.task_command == "list":
-            params = validate.listing(args.query, args.limit)
+            params = validate.listing(args.query, args.limit, args.cursor)
             params["status"] = validate.status(args.status)
             return "tasks.list", params
         target = validate.task_id(args.task_id)
@@ -190,7 +192,7 @@ def _operation(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
     if args.command == "documents":
         operation = args.document_command
         if operation == "list":
-            return "documents.list", validate.listing(args.query, args.limit)
+            return "documents.list", validate.listing(args.query, args.limit, args.cursor)
         params = {"task_id": validate.task_id(args.task_id)}
         if operation in ("read", "update"):
             params["tab"] = validate.tab(args.tab)

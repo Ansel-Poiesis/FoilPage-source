@@ -268,7 +268,9 @@ test('hosted AI enabling follows real capability changes and disabling stays ava
     await page.getByText('托管模型尚未配置',{exact:true}).waitFor();
     const body=page.getByRole('switch',{name:'AI 整理正文',exact:true}),title=page.getByRole('switch',{name:'AI 优化标题',exact:true});
     assert(await body.isDisabled());assert.equal(await title.isDisabled(),false);
-    for(const label of ['服务商','接口地址','模型','API Key','标题模型','启用字幕视觉校对']) assert(await page.getByLabel(label,{exact:true}).isDisabled(),label+' is BYOK-only');
+    for(const label of ['服务商','接口地址','模型','API Key','标题模型']) assert(await page.getByLabel(label,{exact:true}).isDisabled(),label+' is BYOK-only');
+    assert.equal(await page.getByLabel('启用字幕视觉校对',{exact:true}).isDisabled(),false);
+    assert(await page.getByText('deepseek-flash 托管档支持画面核对；默认档为纯文本，此开关不生效',{exact:true}).isVisible());
     await page.getByRole('button',{name:'＋ 添加自定义 Agent',exact:true}).click();
     assert(await page.getByLabel('自定义 Agent 模型',{exact:true}).isDisabled());assert.equal(await page.getByLabel('自定义 Agent 创造性',{exact:true}).isDisabled(),false);
     const prompt=page.getByLabel('自定义 Agent 系统提示词',{exact:true});assert.equal(await prompt.isEnabled(),true);

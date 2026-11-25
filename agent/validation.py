@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from agent.client import AgentError
-from engine.agent_protocol import AGENT_MAX_TEXT_BYTES
+from engine.agent_protocol import AGENT_MAX_TEXT_BYTES, AGENT_MAX_CURSOR_CHARS
 
 
 _TASK_ID = re.compile(r"^(?:job|dl):[a-f0-9]{12}$")
@@ -44,12 +44,15 @@ def text(value: str) -> str:
     return value
 
 
-def listing(query: str, limit: int) -> dict[str, Any]:
+def listing(query: str, limit: int, cursor: str = "") -> dict[str, Any]:
     if not isinstance(query, str) or len(query) > 1000:
         raise AgentError("invalid_argument", "搜索文本须在 1000 字以内")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
         raise AgentError("invalid_argument", "查询数量须在 1 到 200 之间")
-    return {"query": query, "limit": limit}
+    if (not isinstance(cursor, str) or len(cursor) > AGENT_MAX_CURSOR_CHARS
+            or not re.fullmatch(r"[A-Za-z0-9_-]*", cursor)):
+        raise AgentError("invalid_argument", "分页游标格式无效，请使用上一页返回的 next_cursor")
+    return {"query": query, "limit": limit, **({"cursor": cursor} if cursor else {})}
 
 
 def status(value: str) -> str:

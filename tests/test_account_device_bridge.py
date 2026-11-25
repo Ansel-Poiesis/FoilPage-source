@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Ansel
 # SPDX-License-Identifier: MPL-2.0
 """Device-management grants stay separate from signed desktop entitlement."""
+import io
 import json
 import urllib.error
 import urllib.request
@@ -124,6 +125,29 @@ def test_network_error_preserves_account_but_definitive_rejection_clears(tmp_pat
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Response({"ok": False, "status": "invalid"}))
     assert not result.get_account_devices()["ok"]
     assert not controller.settings["license_token"]
+
+
+def test_waf_403_preserves_account_until_service_explicitly_rejects_session(tmp_path, monkeypatch):
+    result, controller = bridge(tmp_path)
+
+    def blocked(*_args, **_kwargs):
+        raise urllib.error.HTTPError("https://pay.example.com", 403, "blocked", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", blocked)
+    response = result.get_account_devices()
+    assert response["ok"] is False and response.get("status") != "invalid"
+    assert controller.settings["account_login_token"] == "session-a"
+    assert controller.settings["license_token"] == "old-license"
+
+    def rejected(*_args, **_kwargs):
+        raise urllib.error.HTTPError("https://pay.example.com", 403, "rejected", {}, io.BytesIO(
+            json.dumps({"ok": False, "error": "登录已过期，请重新登录"}).encode()))
+
+    monkeypatch.setattr(urllib.request, "urlopen", rejected)
+    response = result.get_account_devices()
+    assert response["status"] == "invalid"
+    assert controller.settings["account_login_token"] == ""
+    assert controller.settings["license_token"] == ""
 
 
 def test_logout_revokes_current_pending_and_management_tokens(tmp_path, monkeypatch):

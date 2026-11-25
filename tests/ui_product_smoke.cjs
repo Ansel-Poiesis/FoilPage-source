@@ -38,13 +38,20 @@ fs.mkdirSync(output, {recursive:true});
       // Compact navigation resumes the previous reader. Return explicitly to
       // the list before checking its layout and opening another document.
       if(width<=1000 && await page.locator('#readerBack').isVisible()) await page.locator('#readerBack').click();
-      await page.waitForSelector('.doc');
-      assert.equal(await page.locator('.doc-title').first().textContent(), await page.evaluate(()=>window.__fixtureTitle));
-      const clipped = await page.locator('.doc-title').first().evaluate(e=>e.scrollHeight>e.clientHeight+1);
-      assert.equal(clipped,false,'library title must not be clipped');
+      const firstDocument = page.locator('.doc-open').first();
+      await firstDocument.waitFor();
+      const fullTitle = await page.evaluate(()=>window.__fixtureTitle);
+      const titleLines = await firstDocument.locator('.doc-title').evaluate(node => {
+        const lineHeight = parseFloat(getComputedStyle(node).lineHeight);
+        return node.getBoundingClientRect().height / lineHeight;
+      });
+      assert(titleLines <= 2.01, 'library rows keep long titles within two lines');
+      assert((await firstDocument.ariaSnapshot()).includes(fullTitle), 'document button exposes the full title');
       await page.screenshot({path:path.join(output,`library-${width}.png`)});
-      await page.locator('.doc').first().click();
-      await page.waitForSelector('.reader-body h1');
+      await firstDocument.click();
+      await page.waitForSelector('.reader-body p');
+      assert.equal(await page.locator('.reader-doc-title').textContent(), fullTitle, 'the reader shows the entire document title');
+      assert.equal(await page.locator('#readerBody').evaluate(node=>node.scrollWidth>node.clientWidth+1),false,'reader has no horizontal overflow');
       await page.screenshot({path:path.join(output,`reader-${width}.png`)});
       if(width<=1000) { await page.locator('#readerBack').click(); assert(await page.locator('.lib-list').isVisible()); }
       await page.evaluate(()=>switchView('settings'));
@@ -128,7 +135,9 @@ fs.mkdirSync(output, {recursive:true});
     await bili.route('https://www.bilibili.com/**',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<style>body{margin:40px;font:14px sans-serif}#bilibili-player{width:900px;height:500px;background:#18191c;position:relative}video{width:100%;height:100%}.caption{position:absolute;bottom:60px;left:40%;color:white}.bpx-player-control-bottom{position:absolute;bottom:0;width:100%;height:40px;display:flex;justify-content:space-between;color:white}.bpx-player-control-bottom-left{width:600px}.bpx-player-control-bottom-right{width:260px}</style><h2>测试播放器</h2><div id="bilibili-player"><video></video><div class="caption">字幕不应被覆盖</div><div class="bpx-player-control-bottom"><div class="bpx-player-control-bottom-left">播放 · 时间 · 原生控件</div><div class="bpx-player-control-bottom-right">画质 · 音量 · 设置 · 全屏</div></div></div><p>播放器下方的内容不应被覆盖。</p>`}));
     await bili.addInitScript(()=>{window.__sjListeners=[];window.chrome={runtime:{onMessage:{addListener:(fn)=>window.__sjListeners.push(fn)},sendMessage:(msg,cb)=>{if(msg.type==='shengjian-page-submit')for(const listener of window.__sjListeners)listener({type:'shengjian-toast',message:'已提交下载',stage:'submitted',taskUrl:msg.url},null,()=>{});cb({ok:true});}}};});
     await bili.goto('https://www.bilibili.com/video/BV1test');
+    await bili.addStyleTag({path:path.join(root,'browser-extension/brand.css')});
     await bili.addStyleTag({path:path.join(root,'browser-extension/content-bili.css')});
+    await bili.addScriptTag({path:path.join(root,'browser-extension/ui-contract.js')});
     await bili.addScriptTag({path:path.join(root,'browser-extension/content-bili.js')});
     assert(await bili.locator('.shengjian-bili-host').evaluate(e=>e.classList.contains('above-player')),'crowded native controls use the external action row');
     await assertOutsidePlayer(bili,'.shengjian-bili-host','#bilibili-player');
@@ -175,7 +184,9 @@ fs.mkdirSync(output, {recursive:true});
     await yt.route('https://www.youtube.com/**',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<style>body{margin:40px;font:14px Roboto,sans-serif;background:#0f0f0f;color:#f1f1f1}.watch-layout{width:900px}#player-container-outer{width:900px;height:500px;background:#1c2420;position:relative}video{width:100%;height:100%}.caption{position:absolute;bottom:60px;left:40%}</style><h2>测试播放页</h2><main class="watch-layout"><div id="player-container-outer"><video></video><div class="caption">字幕不应被覆盖</div></div><p>视频说明继续留在播放器下面。</p></main>`}));
     await yt.addInitScript(()=>{window.__sjListeners=[];window.chrome={runtime:{onMessage:{addListener:(fn)=>window.__sjListeners.push(fn)},sendMessage:(msg,cb)=>{if(msg.type==='shengjian-page-submit')for(const listener of window.__sjListeners)listener({type:'shengjian-toast',message:'已提交下载',stage:'submitted',taskUrl:msg.url},null,()=>{});cb({ok:true});}}};});
     await yt.goto('https://www.youtube.com/watch?v=abcdef12345');
+    await yt.addStyleTag({path:path.join(root,'browser-extension/brand.css')});
     await yt.addStyleTag({path:path.join(root,'browser-extension/content-youtube.css')});
+    await yt.addScriptTag({path:path.join(root,'browser-extension/ui-contract.js')});
     await yt.addScriptTag({path:path.join(root,'browser-extension/content-youtube.js')});
     await yt.waitForSelector('.shengjian-yt-host');
     await assertOutsidePlayer(yt,'.shengjian-yt-host','#player-container-outer');

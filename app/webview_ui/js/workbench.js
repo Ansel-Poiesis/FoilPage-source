@@ -4,13 +4,13 @@
 'use strict';
 
 window.Workbench = (() => {
+  const {TERMINAL, percent: taskPercent, rowStatusText} = globalThis.FoilPageContract;
   const FILTERS = ["全部", "处理中", "需处理", "已完成"];
   const IMPORT_FILTER = '本次导入';
   let importTaskIds = new Set();
   const ACTIVE = ["queued", "running", "retryable", "received", "resolving", "awaiting_browser", "downloading", "imported", "transcribing"];
   const PROCESSING = ACTIVE.filter(status => !['retryable', 'awaiting_browser'].includes(status));
   const NEED = ["failed", "retryable", "awaiting_browser"];
-  const TERMINAL = ["done", "failed", "cancelled"];
   let rangeBaseline = null, rangeAnchor = null, visibleSelectionKey = "", tasksRequest = 0;
   let savedContext = null;
   let inspectorAction = null;
@@ -55,8 +55,7 @@ window.Workbench = (() => {
   }
 
   function percent(task) {
-    const value = Number(task.progress);
-    return Number.isFinite(value) ? Math.round(Math.max(0, Math.min(1, value)) * 100) : 0;
+    return taskPercent(task);
   }
 
   /* TASK-8.18 图集：检查器网格懒取（token URL 会话缓存，目录变更重取）。 */
@@ -499,26 +498,6 @@ window.Workbench = (() => {
     else if (["queued", "imported"].includes(st)) transcribe = { ...transcribe, state: "cur", text: "排队中" };
     else if (["transcribing", "running"].includes(st)) transcribe = { ...transcribe, state: "cur", text: percent(task) + "%" };
     return [download, transcribe];
-  }
-
-  /* 任务行的副标题只说明当前阶段；具体百分比放在右侧阶段列，避免同一个数字出现两次。 */
-  function rowStatusText(task) {
-    const st = task.status;
-    if (st === "downloading") return task.is_gallery ? "正在下载图集" : "正在下载";
-    if (["received", "resolving"].includes(st)) return "解析链接";
-    if (st === "awaiting_browser") return "等待浏览器下载";
-    if (["imported", "queued"].includes(st)) return "等待转写";
-    if (["transcribing", "running"].includes(st)) return "正在转写";
-    if (st === "done") {
-        if (task.error_details?.diagnostic?.transcript_preserved) return "原稿已保留，AI 处理未完成";
-      if (task.is_gallery) return "图文已保存";
-      const onlyDownloaded = task.kind === "download" && !task.final_path && !task.raw_path;
-      return onlyDownloaded ? "仅完成下载" : "已完成";
-    }
-    if (st === "retryable") return "等待重试";
-    if (st === "failed") return "处理失败";
-    if (st === "cancelled") return "已取消";
-    return task.progress_text || "等待处理";
   }
 
   function renderList() {

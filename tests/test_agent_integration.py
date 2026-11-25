@@ -175,6 +175,28 @@ def modern_session(app, flags, exercise):
     asyncio.run(run())
 
 
+def test_real_cli_and_stdio_follow_list_cursors_without_losing_same_title_documents(agent_app):
+    for i in range(3):
+        add_job(agent_app.controller, job_id=f"{i:012x}", title="同名资料")
+    expected = {f"job:{i:012x}" for i in range(3)}
+    code, first = cli(agent_app, "documents", "list", "--query", "同名资料", "--limit", "2")
+    assert code == 0 and first["result"]["total"] == 3
+    cursor = first["result"]["next_cursor"]
+    code, second = cli(agent_app, "documents", "list", "--query", "同名资料", "--limit", "2", "--cursor", cursor)
+    assert code == 0 and second["result"]["next_cursor"] is None
+    assert {item["task_id"] for page in (first, second) for item in page["result"]["items"]} == expected
+    async def exercise(session):
+        for tool in ("list_tasks", "list_documents"):
+            first = tool_value(await session.call_tool(tool, {"query": "同名资料", "limit": 2}))
+            second = tool_value(await session.call_tool(tool, {
+                "query": "同名资料", "limit": 2, "cursor": first["next_cursor"],
+            }))
+            assert first["total"] == second["total"] == 3 and second["next_cursor"] is None
+            ids = [item["task_id"] for item in first["items"] + second["items"]]
+            assert len(ids) == len(set(ids)) == 3 and set(ids) == expected
+    modern_session(agent_app, ["--read-only"], exercise)
+
+
 def test_official_sdk_modern_handshake_can_opt_into_readonly_tools(agent_app):
     target = add_job(agent_app.controller)
     async def exercise(session):

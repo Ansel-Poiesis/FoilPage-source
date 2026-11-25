@@ -42,6 +42,7 @@
         "content.js"
       ],
       "css": [
+        "brand.css",
         "content.css"
       ],
       "run_at": "document_start"
@@ -63,9 +64,11 @@
         "https://bilibili.com/*"
       ],
       "js": [
+        "ui-contract.js",
         "content-bili.js"
       ],
       "css": [
+        "brand.css",
         "content-bili.css"
       ],
       "run_at": "document_idle"
@@ -77,9 +80,11 @@
         "https://youtu.be/*"
       ],
       "js": [
+        "ui-contract.js",
         "content-youtube.js"
       ],
       "css": [
+        "brand.css",
         "content-youtube.css"
       ],
       "run_at": "document_idle"

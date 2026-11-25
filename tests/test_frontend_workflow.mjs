@@ -65,6 +65,12 @@ async function library(page, taskId = 'job:one') {
     && !document.querySelector('#readerBody .reader-empty') && !document.getElementById('copyReaderBtn').disabled, taskId);
 }
 
+async function followReaderVideo(page) {
+  const trigger = page.locator('#readerMenuBtn');
+  if (await trigger.getAttribute('aria-expanded') === 'false') await trigger.click();
+  await page.getByRole('menuitem', {name: '在视频库定位', exact: true}).click();
+}
+
 test('paragraph comparison preserves both full inputs including duplicate and reordered paragraphs', () => {
   const context = {window: {}};
   vm.runInNewContext(fs.readFileSync(path.join(root, 'app/webview_ui/js/text-diff.js'), 'utf8'), context);
@@ -111,11 +117,28 @@ test('video links include archived text and choose the latest matching transcrip
     await page.locator('.video-card[data-video-id=video-two] .video-menu-trigger').click();
     await page.getByRole('menuitem', {name: '查看转写结果', exact: true}).click();
     await page.waitForFunction(() => document.querySelector('#readerBody h1')?.textContent === '整理稿 job:archived');
-    assert(await page.locator('#readerTaskLink').isDisabled());
-    await page.locator('#readerVideoLink').click();
+    await page.locator('#readerMenuBtn').click();
+    assert.equal(await page.getByRole('menuitem', {name: '查看任务', exact: true}).count(), 0);
+    await followReaderVideo(page);
     await page.locator('.video-card.is-located[data-video-id=video-two]').waitFor();
     await page.locator('#materialBack').click();
     await page.waitForFunction(() => Library.currentTaskId() === 'job:archived');
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
+test('a different document row can locate its video while the current document stays selected for return', async () => {
+  const page = await open();
+  try {
+    await library(page);
+    await page.locator('.doc[data-doc-id="job:two"] .doc-menu-trigger').click();
+    await page.getByRole('menuitem', {name: '在视频库定位', exact: true}).click();
+    await page.locator('.video-card.is-located[data-video-id=video-two]').waitFor();
+    await page.locator('#materialBack').click();
+    await page.waitForFunction(() => Library.currentTaskId() === 'job:one');
+    await page.locator('#readerMenuBtn').click();
+    await page.getByRole('menuitem', {name: '查看任务', exact: true}).click();
+    await page.waitForFunction(() => AppState.currentView === 'workbench' && AppState.selected.has('job:one'));
     assert.deepEqual(page.errors, []);
   } finally { await page.close(); }
 });
@@ -130,7 +153,7 @@ test('linked video remains visible and focused in a long catalog after columns r
       }));
     });
     await library(page);
-    await page.locator('#readerVideoLink').click();
+    await followReaderVideo(page);
     const target = page.locator('.video-card.is-located[data-video-id=catalog-80]');
     await target.waitFor();
     await page.waitForFunction(() => {
@@ -175,7 +198,7 @@ test('late portrait covers keep the linked video visible until the user starts b
       }));
     });
     await library(page);
-    await page.locator('#readerVideoLink').click();
+    await followReaderVideo(page);
     await page.locator('.video-card.is-located[data-video-id=late-6]').waitFor();
     releaseCovers();
     await page.waitForFunction(() => [...document.querySelectorAll('#videoGrid img')].every(image => image.classList.contains('is-loaded')));
@@ -203,10 +226,10 @@ test('cross-page navigation keeps its target and history through dirty-draft can
   try {
     await library(page);
     await page.locator('#editReaderBtn').click(); await page.locator('.reader-editor').fill('未保存草稿');
-    await page.locator('#readerVideoLink').click(); await page.locator('#dlgCancel').click();
+    await followReaderVideo(page); await page.locator('#dlgCancel').click();
     assert.equal(await page.locator('.reader-editor').inputValue(), '未保存草稿');
     assert.equal(await page.locator('#materialBack').getAttribute('aria-label'), '返回任务');
-    await page.locator('#readerVideoLink').click(); await page.locator('#discardChanges').click();
+    await followReaderVideo(page); await page.locator('#discardChanges').click();
     await page.locator('.video-card.is-located[data-video-id=video-one]').waitFor();
     assert.deepEqual(page.errors, []);
   } finally { await page.close(); }
@@ -217,7 +240,7 @@ test('a delayed video lookup never navigates away from a newly selected document
   try {
     await library(page);
     await page.evaluate(() => { __MOCK__.get_downloaded_videos = () => new Promise(resolve => window.__finishLookup = resolve); });
-    await page.locator('#readerVideoLink').click();
+    await followReaderVideo(page);
     await page.locator('.doc[data-doc-id="job:two"] .doc-open').click();
     await page.waitForFunction(() => document.querySelector('#readerBody h1')?.textContent === '整理稿 job:two');
     await page.evaluate(() => __finishLookup({ok: true, items: __workflowVideos}));
@@ -272,7 +295,7 @@ test('comparison is read-only safe text and a late comparison cannot replace ano
   } finally { await page.close(); }
 });
 
-test('long comparisons render incrementally and raw-only documents explain the disabled action', async () => {
+test('long comparisons show changes first and raw-only documents explain the available version', async () => {
   const page = await open({width: 560, height: 500});
   try {
     await page.evaluate(() => {
@@ -281,14 +304,17 @@ test('long comparisons render incrementally and raw-only documents explain the d
       __workflowDocs.find(doc => doc.task_id === 'job:two').has_final = false;
     });
     await library(page); await page.locator('#compareReaderBtn').click(); await page.locator('.reader-diff').waitFor();
+    assert.equal(await page.locator('.diff-row').count(), 1);
+    assert.equal(await page.locator('.diff-added').count(), 1);
+    await page.locator('#diffShowContext').click();
     assert.equal(await page.locator('.diff-row').count(), 80);
     await page.locator('.diff-more').click(); assert.equal(await page.locator('.diff-row').count(), 160);
     assert.equal(await page.locator('#readerBody').evaluate(node => node.scrollWidth > node.clientWidth), false);
     await page.locator('#readerBack').click();
     await page.locator('.doc[data-doc-id="job:two"] .doc-open').click();
     await page.waitForFunction(() => document.querySelector('#readerBody h1')?.textContent === '原稿 job:two');
-    assert(await page.locator('#compareReaderBtn').isDisabled());
-    assert.match(await page.locator('#compareReaderBtn').getAttribute('title'), /同时存在/);
+    assert(await page.locator('#compareReaderBtn').isHidden());
+    assert(await page.getByText('仅有原始转写', {exact: true}).isVisible());
     assert.deepEqual(page.errors, []);
   } finally { await page.close(); }
 });
@@ -299,7 +325,7 @@ test('reader resumes a paragraph after page navigation and a resized browser rel
     const text = '# 长文\n\n' + Array.from({length: 120}, (_, index) => '第' + index + '段。' + '用于核对阅读位置的长句。'.repeat(12)).join('\n\n');
     await page.evaluate(text => { __workflowText['job:two'].raw = text; }, text);
     await library(page, 'job:two');
-    await page.getByRole('button', {name: '原稿', exact: true}).click();
+    await page.getByRole('button', {name: '原始转写', exact: true}).click();
     await page.waitForFunction(() => document.querySelector('#readerBody h1')?.textContent === '长文');
     await page.locator('#readerBody').evaluate(node => { node.scrollTop = 2200; });
     await page.waitForTimeout(250);
@@ -313,7 +339,7 @@ test('reader resumes a paragraph after page navigation and a resized browser rel
     await page.waitForFunction(() => window.__appReady); await page.locator('[data-page=library]').click();
     await page.waitForFunction(() => document.querySelector('#readerBody')?.scrollTop > 1000);
     assert.equal(await visible(), original);
-    assert.equal(await page.locator('#readerTabs [aria-pressed=true]').textContent(), '原稿');
+    assert.equal(await page.locator('#readerTabs [aria-pressed=true]').textContent(), '原始转写');
     assert.deepEqual(page.errors, []);
   } finally { await page.close(); }
 });
@@ -400,7 +426,7 @@ test('batch retry is single flight and an interrupted submission is recorded as 
     await page.evaluate(() => __failRetry(new Error('请求中断')));
     await page.getByText('已提交 0 · 跳过 0 · 等待浏览器 0 · 未确认 2', {exact: true}).waitFor();
     await page.locator('.batch-receipt summary').click();
-    assert(await page.getByText('请求中断', {exact: true}).isVisible());
+    assert(await page.getByText('应用操作未完成，请重试', {exact: true}).isVisible());
     assert.deepEqual(page.errors, []);
   } finally { await page.close(); }
 });
@@ -445,8 +471,10 @@ test('the latest translation-view choice wins while a translation read is pendin
         ? new Promise(resolve => window.__finishTranslation = () => resolve({ok: true, text: '迟到的译文'})) : reader(id, tab);
     });
     await library(page);
+    await page.locator('#readerTranslationBtn').click();
     await page.locator('#readerTransTabs').getByRole('button', {name: '整页译文', exact: true}).click();
     await page.waitForFunction(() => window.__finishTranslation);
+    await page.locator('#readerTranslationBtn').click();
     await page.locator('#readerTransTabs').getByRole('button', {name: '原文', exact: true}).click();
     await page.evaluate(() => __finishTranslation());
     assert.equal(await page.locator('#readerBody h1').textContent(), '整理稿 job:one');

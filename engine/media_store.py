@@ -21,6 +21,7 @@ VIDEO_EXTS = {
     ".mpg", ".ts", ".mts", ".m2ts", ".3gp",
 }
 MEDIA_EXTS = AUDIO_EXTS | VIDEO_EXTS
+SCHEMA_VERSION = 2
 
 
 class MediaItem(TypedDict):
@@ -161,21 +162,49 @@ class MediaStore:
             check_same_thread=False,
             timeout=max(busy_timeout_ms, 0) / 1000,
         )
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
-        with self._conn:
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._supported_schema_version()
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._migrate()
+        except BaseException:
+            self._conn.close()
+            raise
+
+    def _supported_schema_version(self) -> int:
+        registered = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_schema'"
+        ).fetchone()
+        row = self._conn.execute(
+            "SELECT version FROM app_schema WHERE component='media'"
+        ).fetchone() if registered else None
+        version = row["version"] if row else 0
+        if version > SCHEMA_VERSION:
+            raise MediaStoreError(
+                f"媒体库版本 {version} 高于当前支持版本 {SCHEMA_VERSION}，请更新 FoilPage 后再打开"
+            )
+        return version
+
+    def _migrate(self) -> None:
+        with self._lock, self._conn:
+            # Inspect and change the shared schema under one writer transaction.
+            # Recheck after waiting so a concurrent newer opener cannot be stamped down.
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._supported_schema_version()
+            for statement in _SCHEMA.split(";"):
+                if statement.strip():
+                    self._conn.execute(statement)
             columns = {row[1] for row in self._conn.execute("PRAGMA table_info(media)")}
             if "original_content_sha256" not in columns:
                 self._conn.execute("ALTER TABLE media ADD COLUMN original_content_sha256 TEXT")
                 self._conn.execute("UPDATE media SET original_content_sha256=content_sha256")
             self._conn.execute(
                 """
-                INSERT INTO app_schema(component, version) VALUES ('media', 2)
+                INSERT INTO app_schema(component, version) VALUES ('media', ?)
                 ON CONFLICT(component) DO UPDATE SET version=excluded.version
-                """
+                """, (SCHEMA_VERSION,),
             )
 
     def import_file(self, path: str, *, display_name: str = "", fast_if_unchanged: bool = False,

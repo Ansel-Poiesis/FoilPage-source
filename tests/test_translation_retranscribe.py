@@ -17,6 +17,7 @@ from app.translation_service import (
     detect_language,
     split_segments,
     translate_article,
+    translation_paths,
     _parse_translations,
 )
 from engine.queue_store import QueueStore
@@ -108,10 +109,15 @@ def test_parse_translations_rejects_count_mismatch() -> None:
     from engine.agent_client import AgentError
 
     assert _parse_translations('{"translations":["a","b"]}', 2) == ["a", "b"]
-    with pytest.raises(AgentError):
+    with pytest.raises(AgentError) as mismatch:
         _parse_translations('{"translations":["a"]}', 2)
-    with pytest.raises(AgentError):
+    assert mismatch.value.code == "translation_segment_mismatch"
+    with pytest.raises(AgentError) as empty:
         _parse_translations('{"translations":["a",""]}', 2)
+    assert empty.value.code == "translation_empty_segment"
+    with pytest.raises(AgentError) as invalid:
+        _parse_translations('prefix {"translations":', 2)
+    assert invalid.value.code == "translation_invalid_response"
 
 
 def _translate_settings(tmp_path: Path) -> dict:
@@ -120,11 +126,15 @@ def _translate_settings(tmp_path: Path) -> dict:
             "database_path": str(tmp_path / "data" / "library.db")}
 
 
-def test_translate_article_writes_outputs(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("source_tab", ["final", "raw"])
+def test_translate_article_writes_outputs(tmp_path: Path, monkeypatch, source_tab: str) -> None:
     raw = tmp_path / "output" / "job" / "fixture_raw.md"
     raw.parent.mkdir(parents=True)
     markdown = "# 标题\n\n第一段。\n\n第二段。"
-    raw.write_text(markdown, encoding="utf-8")
+    final = raw.with_name("fixture.md")
+    raw.write_text("原始转写" if source_tab == "final" else markdown, encoding="utf-8")
+    if source_tab == "final":
+        final.write_text(markdown, encoding="utf-8")
     calls = []
 
     def fake_chat(settings, messages, *, json_mode=False, cancel_check=None):
@@ -134,19 +144,55 @@ def test_translate_article_writes_outputs(tmp_path: Path, monkeypatch) -> None:
                           ensure_ascii=False)
 
     monkeypatch.setattr("app.translation_service.chat_completion", fake_chat)
-    manifest = {"job_id": "job12345678", "raw_path": str(raw), "final_path": "",
+    manifest = {"job_id": "job12345678", "raw_path": str(raw), "final_path": str(final),
                 "source_title": "标题"}
     updated = translate_article(manifest, _translate_settings(tmp_path), "zh-en")
     assert updated["translation_status"] == "done"
     assert updated["translation_lang"] == "en"
+    assert updated["translation_source_tab"] == source_tab
     article = Path(updated["translation_path"])
     segments_file = Path(updated["translation_segments_path"])
-    assert article.is_file() and article.name == "fixture_译文_en.md"
+    assert article.is_file() and (article, segments_file) == translation_paths(raw, "en", updated["translation_run_id"])
     assert article.read_text(encoding="utf-8") == "EN: # 标题\n\nEN: 第一段。\n\nEN: 第二段。\n"
     pairs = json.loads(segments_file.read_text(encoding="utf-8"))
     assert [pair["dst"] for pair in pairs] == ["EN: # 标题", "EN: 第一段。", "EN: 第二段。"]
     assert pairs[1]["src"] == "第一段。"
     assert calls and calls[0][0]["role"] == "system"
+
+
+def test_translation_retries_only_segment_count_mismatch(tmp_path: Path, monkeypatch) -> None:
+    from engine.agent_client import AgentError
+
+    raw = tmp_path / "retry_raw.md"
+    raw.write_text("# 标题\n\n正文。", encoding="utf-8")
+    manifest = {"job_id": "job12345678", "raw_path": str(raw), "final_path": str(raw)}
+    calls = []
+
+    def mismatch_then_success(_settings, segments, _target):
+        calls.append(segments)
+        if len(calls) == 1:
+            error = AgentError("段落数不一致")
+            error.code = "translation_segment_mismatch"
+            raise error
+        return ["Translated title", "Translated body"]
+
+    monkeypatch.setattr("app.translation_service._translate_batch", mismatch_then_success)
+    assert translate_article(manifest, _translate_settings(tmp_path), "zh-en")["translation_status"] == "done"
+    assert len(calls) == 2
+
+    calls.clear()
+
+    def invalid_response(*_args):
+        calls.append(True)
+        error = AgentError("格式无效")
+        error.code = "translation_invalid_response"
+        raise error
+
+    monkeypatch.setattr("app.translation_service._translate_batch", invalid_response)
+    with pytest.raises(AgentError) as caught:
+        translate_article(manifest, _translate_settings(tmp_path), "zh-en")
+    assert caught.value.code == "translation_invalid_response"
+    assert len(calls) == 1
 
 
 def test_translate_article_rejects_bad_direction_or_empty(tmp_path: Path) -> None:
@@ -248,3 +294,47 @@ def test_translate_text_rejects_concurrent_run(tmp_path: Path, monkeypatch) -> N
                 break
             time.sleep(0.02)
         assert bridge._translation["status"] == "done"
+
+
+def test_failed_retranslation_preserves_previous_result_status(tmp_path: Path, monkeypatch) -> None:
+    controller = TranslationBridgeController(tmp_path)
+    bridge = _make_bridge(controller)
+    previous = _done_manifest(tmp_path, translation=True)
+    article = Path(previous["translation_path"])
+    article.parent.mkdir()
+    article.write_text("Earlier translation", encoding="utf-8")
+    controller.queue.get_manifest.side_effect = lambda job_id: previous if job_id == "job12345678" else None
+
+    def failed_translate(*_args):
+        raise RuntimeError("fixture failure")
+
+    monkeypatch.setattr("app.translation_service.translate_article", failed_translate)
+    bridge._translation.update(task_id="job12345678", status="running", running=True)
+    running = bridge.get_translation_status("job:job12345678")
+    assert running["status"] == "running" and running["has_translation"]
+    bridge._translation_worker("job12345678", "auto")
+    bridge._translation.update(task_id="different-job", status="running", running=True)
+    result = bridge.get_translation_status("job:job12345678")
+    assert result["status"] == "failed"
+    assert result["has_translation"] and result["error"] == "fixture failure"
+    assert article.read_text(encoding="utf-8") == "Earlier translation"
+    controller.queue.replace_manifest.assert_not_called()
+
+
+@pytest.mark.parametrize("sidecar", [None, "invalid JSON", '[{"dst":"Translated only"}]',
+                                    '[{"src":"原文", "dst":"Out-of-date translation"}]'])
+def test_translation_reader_can_open_article_without_paragraph_pairs(tmp_path: Path, sidecar: str | None) -> None:
+    controller = TranslationBridgeController(tmp_path)
+    bridge = _make_bridge(controller)
+    output = Path(controller.settings["output_dir"])
+    output.mkdir()
+    article, pairs = output / "translated.md", output / "translated.segments.json"
+    article.write_text("Full translation", encoding="utf-8")
+    if sidecar is not None:
+        pairs.write_text(sidecar, encoding="utf-8")
+    manifest = {**_done_manifest(tmp_path, translation=True), "translation_path": str(article),
+                "translation_segments_path": str(pairs)}
+    controller.queue.get_manifest.return_value = manifest
+    response = bridge._reader_translation("job:job12345678", {"task_id": "job12345678"})
+    assert response["ok"] and response["text"] == "Full translation"
+    assert response["segments"] == [] and response["source_tab"] == ""

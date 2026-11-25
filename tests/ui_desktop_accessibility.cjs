@@ -107,15 +107,38 @@ fs.mkdirSync(output, {recursive:true});
     assert(await page.locator('.job-open').first().evaluate(e=>e===document.activeElement));
 
     const themeEvidence = [];
+    const libraryFonts = {};
     let headingFonts = [];
     const cdp = await page.context().newCDPSession(page);
     await cdp.send('DOM.enable');
     await cdp.send('CSS.enable');
+    async function wenKaiGlyphs(selector) {
+      await page.evaluate(()=>document.fonts.ready);
+      const style = await page.locator(selector).first().evaluate(node=>({
+        family:getComputedStyle(node).fontFamily, editor:node instanceof HTMLTextAreaElement,
+      }));
+      assert.match(style.family,/^"LXGW WenKai Screen"/,selector+' uses WenKai first');
+      const {root:doc} = await cdp.send('DOM.getDocument');
+      let {nodeId} = await cdp.send('DOM.querySelector',{nodeId:doc.nodeId,selector});
+      if (style.editor) {
+        // Chromium lays out textarea values in its own shadow DOM.
+        const {node} = await cdp.send('DOM.describeNode',{nodeId,depth:3,pierce:true});
+        const editable = node.shadowRoots?.[0]?.children?.[0];
+        assert(editable?.backendNodeId,selector+' contains rendered editable text');
+        const {nodeIds} = await cdp.send('DOM.pushNodesByBackendIdsToFrontend',{backendNodeIds:[editable.backendNodeId]});
+        [nodeId] = nodeIds;
+      }
+      const {fonts} = await cdp.send('CSS.getPlatformFontsForNode',{nodeId});
+      assert(fonts.some(font=>font.postScriptName==='LXGWWenKaiScreen' && font.glyphCount>0 && font.isCustomFont),
+        selector+' renders with the bundled WenKai glyphs');
+      return fonts;
+    }
     for (const theme of ['dark','paper','dracula','tokyo-night','nord','mocha','gruvbox','rose-pine','latte','nord-light']) {
       await page.evaluate(theme=>{AppState.settings.theme=theme;applyTheme();switchView('workbench');},theme);
       const css = await page.locator('.sidebar').evaluate(e=>({font:getComputedStyle(e).fontFamily,shadow:getComputedStyle(e).boxShadow,bg:getComputedStyle(e).backgroundColor}));
       assert.notEqual(css.shadow,'none',`shell depth resolves for ${theme}`);
-      assert.match(css.font,/Segoe UI Variable/);
+      assert.match(css.font,/^"LXGW WenKai Screen"/);
+      const navigationFonts = ['dark','paper'].includes(theme) ? await wenKaiGlyphs('.nav-row[data-page="library"]') : undefined;
       const scrollbarContrast=await page.locator('#nav').evaluate(node=>{
         const canvas=document.createElement('canvas'); canvas.width=canvas.height=1;
         const context=canvas.getContext('2d',{willReadFrequently:true});
@@ -134,7 +157,7 @@ fs.mkdirSync(output, {recursive:true});
       assert(scrollbarContrast>=3,`scrollbar remains visible in ${theme}, contrast ${scrollbarContrast.toFixed(2)}`);
       await page.mouse.move(0,0);
       await page.screenshot({animations:'disabled',path:path.join(output,`theme-${theme}.png`)});
-      themeEvidence.push({theme,...css,scrollbarContrast});
+      themeEvidence.push({theme,...css,scrollbarContrast,navigationFonts});
     }
     await page.evaluate(()=>{AppState.settings.theme='dark';applyTheme();});
     for(const width of [1280,960,640,560]) {
@@ -147,21 +170,46 @@ fs.mkdirSync(output, {recursive:true});
       await page.waitForSelector('.doc-open');
       await page.locator('.doc-open').first().focus();
       await page.keyboard.press('Enter');
-      await page.waitForSelector('.reader-body h1');
-      await page.locator('#subtitleBtn').click();
-      assert.equal(await page.evaluate(()=>document.activeElement.dataset.fmt),'srt');
+      await page.waitForSelector('.reader-body p');
+      if (width === 1280) {
+        libraryFonts.directory = await wenKaiGlyphs('.doc-title');
+        libraryFonts.heading = await wenKaiGlyphs('.reader-doc-title');
+        libraryFonts.body = await wenKaiGlyphs('#readerBody > p');
+        await page.locator('#editReaderBtn').click();
+        libraryFonts.editor = await wenKaiGlyphs('.reader-editor');
+        await page.locator('#cancelReaderBtn').click();
+        await page.waitForSelector('#readerBody > p');
+      }
+      const documentMenu = page.locator('#readerMenuBtn');
+      await documentMenu.focus();
+      await page.keyboard.press('Enter');
+      const subtitles = page.getByRole('menuitem',{name:'导出转写字幕…',exact:true});
+      await subtitles.focus();
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(()=>document.activeElement.dataset.fmt==='srt');
       await page.keyboard.press('ArrowDown');
       assert.equal(await page.evaluate(()=>document.activeElement.dataset.fmt),'vtt');
       await page.keyboard.press('Escape');
       assert.equal(await page.locator('.ctx-menu').count(),0);
-      assert(await page.locator('#subtitleBtn').evaluate(e=>e===document.activeElement));
+      assert(await documentMenu.evaluate(e=>e===document.activeElement));
       await page.screenshot({animations:'disabled',path:path.join(output,`reader-${width}.png`)});
+      if (width > 1000) {
+        const separator = page.getByRole('separator',{name:'文稿列表宽度'});
+        await separator.focus();
+        const originalWidth = Number(await separator.getAttribute('aria-valuenow'));
+        await page.keyboard.press('ArrowRight');
+        assert(Number(await separator.getAttribute('aria-valuenow')) > originalWidth,'keyboard can widen the document list');
+        await page.keyboard.press('Enter');
+        assert.equal(Number(await separator.getAttribute('aria-valuenow')),originalWidth,'keyboard can restore the default list width');
+      } else {
+        await page.locator('#readerBack').focus();
+        await page.keyboard.press('Enter');
+        assert(await page.locator('.doc-open').first().evaluate(e=>e===document.activeElement),'return restores focus to the document');
+      }
       await page.locator('.nav-row[data-page="settings"]').click();
       await page.locator('.sitem').filter({hasText:'文本整理'}).click();
       if (width === 1280) {
-        const {root:doc}=await cdp.send('DOM.getDocument');
-        const {nodeId}=await cdp.send('DOM.querySelector',{nodeId:doc.nodeId,selector:'#page-settings .set-group h3'});
-        headingFonts=(await cdp.send('CSS.getPlatformFontsForNode',{nodeId})).fonts;
+        headingFonts = await wenKaiGlyphs('#page-settings .set-group h3');
       }
       const titleDetails=page.locator('details').filter({has:page.locator('summary').filter({hasText:'标题模型与规则'})});
       await titleDetails.locator('summary').click();
@@ -185,6 +233,8 @@ fs.mkdirSync(output, {recursive:true});
     await page.evaluate(()=>{AppState.settings.theme='paper';applyTheme();switchView('library');});
     await page.waitForSelector('.doc-open');
     await page.locator('.doc-open').first().click();
+    libraryFonts.paperHeading = await wenKaiGlyphs('.reader-doc-title');
+    libraryFonts.paperBody = await wenKaiGlyphs('#readerBody > p');
     await page.screenshot({animations:'disabled',path:path.join(output,'reader-paper.png')});
     await page.evaluate(()=>{AppState.settings.theme='dark';applyTheme();switchView('links');});
     await page.mouse.move(0,0);
@@ -219,7 +269,7 @@ fs.mkdirSync(output, {recursive:true});
       await page.keyboard.press('Escape');
     }
     assert.deepEqual(errors,[]);
-    fs.writeFileSync(path.join(output,'desktop-evidence.json'),JSON.stringify({widths:[1440,1280,960,640,560],themes:themeEvidence,headingFonts,checks:['keyboard task selection','dialog focus trap + escape + return','native document actions','subtitle menu arrow keys','narrow title rules','narrow subscription inputs','reduced motion','integrated window title controls','all nine pages','video cards','guide and modal layering','1440x900 and 560x500 overflow'],errors},null,2));
+    fs.writeFileSync(path.join(output,'desktop-evidence.json'),JSON.stringify({widths:[1440,1280,960,640,560],themes:themeEvidence,headingFonts,libraryFonts,checks:['bundled WenKai glyphs in shell, settings and library','keyboard task selection','dialog focus trap + escape + return','native document actions','subtitle menu arrow keys','narrow title rules','narrow subscription inputs','reduced motion','integrated window title controls','all nine pages','video cards','guide and modal layering','1440x900 and 560x500 overflow'],errors},null,2));
     console.log('Desktop keyboard, 10 themes and advanced forms passed at 1280 / 960 / 640 / 560.');
   } finally { await browser.close(); }
 })().catch(e=>{console.error(e);process.exitCode=1;});

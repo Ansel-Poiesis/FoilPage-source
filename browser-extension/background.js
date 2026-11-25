@@ -3,6 +3,9 @@
 import { getToken, health, request } from "./api.js";
 import { browserFallbackMediaUrls } from "./fallback-policy.js";
 import { pickDouyinResolveCookies } from "./douyin-cookies.js";
+import "./ui-contract.js";
+
+const {errorInfo, isTerminalTask, isTemporaryOffline, needsDesktopConnection, percent: taskPercent} = globalThis.FoilPageContract;
 
 /* 更新检查复用已有消息、心跳与恢复事件，不额外保活。仅在弹窗关闭且
    下载/转写/恢复工作均空闲时尝试重载当前注册目录；无法迁移旧解压路径。 */
@@ -484,10 +487,6 @@ async function handleDesktopDouyinDownload(message) {
 let desktopEventsConnectPromise = null;
 let desktopEventsReconnectDelay = 5000;
 let desktopConnectionState = "offline";
-function isTemporaryOffline(error) {
-  return ["local_api_unavailable", "local_api_timeout"].includes(error?.code)
-    || Number(error?.status) >= 500;
-}
 function scheduleDesktopEventsReconnect() {
   if (desktopEventsReconnectTimer) return;
   const delay = desktopEventsReconnectDelay;
@@ -965,7 +964,7 @@ function transcriptionTerminal(job) {
 
 function localTaskProgressMessage(job) {
   const status = String(job?.status || "");
-  const percent = Math.max(0, Math.min(100, Math.round(Number(job?.progress || 0) * 100)));
+  const percent = taskPercent(job);
   if (status === "done") return job?.job_id ? transcriptionTerminal(job).message : "下载成功";
   if (status === "failed") {
     if (job.download_complete) return "转写失败，请在 FoilPage 查看";
@@ -1246,7 +1245,7 @@ async function pollLocalTask(taskId) {
       await handleLocalTaskFailed(job);
     } else {
       const downloaded = Boolean(job.download_complete);
-      const percent = Math.max(0, Math.min(100, Math.round(Number(job?.progress || 0) * 100)));
+      const percent = taskPercent(job);
       const bucket = Math.floor(percent / 10) * 10;
       const terminal = isTerminalTask(job.status);
       if (downloaded && !state.downloadNotified) {
@@ -1666,7 +1665,6 @@ async function performPageDownload(message) {
   }
 }
 
-function isTerminalTask(status) { return ["done", "failed", "cancelled"].includes(status); }
 function safeTaskSnapshot(job) {
   if (!job?.id) return null;
   return {
@@ -1960,6 +1958,7 @@ void resumeBackgroundQueue().catch(() => {});
 // “本地任务未能创建”，没有任何反馈或解决办法的引导）。
 function submissionFailureNotice(error) {
   const code = String(error?.code || "");
+  const failure = errorInfo(code, error?.status, error?.retryable);
   const detail = safeFailureText(error?.message || "", 160);
   if (code === "login_required") return "请先在 FoilPage 桌面端登录，再回到本页重试下载。";
   if (needsDesktopConnection(code)) {
@@ -1968,16 +1967,13 @@ function submissionFailureNotice(error) {
   if (code === "douyin_verification_required") {
     return "抖音要求网页校验。请在当前视频页完成验证，确认能播放后再点下载。";
   }
-  if (["local_api_unavailable", "local_api_timeout"].includes(code)) {
+  if (failure.category === "connection") {
     return "FoilPage 桌面端未连接。请打开或重启 FoilPage，确认它在运行后回到本页再点「下载」。";
   }
   if (detail) return `下载任务未能创建：${detail}。请到 FoilPage 任务页查看原因后重试。`;
   return "下载任务未能创建。请确认 FoilPage 桌面端正在运行；仍失败请到 FoilPage 任务页查看原因。";
 }
 
-function needsDesktopConnection(code) {
-  return ["unauthorized", "origin_denied", "local_api_token_missing", "pairing_closed"].includes(code);
-}
 
 function pageSubmissionReply(job) {
   const failed = Boolean(job?.submission_failed);

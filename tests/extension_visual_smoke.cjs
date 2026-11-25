@@ -30,7 +30,7 @@ async function verifyDouyinFeedbackStartup(browser) {
           else callback?.({ok:true});
         }}};
       });
-      await page.goto(url);await page.addStyleTag({path:path.join(root,'content.css')});
+      await page.goto(url);await page.addStyleTag({path:path.join(root,'brand.css')});await page.addStyleTag({path:path.join(root,'content.css')});
       const delivered=`\nfixtureMessage({type:'shengjian-toast',taskUrl:${JSON.stringify(url)},taskId:'fixture-download',stage:'download',message:'下载成功',error:false},{},()=>{});`;
       // Deliver in the same script turn, before the scheduled first frame.
       await page.addScriptTag({content:hosts});
@@ -102,8 +102,10 @@ async function verifyCompactPlayerFeedback(browser, [id, label, url, script, sty
     });
     await page.goto(url);
     await page.addStyleTag({ content: '.layout{margin-inline:12px}.caption{white-space:normal;width:max-content;max-width:calc(100% - 44px)}' });
+    await page.addStyleTag({ path: path.join(root, 'brand.css') });
     await page.addStyleTag({ path: path.join(root, stylesheet) });
     if (id === 'douyin') await page.addScriptTag({ path: path.join(root, 'douyin-hosts.js') });
+    else await page.addScriptTag({ path: path.join(root, 'ui-contract.js') });
     await page.addScriptTag({ path: path.join(root, script) });
     const message = '正文转写成功，标题处理失败。文稿仍已保留，请在 FoilPage 任务页打开这条记录，核对原稿和整理稿，查看标题处理失败的具体原因。';
     await page.evaluate(({ message, url }) => fixtureMessage({
@@ -186,6 +188,7 @@ async function verifyDouyinPlayerLayout(browser) {
       } };
     });
     await page.goto(url);
+    await page.addStyleTag({ path: path.join(root, 'brand.css') });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'douyin-hosts.js') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
@@ -338,8 +341,10 @@ async function verifyPlayerLaunch(browser, [id, label, url, script, stylesheet])
       }, true);
     });
     await page.goto(url);
+    await page.addStyleTag({path:path.join(root,'brand.css')});
     await page.addStyleTag({path:path.join(root,stylesheet)});
     if (id === 'douyin') await page.addScriptTag({path:path.join(root,'douyin-hosts.js')});
+    else await page.addScriptTag({path:path.join(root,'ui-contract.js')});
     await page.addScriptTag({path:path.join(root,script)});
     for (const action of ['download','transcribe']) {
       const selector = `[data-shengjian-action="${action}"]`;
@@ -423,8 +428,10 @@ async function main(){
       await page.route(url,route=>route.fulfill({contentType:'text/html',body:playerHtml(label)}));
       await page.addInitScript(()=>{globalThis.chrome={runtime:{getManifest:()=>({version:'0.14.0'}),onMessage:{addListener(listener){globalThis.fixtureMessage=listener;}},sendMessage(message,callback){callback?.({ok:true,job:message.type==='shengjian-task-state'&&window.fixtureRestoredTask?.url===message.url?window.fixtureRestoredTask:null});}}};});
       await page.goto(url);
+      await page.addStyleTag({path:path.join(root,'brand.css')});
       await page.addStyleTag({path:path.join(root,css)});
       if (js==='content.js') await page.addScriptTag({path:path.join(root,'douyin-hosts.js')});
+      else await page.addScriptTag({path:path.join(root,'ui-contract.js')});
       await page.addScriptTag({path:path.join(root,js)});
       await page.evaluate(()=>fixtureMessage({type:'shengjian-toast',message:'下载成功',error:false}, {},()=>{}));
       await page.waitForTimeout(100);

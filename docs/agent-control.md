@@ -19,7 +19,7 @@ FoilPage 提供本地 CLI 和标准 stdio MCP，可控制文稿、日常设置�
 }}}
 ```
 
-默认资料目录为当前 Windows 用户的 `%LOCALAPPDATA%/FoilPage`（1.3.8 前为 `VideoToArticle`，两处都会解析）。自定义资料目录，在 `mcp` 前添加 `--data-dir` 和绝对路径。不要复制完整 `settings.json`，也不要把令牌放进配置、命令参数或环境变量。
+新用户默认资料目录为当前 Windows 用户的 `%LOCALAPPDATA%/FoilPage`。已有 `VideoToArticle` 根继续使用；Desktop、Worker 与 Agent 共享只读定位规则，不因升级自动改名。两个不同的真实根都有资料时拒绝自动选择；自定义资料目录，在 `mcp` 前添加 `--data-dir` 和绝对路径。已有身份绑定与数据库不符时拒绝连接，普通设置不能修改绑定。不要复制完整 `settings.json`，也不要把令牌放进配置、命令参数或环境变量。
 
 Codex 使用 TOML：执行 `FoilPage-Agent.exe mcp-config --format codex`，将输出追加到自己的 MCP 配置，保留已有服务，再重新加载客户端 MCP。只读配置执行 `mcp-config --read-only --format codex`。旧 `--allow-write`／`--allow-processing` 参数保留兼容，现在完整模式不再需要逐项开启。
 
@@ -71,6 +71,10 @@ $sjAgent = "$env:LOCALAPPDATA/Programs/FoilPage/agent/FoilPage-Agent.exe"
 
 `job:` 为转写任务，`dl:` 为独立下载任务；请从查询结果复制实际 ID。视频操作使用视频库返回的媒体 ID，不能用任意路径代替已登记视频。CLI 成功退出码 `0`，参数或操作拒绝 `2`，无法连接或读取本机配置 `3`。
 
+任务和文稿查询每页最多 200 项，返回 `items`、全部匹配数量 `total` 和 `next_cursor`。`next_cursor` 为 `null` 时已到末页；有值时，在下一次相同查询中传 `--cursor "上一页的next_cursor"`（MCP 为可选 `cursor` 参数，HTTP 的 `tasks.list` / `documents.list` 同名参数）。原来不传游标的调用继续返回第一页。按更新时间和任务 ID 倒序排列，同名及同一时间的资料也可完整翻页；每页数量可以调整。
+
+游标绑定查询类型及规范化后的 `query` / `status` 筛选，不含正文、路径或凭据。更换筛选或查询类型时应移除游标；误用返回 `invalid_cursor`。翻页期间若匹配集的成员或排序键发生变化，返回 `cursor_stale`，请清空游标从第一页重新查询，以免静默漏项或重复。这里保存的是排序连续性条件，正文和进度仍以读取时的当前状态为准。
+
 修改正文先读取，再把修改稿保存为 UTF-8 文件：
 
 ```powershell
@@ -104,6 +108,8 @@ API 密钥、验证码和用户交易号等秘密参数应使用受保护的本�
 入口为 `POST /v1/agent/call`，结构 `{ "method": "operations.call", "params": { "operation": "settings.read", "arguments": {} } }`。优先使用 CLI/MCP 完成认证和校验。应用操作采用静态注册表；无法查询原始密钥、修改账户／积分／许可字段、执行任意函数或服务管理操作。短期授权／签名地址和会话不进入结果。
 
 正文限 2,000,000 字节，请求限 3 MiB，每次最多查询 200 项。正文读取必须是输出目录内登记的已完成 Markdown／文本，源视频、路径越界和正在处理的产物会被拒绝。导入、安装和导出按用户指定本机绝对路径及原业务规则执行，网络路径被拒绝。
+
+媒体重新关联的 `candidate_path` 同样须为本机绝对路径；相对路径、盘符相对路径、UNC、网络地址和含 NUL 的路径在文件访问前拒绝。预览仍只检查已登记媒体的候选内容，实际应用继续要求预览 revision 和明确确认。
 
 连接失败时检查应用是否运行、API 是否启用、资料目录是否一致。`operation_unavailable`／`unknown_method` 需核对桌面与控制程序版本；`confirmation_required` 需核对用户是否明确要求该删除或替换。`login_required` 表示需要登录；账户权益变化后重新联网同步签名许可证。操作提交不等于下载、转写、付款或到账完成；超时后先查询实际状态，不自动重复下单或处理。
 

@@ -57,6 +57,7 @@ class FakeController:
         self.queue.list_jobs.return_value = []
         self.media = mock.Mock()
         self.media.list_media.return_value = []
+        self.is_managed_download = mock.Mock(return_value=False)
         self.purged_outputs = []
         self.purged_downloads = []
 
@@ -1017,8 +1018,11 @@ def test_check_update_network_failure_degrades_gracefully():
     assert "error" in result
 
 
-def test_data_reconcile_reports_health():
+def test_data_reconcile_reports_health(tmp_path):
     bridge, controller, _ = make_bridge()
+    controller.settings.update(output_dir=str(tmp_path / "output"), download_dir=str(tmp_path / "downloads"))
+    controller.settings_store = mock.Mock(base_dir=tmp_path)
+    controller.queue.manifest_file_paths.return_value = []
     controller.downloads.list.return_value = [{
         "id": "dl-1", "title": "悬空任务", "status": "awaiting_browser",
         "updated_at": "2020-01-01 00:00:00", "url": "https://example.com/v",
@@ -1036,6 +1040,31 @@ def test_cleanup_orphans_delegates_to_controller():
     assert result["ok"] is True
     assert controller.purged_outputs == ["C:/out/orphan1"]
     assert controller.purged_downloads == ["C:/dl/orphan.mp4"]
+
+
+def test_library_files_deletion_reports_partial_result():
+    bridge, controller, _ = make_bridge()
+    controller.delete_library_items = mock.Mock(return_value=["first"])
+    result = bridge.delete_library_items(["job:first", "job:second", "job:first"], False)
+    controller.delete_library_items.assert_called_once_with(["first", "second"], remove_records=False)
+    assert result["ok"] is False
+    assert result["removed"] == ["first"]
+    assert result["error"]
+
+
+def test_library_deletion_waits_for_translation_to_finish():
+    bridge, controller, _ = make_bridge()
+    controller.delete_texts = mock.Mock(return_value=["first"])
+    controller.delete_library_items = mock.Mock(return_value=["first"])
+    bridge._translation.update(running=True, task_id="first")
+    for result in (
+        bridge.delete_texts(["job:first"]),
+        bridge.delete_library_items(["job:first"], True),
+    ):
+        assert result["ok"] is False
+        assert "翻译" in result["error"]
+    controller.delete_texts.assert_not_called()
+    controller.delete_library_items.assert_not_called()
 
 
 def test_pick_save_and_open_file_dialogs():

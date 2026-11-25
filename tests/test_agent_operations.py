@@ -23,7 +23,7 @@ def operation_arguments(name):
             continue
         result[key] = {"string": "fixture", "boolean": True, "object": {"theme": "sage"},
                        "array": ["fixture"]}[schema["type"]]
-        if key in ("zip_path", "dest_path"):
+        if key in ("zip_path", "dest_path", "candidate_path"):
             result[key] = "C:/agent-fixtures/test.zip"
         elif key in ("paths", "outputs", "downloads"):
             result[key] = ["C:/agent-fixtures/test.mp4"]
@@ -67,9 +67,11 @@ def test_registry_matches_real_bridge_signatures_without_importing_desktop():
     module = ast.parse((root / "app" / "bridge.py").read_text(encoding="utf-8"))
     bridge = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Bridge")
     methods = {node.name: node for node in bridge.body if isinstance(node, ast.FunctionDef)}
-    # 拆分后的域方法住在混入基类里（第一阶段：bridge_account.py 的登录/账号域）。
     # 注册表必须与「Bridge 实例实际可见的方法面」一致，因此把基类类体并入 AST 比对。
-    base_files = {"AccountBridgeMixin": "bridge_account.py"}
+    base_files = {
+        "AccountBridgeMixin": "bridge_account.py",
+        "PostprocessBridgeMixin": "bridge_postprocess.py",
+    }
     for base in bridge.bases:
         name = getattr(base, "id", None)
         if name in base_files:
@@ -138,6 +140,27 @@ def test_invalid_arguments_are_refused_without_callback(name, arguments, operati
     assert calls == []
 
 
+@pytest.mark.parametrize("operation", ["media.relink_preview", "media.relink_apply"])
+@pytest.mark.parametrize("path", ["relative.mp4", "C:relative.mp4", r"\\server\share\candidate.mp4",
+                                 "//server/share/candidate.mp4", "https://example.invalid/candidate.mp4",
+                                 "C:/media/bad\x00name.mp4"])
+def test_relink_refuses_nonlocal_candidate_before_file_access(operation, path, operations):
+    adapter, calls = operations
+    arguments = {**operation_arguments(operation), "candidate_path": path}
+    with pytest.raises(ApplicationOperationError) as caught:
+        adapter.call(operation, arguments, confirm=True)
+    assert caught.value.code == "invalid_request"
+    assert calls == []
+
+
+@pytest.mark.parametrize("operation", ["media.relink_preview", "media.relink_apply"])
+def test_relink_keeps_local_absolute_candidate(operation, operations):
+    adapter, calls = operations
+    arguments = {**operation_arguments(operation), "candidate_path": "C:/媒体/新 位置/candidate.mp4"}
+    assert adapter.call(operation, arguments, confirm=True)["ok"] is True
+    assert calls == [(OPERATIONS[operation].method, arguments)]
+
+
 def test_only_explicit_registry_bindings_are_visible():
     adapter = AgentOperations({"os_shell": lambda **_kw: "bad", "get_models": lambda: []})
     assert set(adapter.facade) == {"get_models"}
@@ -155,7 +178,8 @@ def test_only_explicit_registry_bindings_are_visible():
 
 
 @pytest.mark.parametrize("changes", [{"delete_source_after_translation": True}, {"delete_video_after_transcribe": True},
-                                    {"delete_process_files_after_transcribe": True}, {"confirm_delete": False}])
+                                    {"delete_process_files_after_transcribe": True}, {"confirm_delete": False},
+                                    {"confirm_residue_cleanup": False}])
 def test_enable_automatic_deletion_requires_confirmation(changes, operations):
     adapter, calls = operations
     arguments = {"changes": changes, "expected_revision": "a" * 64}

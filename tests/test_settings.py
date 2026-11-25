@@ -143,6 +143,36 @@ def test_cuda_device_setting_roundtrips() -> None:
         assert store.load()["device"] == "cuda"
 
 
+def test_residue_cleanup_preferences_default_and_persist(tmp_path):
+    store = SettingsStore(base_dir=tmp_path)
+    old = store.defaults()
+    del old["residue_cleanup_default"], old["confirm_residue_cleanup"]
+    old["confirm_delete"] = False
+    store.path.write_text(json.dumps(old), encoding="utf-8")
+    loaded = store.load()
+    assert loaded["residue_cleanup_default"] == "outputs"
+    assert loaded["confirm_residue_cleanup"] is True
+
+    store.update(residue_cleanup_default="downloads", confirm_residue_cleanup=False)
+    reopened = SettingsStore(base_dir=tmp_path).load()
+    assert reopened["residue_cleanup_default"] == "downloads"
+    assert reopened["confirm_residue_cleanup"] is False
+    assert reopened["confirm_delete"] is False
+
+
+@pytest.mark.parametrize("changes", [
+    {"residue_cleanup_default": "unknown"},
+    {"residue_cleanup_default": ["outputs"]},
+    {"confirm_residue_cleanup": "false"},
+])
+def test_invalid_residue_cleanup_preferences_are_rejected(tmp_path, changes):
+    store = SettingsStore(base_dir=tmp_path)
+    original = store.update(residue_cleanup_default="all", confirm_residue_cleanup=False)
+    with pytest.raises(SettingsValidationError):
+        store.update(**changes)
+    assert store.load() == original
+
+
 def test_custom_agent_profiles_roundtrip_and_validate() -> None:
     with tempfile.TemporaryDirectory(prefix="settings_custom_agent_") as temp:
         store = SettingsStore(base_dir=temp)

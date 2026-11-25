@@ -12,6 +12,7 @@ AGENT_PROTOCOL_VERSION = "1"
 AGENT_TOKEN_CONTEXT = b"shengjian-agent-control-v1"
 AGENT_MAX_BODY_BYTES = 3 * 1024 * 1024
 AGENT_MAX_TEXT_BYTES = 2_000_000
+AGENT_MAX_CURSOR_CHARS = 1024
 
 
 class DocumentRevisionConflict(ValueError):

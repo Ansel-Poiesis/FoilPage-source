@@ -3,6 +3,7 @@
 import { getToken, health, pair, request, setup } from "./api.js";
 import { progressFor, progressLabelFor } from "./popup-model.js";
 
+const {TERMINAL, needsDesktopConnection} = globalThis.FoilPageContract;
 const $ = (selector) => document.querySelector(selector);
 let connectionMode = "checking";
 let checking = false;
@@ -66,7 +67,7 @@ async function checkConnection() {
     await Promise.all([loadJobs(), detectCurrentPage()]);
     return true;
   } catch (error) {
-    const pairingRequired = ["unauthorized", "origin_denied", "local_api_token_missing"].includes(error.code);
+    const pairingRequired = needsDesktopConnection(error.code);
     await showDisconnected(
       pairingRequired ? pairingHint(desktop?.configured) : error.message,
       !pairingRequired && Boolean(await getToken().catch(() => "")),
@@ -220,7 +221,7 @@ async function detectCurrentPage() {
   }
 }
 
-const terminal = new Set(["done", "failed", "cancelled"]);
+const terminal = new Set(TERMINAL);
 const measurable = new Set(["downloading", "awaiting_browser", "transcribing", "running"]);
 const cancelling = new Set();
 const cancelErrors = new Map();
@@ -363,7 +364,7 @@ $("#connect").addEventListener("click", async () => {
     else await setup();
     await checkConnection();
   } catch (error) {
-    const pairingRequired = ["pairing_closed", "origin_denied"].includes(error.code);
+    const pairingRequired = needsDesktopConnection(error.code);
     $("#message").textContent = pairingRequired ? pairingHint(desktop?.configured) : error.message;
     if (!desktop) showConnectionRecovery(error.message, false);
   } finally {

@@ -198,7 +198,7 @@ for (const [name, preference, animations] of [
       await pressWithoutTravel(page, library);
       await library.click();
       await page.locator('.doc-open').first().click();
-      const edit = page.getByRole('button', {name: '编辑 Markdown', exact: true});
+      const edit = page.locator('#page-library').getByRole('button', {name: '编辑', exact: true});
       await pressWithoutTravel(page, edit);
       assert.equal(await library.getAttribute('aria-current'), 'page');
       await page.locator('[data-page=videos]').click();
