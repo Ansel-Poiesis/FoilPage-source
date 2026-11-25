@@ -30,7 +30,9 @@ from engine.settings import (  # noqa: E402
 def test_default_path_uses_localappdata_without_poiesis() -> None:
     with tempfile.TemporaryDirectory(prefix="settings_root_") as temp:
         app_dir = default_app_data_dir({"LOCALAPPDATA": temp})
-        assert app_dir == Path(temp) / "FoilPage"
+        # 资料根按规范路径返回（解析 junction 与 8.3 短名别名）；部分 Windows 的临时目录
+        # 本身是短名（CI runner 即如此），期望值同样解析后再比较。
+        assert app_dir == (Path(temp) / "FoilPage").resolve()
         assert "poiesis" not in str(app_dir).lower()
         store = SettingsStore(environment={"LOCALAPPDATA": temp})
         settings = store.load()
@@ -679,9 +681,9 @@ def test_default_path_falls_back_to_legacy_root_until_migrated() -> None:
     with tempfile.TemporaryDirectory(prefix="settings_root_") as temp:
         legacy = Path(temp) / "VideoToArticle"
         legacy.mkdir()
-        assert default_app_data_dir({"LOCALAPPDATA": temp}) == legacy
+        assert default_app_data_dir({"LOCALAPPDATA": temp}) == legacy.resolve()
         (Path(temp) / "FoilPage").mkdir()
-        assert default_app_data_dir({"LOCALAPPDATA": temp}) == Path(temp) / "FoilPage"
+        assert default_app_data_dir({"LOCALAPPDATA": temp}) == (Path(temp) / "FoilPage").resolve()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="junction shim is Windows-only")
@@ -697,7 +699,7 @@ def test_migrate_legacy_data_root_renames_and_leaves_junction_shim() -> None:
         # 回滚垫片：旧路径写入即落入新根，≤1.3.7 的旧版本仍能读写同一份数据。
         (legacy / "via-shim.txt").write_text("x", encoding="utf-8")
         assert (current / "via-shim.txt").read_text(encoding="utf-8") == "x"
-        assert default_app_data_dir({"LOCALAPPDATA": temp}) == current
+        assert default_app_data_dir({"LOCALAPPDATA": temp}) == current.resolve()
         assert migrate_legacy_data_root({"LOCALAPPDATA": temp}) is False
 
 
