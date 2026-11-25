@@ -12,13 +12,17 @@ import time
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+# STD_INPUT_HANDLE / STD_OUTPUT_HANDLE / STD_ERROR_HANDLE，按 WinAPI 的无符号写法。
+_STD_HANDLE_IDS = (-10 & 0xFFFFFFFF, -11 & 0xFFFFFFFF, -12 & 0xFFFFFFFF)
+
 
 def _send_windows_stop_signal(process: subprocess.Popen[str]) -> None:
     """Deliver CTRL_BREAK from a windowed parent without showing a console.
 
     A frozen Desktop/pythonw parent has no console, unlike CLI test runners.
     Attach only to the worker's existing hidden console for signal delivery;
-    never allocate a console or detach a console owned by our caller.
+    never allocate a console or detach a console owned by our caller. The
+    parent's own standard handles are restored afterwards (see below).
     """
     import ctypes
     from ctypes import wintypes
@@ -30,9 +34,19 @@ def _send_windows_stop_signal(process: subprocess.Popen[str]) -> None:
     kernel.AttachConsole.restype = wintypes.BOOL
     kernel.FreeConsole.argtypes = []
     kernel.FreeConsole.restype = wintypes.BOOL
+    kernel.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel.GetStdHandle.restype = wintypes.HANDLE
+    kernel.SetStdHandle.argtypes = [wintypes.DWORD, wintypes.HANDLE]
+    kernel.SetStdHandle.restype = wintypes.BOOL
     attached = False
+    saved_std_handles: list = []
     processes = (wintypes.DWORD * 1)()
     if kernel.GetConsoleProcessList(processes, 1) == 0:
+        # 2026-11-25：AttachConsole 会用被挂接控制台的标准句柄覆盖本进程的标准句柄
+        # （窗口程序没有 STARTF_USESTDHANDLES 保护）。脱离后这些句柄指向已销毁的控制台，
+        # 之后任何继承标准句柄的 subprocess 都报 WinError 6——停止 Worker 一次，就再也
+        # 启动不了（GPU 探测同样失败），只能重启应用。先记下原值，脱离后原样恢复。
+        saved_std_handles = [kernel.GetStdHandle(kind) for kind in _STD_HANDLE_IDS]
         if not kernel.AttachConsole(process.pid):
             raise ctypes.WinError(ctypes.get_last_error())
         attached = True
@@ -41,6 +55,8 @@ def _send_windows_stop_signal(process: subprocess.Popen[str]) -> None:
     finally:
         if attached:
             kernel.FreeConsole()
+            for kind, handle in zip(_STD_HANDLE_IDS, saved_std_handles):
+                kernel.SetStdHandle(kind, handle)
 
 
 class WorkerProcessManager:

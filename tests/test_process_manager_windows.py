@@ -62,7 +62,7 @@ def test_windowed_parent_stops_real_hidden_worker_gracefully(tmp_path):
     report = tmp_path / "report.json"
     script = tmp_path / "windowed_parent.py"
     script.write_text(f'''
-import ctypes, json, sys, threading, time
+import ctypes, json, subprocess, sys, threading, time
 from pathlib import Path
 sys.path.insert(0, {str(ROOT)!r})
 from app.process_manager import WorkerProcessManager, worker_command
@@ -75,6 +75,8 @@ command=worker_command(Path({str(ROOT)!r}), {str(tmp_path / "queue.db")!r}, poll
 command[0]={sys.executable!r}
 manager=WorkerProcessManager(command, log_callback=receive, auto_restart=False)
 result={{"parent_console_before":ctypes.windll.kernel32.GetConsoleWindow()}}
+std=lambda:[ctypes.windll.kernel32.GetStdHandle(n) for n in (-10,-11,-12)]
+result["std_at_start"]=std()
 manager.start()
 process=manager._process
 original_signal=process.send_signal
@@ -91,6 +93,20 @@ finally:
 time.sleep(.15)
 result.update(exit_code=process.returncode, running=manager.running, logs=lines,
               parent_console_after=ctypes.windll.kernel32.GetConsoleWindow())
+result["std_after_stop"]=std()
+# 2026-11-25 回归：停止过一次之后，窗口父进程必须还能创建子进程、还能重新启动 Worker。
+try:
+    probe=subprocess.run([sys.executable,"-c","print('child-ok')"],capture_output=True,text=True,timeout=20,creationflags=subprocess.CREATE_NO_WINDOW)
+    result["spawn_after_stop"]="ok" if probe.returncode==0 and probe.stdout.strip()=="child-ok" else f"rc={{probe.returncode}}"
+except Exception as exc:
+    result["spawn_after_stop"]=f"{{type(exc).__name__}}: {{exc}}"
+ready.clear()
+try:
+    manager.start()
+    result["restart_ready"]=ready.wait(5)
+finally:
+    result["restarted"]=manager.running
+    manager.stop(timeout=3)
 Path({str(report)!r}).write_text(json.dumps(result,ensure_ascii=False),encoding="utf-8")
 ''', encoding="utf-8")
     subprocess.run([str(pythonw), str(script)], check=True, timeout=15,
@@ -101,6 +117,11 @@ Path({str(report)!r}).write_text(json.dumps(result,ensure_ascii=False),encoding=
     assert result["parent_console_before"] == result["parent_console_after"] == 0, result
     assert result["attached_console"] and not result["console_visible"], result
     assert any("[worker] 已停止" in line for line in result["logs"]), result
+    # 2026-11-25 实机缺陷：AttachConsole 覆盖了父进程的标准句柄，停止 Worker 一次之后
+    # 重新启动与 GPU 探测都报 WinError 6，只能重启应用。标准句柄必须原样恢复。
+    assert result["std_after_stop"] == result["std_at_start"], result
+    assert result["spawn_after_stop"] == "ok", result
+    assert result["restarted"] is True and result["restart_ready"], result
 
 
 def test_crash_restarts_back_off_then_give_up():
