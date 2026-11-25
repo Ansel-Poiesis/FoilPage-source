@@ -1993,7 +1993,7 @@ window.Settings = (() => {
   function buildAbout() {
     const pane = document.createElement("div");
       let g = group("FoilPage");
-      const version = valueEl("v" + (window.APP_VERSION || "0.1.5"));
+      const version = valueEl("v" + (window.APP_VERSION || "0.1.6"));
       g.appendChild(row("版本", "", version));
       g.appendChild(row("产品", "", valueEl("FoilPage")));
       const updateBtn = document.createElement("button");

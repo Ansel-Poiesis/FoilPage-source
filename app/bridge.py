@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 ACTIVE_STATUSES = {"queued", "running", "retryable", "received", "resolving", "awaiting_browser", "downloading", "imported", "transcribing"}
 TERMINAL_STATUSES = {"done", "failed", "cancelled"}
 
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.1.6"
 RELEASE_CHANNEL = "formal"
 UPDATE_URL = "https://api.github.com/repos/Ansel-Poiesis/FoilPage-source/releases/latest"
 
