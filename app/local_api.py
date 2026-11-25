@@ -30,6 +30,50 @@ from engine.agent_protocol import AGENT_MAX_BODY_BYTES, AGENT_PROTOCOL_VERSION, 
 
 API_VERSION = "1"
 
+# 抖音分享短链（先生 2026-11-19「粘贴链接必败」）：短链没有页面捕获，
+# 原样提交只会落详情解析墙。桌面先跟随重定向拿规范详情页 URL，扩展才有
+# 机会按 videoId 复用/打开标签页取得签名候选。
+_DOUYIN_SHARE_HOSTS = ("v.douyin.com", "www.iesdouyin.com", "iesdouyin.com")
+_DOUYIN_SHARE_TIMEOUT_SECONDS = 8.0
+
+
+def _resolve_share_redirect(url: str) -> str:
+    """Follow the short-link redirect chain; desktop has no CORS constraints."""
+    import urllib.request
+    request = urllib.request.Request(url, method="GET", headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+    })
+    with urllib.request.urlopen(request, timeout=_DOUYIN_SHARE_TIMEOUT_SECONDS) as response:
+        return str(response.geturl())
+
+
+def canonicalize_douyin_share_url(url: str) -> str:
+    """Return the canonical /video/ or /note/ URL for douyin share links.
+
+    Non-share URLs pass through unchanged. Unresolvable share links raise a
+    readable error: submitting the raw short link is a guaranteed resolver
+    failure, so failing fast with guidance beats a wall error later.
+    """
+    parsed = urlsplit(str(url or ""))
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host not in _DOUYIN_SHARE_HOSTS:
+        return str(url or "")
+    try:
+        final = _resolve_share_redirect(str(url))
+    except (OSError, ValueError) as exc:
+        raise DownloadAdapterError(
+            "douyin_share_unresolvable",
+            "分享短链无法解析：请打开该视频页面后用页面上的按钮下载",
+        ) from exc
+    match = re.search(r"/(?:video|note)/(\d{10,24})", final)
+    if not match:
+        raise DownloadAdapterError(
+            "douyin_share_unresolvable",
+            "分享短链未指向视频详情页：请打开该视频页面后用页面上的按钮下载",
+        )
+    kind = "note" if "/note/" in final else "video"
+    return f"https://www.douyin.com/{kind}/{match.group(1)}"
+
 _EXTENSION_MANIFEST_CACHE: dict[str, str] = {"version": "", "at": 0.0}
 
 
@@ -52,6 +96,54 @@ def _bundled_extension_latest() -> str:
     _EXTENSION_MANIFEST_CACHE["version"] = version
     _EXTENSION_MANIFEST_CACHE["at"] = now
     return version
+
+
+_EXTENSION_REVISION_CACHE: dict[str, object] = {"revision": "", "signature": None, "at": 0.0}
+
+
+def _extension_dir() -> Path:
+    import sys
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "browser-extension"
+    return Path(__file__).resolve().parents[1] / "browser-extension"
+
+
+def _bundled_extension_revision() -> str:
+    """安装目录扩展内容指纹（30s+目录签名缓存）：同版本号热修（先生
+    2026-11-18）不升版本号也能驱动扩展自重载——指纹=相对路径与文件内容
+    的 SHA256 前 16 位；目录不可读时返回空串，扩展按无指纹处理。"""
+    now = time.time()
+    root = _extension_dir()
+    try:
+        signature = tuple(
+            (item.relative_to(root).as_posix(), item.stat().st_mtime_ns, item.stat().st_size)
+            for item in sorted(root.rglob("*")) if item.is_file()
+        )
+    except OSError:
+        signature = None
+    if signature == ():
+        # 目录缺失或为空（rglob 对不存在目录返回空迭代而非报错）：按无指纹处理。
+        signature = None
+    if (
+        signature is not None
+        and _EXTENSION_REVISION_CACHE["signature"] == signature
+        and now - float(_EXTENSION_REVISION_CACHE["at"]) < 30
+    ):
+        return str(_EXTENSION_REVISION_CACHE["revision"])
+    revision = ""
+    if signature is not None:
+        digest = hashlib.sha256()
+        for relative, _, _ in signature:
+            digest.update(relative.encode("utf-8"))
+            try:
+                digest.update(hashlib.sha256((root / relative).read_bytes()).digest())
+            except OSError:
+                digest.update(b"unreadable")
+        revision = digest.hexdigest()[:16]
+    _EXTENSION_REVISION_CACHE["signature"] = signature
+    _EXTENSION_REVISION_CACHE["revision"] = revision
+    _EXTENSION_REVISION_CACHE["at"] = now
+    return revision
 # A validated one-shot Douyin session can contain up to 64 cookies of 4 KiB
 # each. Keep the loopback request bounded while allowing that declared limit.
 MAX_BODY_BYTES = 384 * 1024
@@ -69,8 +161,13 @@ _CAPTURE_DIAGNOSTIC_REASONS = {
     "detail_response_unavailable",
     "detail_request_not_seen",
     "player_url_not_ready",
+    # 按钮隐藏/移除留痕（先生 2026-10-19 起；2026-11-19 才被白名单放行
+    # ——此前这类上报全部被 400 静默丢弃，日志里零条即此因）。
+    "live_or_ad",
+    "no_player_target",
+    "invisible_container",
 }
-_CAPTURE_URL_SOURCES = {"", "player", "captured_media", "play_endpoint"}
+_CAPTURE_URL_SOURCES = {"", "player", "captured_media", "play_endpoint", "controls_sync", "offline_queue"}
 _DOWNLOAD_FAILURE_PHASES = {
     "desktop_dispatch", "desktop_authorization", "extension_authorization",
     "local_api_submit", "browser_download_start", "browser_download_interrupted",
@@ -86,7 +183,9 @@ def _sanitize_capture_diagnostic(body: dict[str, Any]) -> dict[str, Any]:
     outcome = body.get("outcome")
     reason = body.get("reason", "")
     url_source = body.get("url_source", "")
-    if not isinstance(outcome, str) or outcome not in {"url_missing", "url_captured"}:
+    if not isinstance(outcome, str) or outcome not in {
+        "url_missing", "url_captured", "controls_hidden", "desktop_offline_queued",
+    }:
         raise ValueError("采集诊断结果无效")
     if not isinstance(reason, str) or (reason and reason not in _CAPTURE_DIAGNOSTIC_REASONS):
         raise ValueError("采集诊断原因无效")
@@ -96,6 +195,12 @@ def _sanitize_capture_diagnostic(body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("采集诊断来源无效")
     if (outcome == "url_missing" and url_source) or (outcome == "url_captured" and not url_source):
         raise ValueError("采集诊断地址来源不一致")
+    # controls_hidden 带 reason＋固定来源；offline_queue 反之。此前这两类
+    # 上报因 outcome 不被接受而整条丢弃（零留痕的根因）。
+    if outcome == "controls_hidden" and (not reason or url_source != "controls_sync"):
+        raise ValueError("采集诊断阶段不一致")
+    if outcome == "desktop_offline_queued" and (reason or url_source != "offline_queue"):
+        raise ValueError("采集诊断阶段不一致")
 
     def bounded_int(name: str, maximum: int) -> int:
         value = body.get(name, 0)
@@ -114,6 +219,20 @@ def _sanitize_capture_diagnostic(body: dict[str, Any]) -> dict[str, Any]:
     version = body.get("main_world_version", "")
     if not isinstance(version, str) or len(version) > 24 or (version and not re.fullmatch(r"\d+(?:\.\d+){1,3}", version)):
         raise ValueError("采集诊断扩展版本无效")
+    # 签名年龄与刷新结果观测（先生 2026-11-18）：旧扩展缺省不影响。
+    newest_age = body.get("newest_candidate_age_ms")
+    if newest_age is not None and (isinstance(newest_age, bool) or not isinstance(newest_age, int)
+                                   or not 0 <= newest_age <= 24 * 60 * 60 * 1000):
+        raise ValueError("采集诊断候选年龄无效")
+    raw_ages = body.get("candidate_ages_ms", [])
+    if not isinstance(raw_ages, list) or len(raw_ages) > 8 or any(
+        isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 24 * 60 * 60 * 1000
+        for value in raw_ages
+    ):
+        raise ValueError("采集诊断候选年龄列表无效")
+    refresh_outcome = body.get("capture_refresh", "")
+    if not isinstance(refresh_outcome, str) or len(refresh_outcome) > 40:
+        raise ValueError("采集诊断刷新结果无效")
     return {
         "outcome": outcome,
         "reason": reason,
@@ -143,6 +262,9 @@ def _sanitize_capture_diagnostic(body: dict[str, Any]) -> dict[str, Any]:
         "player_ready_state": bounded_int("player_ready_state", 4),
         "player_paused": flag("player_paused", nullable=True),
         "url_source": url_source,
+        "newest_candidate_age_ms": newest_age,
+        "candidate_ages_ms": raw_ages,
+        "capture_refresh": refresh_outcome,
     }
 
 
@@ -344,8 +466,8 @@ class OriginPolicy:
         if not EXTENSION_ORIGIN.fullmatch(origin):
             raise ValueError("扩展来源无效")
         with self._lock:
-            self._origin = origin
             self._pin(origin)
+            self._origin = origin
 
 
 class _LoopbackHttpServer(ThreadingHTTPServer):
@@ -432,8 +554,15 @@ class LocalApiServer:
         with self._pairing_lock:
             if time.monotonic() >= self._pairing_until:
                 return False
+            stale_clients = []
+            with self._extension_lock:
+                changed = self.origin_policy.origin != origin
+                self.origin_policy.replace(origin)
+                if changed:
+                    stale_clients = list(self._extension_clients)
+                    self._extension_clients.clear()
             self._pairing_until = 0.0
-        self.origin_policy.replace(origin)
+            self._close_extension_clients(stale_clients)
         return True
 
     def start(self) -> None:
@@ -470,6 +599,17 @@ class LocalApiServer:
         with self._extension_lock:
             clients = list(self._extension_clients)
             self._extension_clients.clear()
+        self._close_extension_clients(clients)
+        if server:
+            server.shutdown()
+            server.server_close()
+        if self._thread:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+        self.coordinator.stop(timeout=timeout)
+
+    @staticmethod
+    def _close_extension_clients(clients: list[socket.socket]) -> None:
         for client in clients:
             try:
                 client.shutdown(socket.SHUT_RDWR)
@@ -479,13 +619,6 @@ class LocalApiServer:
                 client.close()
             except OSError:
                 pass
-        if server:
-            server.shutdown()
-            server.server_close()
-        if self._thread:
-            self._thread.join(timeout=timeout)
-            self._thread = None
-        self.coordinator.stop(timeout=timeout)
 
     def submit_douyin_link_from_desktop(
         self, url: str, *, title: str = "", transcribe: bool = True,
@@ -498,6 +631,7 @@ class LocalApiServer:
             raise DownloadAdapterError(exc.code, str(exc)) from None
         if not self.running:
             raise DownloadAdapterError("service_unavailable", "FoilPage 本地服务未运行")
+        url = canonicalize_douyin_share_url(str(url)[:4096])
         request_id = secrets.token_hex(16)
         pending = {
             "id": request_id,
@@ -609,9 +743,11 @@ class LocalApiServer:
                 self._remove_extension_client(client)
         return sent
 
-    def _register_extension_client(self, client: socket.socket) -> threading.Lock:
+    def _register_extension_client(self, client: socket.socket, origin: str) -> threading.Lock | None:
         write_lock = threading.Lock()
         with self._extension_lock:
+            if origin != self.origin_policy.origin:
+                return None
             self._extension_clients[client] = write_lock
         with self._desktop_request_lock:
             pending = [item.copy() for item in self._desktop_download_requests.values()
@@ -702,6 +838,14 @@ class LocalApiServer:
             user_agent = body.get("user_agent", "")
             if not isinstance(user_agent, str):
                 raise ValueError("浏览器信息无效")
+            # 先生 2026-11-19：扩展可随回执带回新鲜媒体候选（粘贴链接流程
+            # 自动开标签页捕获的签名地址），直下通道优先，解析墙仅兜底。
+            media_url = body.get("media_url", "")
+            if not isinstance(media_url, str):
+                media_url = ""
+            media_candidates = body.get("media_candidates")
+            if not isinstance(media_candidates, list):
+                media_candidates = None
             options = {
                 "quality": "best-available",
                 "audio_only": pending["transcribe"],
@@ -714,6 +858,7 @@ class LocalApiServer:
             job = self.coordinator.submit(
                 pending["url"], title=pending["title"], options=options,
                 session_cookies=body.get("browser_session"), mode="local",
+                media_url=media_url[:4096], media_candidates=media_candidates,
             )
             result = {"ok": True, "job": public_download_job(job)}
         except (DownloadAdapterError, DownloadStateError, ValueError) as exc:
@@ -814,6 +959,7 @@ class LocalApiServer:
                         "api_version": API_VERSION, "auth_required": True,
                         "configured": bool(owner.origin_policy.origin),
                         "extension_latest": _bundled_extension_latest(),
+                        "extension_revision": _bundled_extension_revision(),
                         "client_config": owner.client_config.snapshot(),
                         "agent_control": {"protocol_version": AGENT_PROTOCOL_VERSION,
                                           "endpoint": "/v1/agent/call"},
@@ -1003,6 +1149,7 @@ class LocalApiServer:
                         if receipt is not None:
                             matching_submission_receipt(receipt, body.get("url", ""),
                                 (download_options or {}).get("transcribe_after_download", bool(owner.controller.settings.get("transcribe_after_download", False))),
+                                accepted_transcribe=owner.controller.downloads.accepted_transcription_intent(request_id, receipt),
                                 allow_any_url=bool(owner.controller.settings.get("allow_any_url", False)))
                             item = owner.coordinator.get(receipt["id"]) or receipt
                             self._json(202, {"job": public_download_job(item)})
@@ -1322,7 +1469,9 @@ class LocalApiServer:
                 self.send_header("Sec-WebSocket-Protocol", "shengjian-v1")
                 self.end_headers()
                 client = self.connection
-                write_lock = owner._register_extension_client(client)
+                write_lock = owner._register_extension_client(client, origin)
+                if write_lock is None:
+                    return
                 try:
                     # Text heartbeats dispatch a JS message event often enough
                     # to keep the MV3 worker alive; task events are pushed over
@@ -1337,7 +1486,8 @@ class LocalApiServer:
                         else:
                             with write_lock:
                                 client.sendall(_websocket_frame(b'{"type":"heartbeat"}'))
-                except OSError:
+                except (OSError, ValueError):
+                    # Re-pairing may close this socket as select starts.
                     pass
                 finally:
                     owner._remove_extension_client(client)

@@ -4,17 +4,20 @@
 'use strict';
 
 window.Settings = (() => {
+  const SettingsModel = window.SettingsModel;
+  const {PROVIDER_PRESETS, CUSTOM_PROFILE_TEMPLATE, ACCENTS} = SettingsModel;
   const SECTIONS = [
     { key: "ui", label: "界面", icon: "monitor" },
     { key: "recognition", label: "识别", icon: "wave" },
     { key: "agent", label: "文本整理", icon: "spark" },
-    { key: "control", label: "Agent 控制", icon: "power" },
+    { key: "control", label: "Agent 控制", icon: "sliders" },
     { key: "model", label: "模型", icon: "box" },
     { key: "data", label: "数据", icon: "database" },
     { key: "startup", label: "启动", icon: "power" },
     { key: "about", label: "关于", icon: "info" },
   ];
   const SECTION_ICONS = {
+    sliders: `<svg viewBox="0 0 24 24"><path d="M4 7h6m4 0h6M4 17h10m4 0h2"/><circle cx="12" cy="7" r="2"/><circle cx="16" cy="17" r="2"/></svg>`,
     monitor: `<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>`,
     wave: `<svg viewBox="0 0 24 24"><path d="M4 12h2l2-6 4 12 3-8 2 4h3"/></svg>`,
     spark: `<svg viewBox="0 0 24 24"><path d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8Z"/><path d="m19 16 .7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7Z"/></svg>`,
@@ -42,9 +45,14 @@ window.Settings = (() => {
     refreshNotificationInbox?.();
   });
   const inSection = key => AppState.currentView === "settings" && section === key;
+  const controlKeys = new WeakMap();
   function controlKey(node) {
-    const label = node.getAttribute("aria-label") || node.closest(".set-row")?.querySelector(".set-label")?.textContent || node.type || "control";
-    return `${node.tagName}:${node.type || ""}:${label}:${node.closest("[data-profile-id]")?.dataset.profileId || ""}`;
+    // The render pass indexes each control before its accessible name is translated.
+    if (!controlKeys.has(node)) {
+      const name = node.id || node.getAttribute("aria-label") || node.closest(".set-row")?.querySelector(".set-label")?.textContent || node.type || "control";
+      controlKeys.set(node, `${node.tagName}:${node.type || ""}:${name}:${node.closest("[data-profile-id]")?.dataset.profileId || ""}`);
+    }
+    return controlKeys.get(node);
   }
   function runControl(node, action, redraw = false) {
     if (rebuilding || !node.isConnected || node.disabled) return;
@@ -66,6 +74,7 @@ window.Settings = (() => {
     }).catch(() => { node.setAttribute("aria-invalid", "true"); })
       .then(saved => {
         pendingControls.delete(pendingKey); node.removeAttribute("aria-busy"); if (!editable) node.disabled = false;
+        if (node.isConnected) node.syncConfirmedDisplay?.();
         if (inSection(owner)) document.getElementById("settingsPane")?.querySelectorAll('[aria-busy="true"],[data-pending-control],[data-model-select]').forEach(control => {
           if (controlKey(control) === key) {
             if (control.hasAttribute("data-pending-control")) {control.disabled = control.dataset.pendingControl === "true"; delete control.dataset.pendingControl;}
@@ -79,20 +88,20 @@ window.Settings = (() => {
                 control.value = String(confirmed); control.dataset.initialValue = control.value;
               }
             }
+            control.syncConfirmedDisplay?.();
           }
         });
         if (!saved && inSection(owner)) document.getElementById("settingsPane")?.querySelectorAll('select').forEach(control => {if (controlKey(control) === key) {control.value = control.dataset.initialValue; control.setAttribute("aria-invalid", "true");}});
-        if (saved && redraw && inSection(owner) && node.isConnected) render({key, section:owner});
+        if (saved && redraw && inSection(owner) && node.isConnected) {
+          const previousSwitch = node.matches('[role="switch"]') ? {
+            checked: node.getAttribute("aria-checked"),
+            thumb: getComputedStyle(node, "::after").transform,
+          } : null;
+          render({key, section:owner, previousSwitch});
+        }
         return saved;
       });
   }
-
-  const ACCENTS = [
-    { key: "green", label: "松绿", color: "#2c8753" },
-    { key: "rose", label: "霞红", color: "#e75d74" },
-    { key: "indigo", label: "靛蓝", color: "#4f68d7" },
-    { key: "ink", label: "墨色", color: "#2f3437" },
-  ];
 
   /* 字号：滑动调整（0.9-1.3 连续档），原字档按钮已退役 */
   const MODELS = [
@@ -103,53 +112,11 @@ window.Settings = (() => {
     { value: "large-v3", label: "large-v3（约 3 GB，最高质量）" },
   ];
 
-  const PROFILES = [
-    { value: "auto", label: "自动分类" },
-    { value: "emotional_copy", label: "情感文案" },
-    { value: "consulting", label: "咨询" },
-    { value: "knowledge", label: "知识科普" },
-  ];
-
-  // 先生 2026-11-16：BYOK 服务商预设（与 engine/settings.py 的
-  // AGENT_PROVIDER_PRESETS 保持一致，tests/test_provider_presets.py 锁定）。
-  // 切换预设自动带出接口地址与默认模型，仍可手改。
-  const PROVIDER_PRESETS = {
-    mimo:        { label: "小米 MiMo（推荐，支持视觉）", base: "https://api.xiaomimimo.com/v1", model: "mimo-v2.6-flash" },
-    deepseek:    { label: "DeepSeek", base: "https://api.deepseek.com", model: "deepseek-chat" },
-    openai:      { label: "OpenAI（支持视觉）", base: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-    bailian:     { label: "阿里云百炼", base: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
-    zhipu:       { label: "智谱 GLM", base: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4.5-flash" },
-    kimi:        { label: "Kimi 月之暗面", base: "https://api.moonshot.cn/v1", model: "kimi-k2-0905-preview" },
-    siliconflow: { label: "硅基流动", base: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-72B-Instruct" },
-    openrouter:  { label: "OpenRouter（支持视觉）", base: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini" },
-    ark:         { label: "火山方舟", base: "https://ark.cn-beijing.volces.com/api/v3", model: "doubao-seed-1-6-lite-250815" },
-    custom:      { label: "自定义", base: "", model: "" },
-  };
-
-  const CUSTOM_PROFILE_TEMPLATE = {
-    id: "",
-    name: "新的整理策略",
-    system_prompt: "你是 FoilPage 的原文保真校订编辑。保持原文顺序、语气、例子和限定条件，只修复明确的 ASR 错字、同音字、标点、断句和明显赘词；不确定时保留原词并标记待确认，禁止摘要、重排、扩写或编造。只输出 Markdown，第一行是一级标题。",
-    enabled: true,
-    model: "",
-    temperature: null,
-  };
-
-  function profileOptions() {
-    const options = PROFILES.slice();
-    (s().agent_custom_profiles || []).forEach((p) => {
-      if (p && p.id && p.name && p.enabled !== false) {
-        options.push({ value: "custom:" + p.id, label: p.name + "（自定义）" });
-      }
-    });
-    return options;
-  }
-
   function s() { return AppState.settings || {}; }
 
   function save(changes, feedback) {
     const revision = ++saveRevision, patch = {...changes}, origin = AppState.currentView, owner = section;
-    Object.keys(patch).forEach(key => fieldRevisions.set(key, revision));
+    SettingsModel.revisionKeys(patch).forEach(key => fieldRevisions.set(key, revision));
     const visible = () => AppState.currentView === origin && (origin !== "settings" || section === owner);
     const request = saveQueue.then(async () => {
       try {
@@ -158,8 +125,9 @@ window.Settings = (() => {
         const previousServer = s().subscription_server_url, previousKey = s().subscription_license_public_key;
         const settings = await AppApi.saveSettings(patch);
         if (!settings || settings.ok === false || Object.keys(patch).some(key => !Object.hasOwn(settings, key))) throw new Error(settings?.error || "未收到保存确认，请重试");
-        const confirmed = {};
-        Object.keys(patch).forEach(key => { if (fieldRevisions.get(key) === revision) confirmed[key] = settings[key]; });
+        const keyCleared = settings.agent_key_cleared === true;
+        if (keyCleared && settings.agent_api_key !== "") throw new Error("未收到密钥清空确认，请重试");
+        const confirmed = SettingsModel.confirmedSettings(patch, settings, fieldRevisions, revision, keyCleared);
         const sameAccount = context() === accountContext && s().account_access === access;
         AppState.settings = {...AppState.settings, ...confirmed};
         if(typeof settings.agent_settings_revision==='string' && /^[a-f0-9]{64}$/.test(settings.agent_settings_revision))AppState.settings.agent_settings_revision=settings.agent_settings_revision;
@@ -172,8 +140,11 @@ window.Settings = (() => {
         applyTheme();
         if (typeof applyFontScale === "function") applyFontScale();
         if (typeof applyMotion === "function") applyMotion();
-        if (feedback !== false && visible()) toast("设置已保存");
-        return AppState.settings;
+        if (feedback !== false && visible()) {
+          if (keyCleared) toast("旧 API Key 已清空，请重新填写", "error");
+          else toast("设置已保存");
+        }
+        return keyCleared ? {...AppState.settings, agent_key_cleared: true} : AppState.settings;
       } catch (e) {
         if (visible()) toast("保存失败：" + (e?.message || "请重试"), "error");
         applyTheme(); if (typeof applyFontScale === "function") applyFontScale();
@@ -184,7 +155,7 @@ window.Settings = (() => {
     return request;
   }
 
-  function toggleEl(on, onClick, persistedValue) {
+  function toggleEl(on, onClick, persistedValue, redraw = true) {
     const el = document.createElement("button");
     el.type = "button";
     el.className = "toggle" + (on ? " on" : "");
@@ -192,8 +163,55 @@ window.Settings = (() => {
     el.setAttribute("aria-checked", on ? "true" : "false");
     if (persistedValue) el.readPersistedValue = typeof persistedValue === "function" ? persistedValue : () => s()[persistedValue];
     el.tabIndex = 0;
-    el.onclick = () => runControl(el, onClick, true);
+    if (!redraw) {
+      el.syncConfirmedDisplay = () => {
+        const confirmed = el.readPersistedValue?.();
+        if (typeof confirmed !== "boolean") return;
+        el.setAttribute("aria-checked", String(confirmed));
+        el.classList.toggle("on", confirmed);
+      };
+    }
+    el.onclick = () => runControl(el, onClick, redraw);
     return el;
+  }
+
+  function keepCurrent(node) {
+    // 用户在确认弹窗里点了取消：把控件显示恢复成已保存的值，并如实返回"未修改"，
+    // 不能被 runControl 当成保存失败而标红。
+    const confirmed = node.readPersistedValue?.();
+    if (node.getAttribute("role") === "switch" && typeof confirmed === "boolean") {
+      node.setAttribute("aria-checked", String(confirmed)); node.classList.toggle("on", confirmed);
+    } else if (node.tagName === "SELECT") {
+      node.value = String(confirmed ?? node.dataset.initialValue ?? ""); node.dataset.initialValue = node.value;
+    }
+    return s();
+  }
+
+  /* 标题优化的计费规则确认（2026-11-25 先生）：必须勾选"我已知晓"才能继续。 */
+  function confirmTitleBilling(switching) {
+    const mask = openModal(
+      "标题优化的计费规则",
+      '<div class="dlg-text dlg-billing">'
+        + (switching ? '<p>切换到 FoilPage 托管后，已开启的标题优化会按积分计费。</p>' : '')
+        + '<p>标题优化会为每条转写额外发起一次独立请求，并另计积分：每条固定 <strong>1 次基数</strong>，不随转写字数增加；选择了倍率档位的托管模型时按倍率计算。</p>'
+        + '<p>例：默认档下一条 6000 字的转写，正文 3 积分，标题优化另加 1 积分。</p>'
+        + '</div>'
+        + '<label class="dlg-check"><input type="checkbox" id="titleBillingAck"><span>我已知晓：标题优化每条转写另计 1 次基数积分</span></label>',
+      '<button class="btn ghost" id="dlgCancel">取消</button><button class="btn" id="titleBillingOk" disabled>确认并开启</button>'
+    );
+    const ack = mask.querySelector("#titleBillingAck"), ok = mask.querySelector("#titleBillingOk");
+    ok.textContent = switching ? "确认并切换" : "确认并开启";
+    ack.onchange = () => { ok.disabled = !ack.checked; };
+    return new Promise(resolve => {
+      let settled = false, watch = 0;
+      const finish = accepted => { if (settled) return; settled = true; clearInterval(watch); resolve(accepted); };
+      const cancel = () => { closeModal(); finish(false); };
+      mask.querySelector("#dlgCancel").onclick = cancel;
+      mask.querySelector(".modal-x").onclick = cancel;
+      ok.onclick = () => { if (!ack.checked) return; closeModal(); finish(true); };
+      // 点遮罩或按 Esc 由 openModal 自己收尾，这里只需发现弹窗已经不在。
+      watch = setInterval(() => { if (!mask.isConnected) finish(false); }, 150);
+    });
   }
 
   function externalSettingsNotice() {
@@ -210,11 +228,7 @@ window.Settings = (() => {
     try{
       const incoming=await AppApi.settings();
       if(externalSettingsTicket!==ticket || context()!==account || !incoming || incoming.ok===false || incoming.agent_settings_revision!==revision)return;
-      const confirmed={};
-      for(const [key,value] of Object.entries(incoming)){
-        if(key==='agent_settings_revision' || key==='data_dir' || key==='credit_balance' || key.startsWith('account_') || key.startsWith('license_') || key.startsWith('agent_usage_') || ['subscription_active','subscription_plan','subscription_expires_at','subscription_last_order_id'].includes(key))continue;
-        if(fieldRevisions.get(key)===fields.get(key))confirmed[key]=value;
-      }
+      const confirmed=SettingsModel.externalSettingsPatch(incoming,fieldRevisions,fields);
       const changedServer=Object.hasOwn(confirmed,'subscription_server_url') && confirmed.subscription_server_url!==s().subscription_server_url;
       const changedKey=Object.hasOwn(confirmed,'subscription_license_public_key') && confirmed.subscription_license_public_key!==s().subscription_license_public_key;
       AppState.settings={...s(),...confirmed,agent_settings_revision:revision};
@@ -381,7 +395,18 @@ window.Settings = (() => {
       const scale = parseFloat(slider.value);
       document.body.style.fontSize = (window.BASE_FONT_SIZE * scale).toFixed(2) + "px";
     };
-    slider.onchange = () => save({ font_scale: parseFloat(slider.value) }, false);
+    slider.syncConfirmedDisplay = () => {
+      slider.value = String(parseFloat(s().font_scale) || 1.15);
+      slider.dataset.initialValue = slider.value;
+      showValue();
+    };
+    slider.onchange = async () => {
+      const focused = document.activeElement === slider;
+      await runControl(slider, () => save({font_scale: Number(slider.value)}));
+      if (focused && inSection("ui") && slider.isConnected && document.activeElement === document.body) {
+        slider.focus({preventScroll: true});
+      }
+    };
     wrap.append(slider, value);
     return wrap;
   }
@@ -430,13 +455,22 @@ window.Settings = (() => {
     });
     g.appendChild(row("界面强调色", "", accentWrap));
 
-    g.appendChild(row("界面字号", "", fontScaleCtrl()));
+    const typeRow = row("界面字号", "", fontScaleCtrl());
+    const specimen = document.createElement("figure");
+    specimen.className = "settings-type-specimen";
+    specimen.setAttribute("aria-label", "字号预览");
+    specimen.innerHTML = `<figcaption><span>声音笔记</span><span class="sample-time">00:18</span></figcaption><p>雨停了，檐下还有水声。</p>`;
+    typeRow.classList.add("settings-type-row");
+    typeRow.appendChild(specimen);
+    g.appendChild(typeRow);
 
     const animToggle = toggleEl(!!s().animations, () => save({ animations: !s().animations }), "animations");
     g.appendChild(row("界面动效", "", animToggle));
 
+    pane.appendChild(g);
+    const tasks = group("任务");
     const confirmToggle = toggleEl(!!s().confirm_delete, () => save({ confirm_delete: !s().confirm_delete }), "confirm_delete");
-    g.appendChild(row("删除前确认", "", confirmToggle));
+    tasks.appendChild(row("删除前确认", "", confirmToggle));
 
     const sortOrder = selectEl(
       s().task_sort_order || "newest",
@@ -446,8 +480,8 @@ window.Settings = (() => {
       ],
       (v) => save({ task_sort_order: v }), "task_sort_order"
     );
-    g.appendChild(row("任务排序", "", sortOrder));
-    pane.appendChild(g);
+    tasks.appendChild(row("任务排序", "", sortOrder));
+    pane.appendChild(tasks);
     return pane;
   }
 
@@ -566,13 +600,24 @@ window.Settings = (() => {
     }, "agent_enabled");
     g.appendChild(row("AI 整理正文", "", agentToggle));
     const titleToggle = toggleEl(!!s().title_optimization_enabled, () => {
-      if (hostedMode && !relayReady && !s().title_optimization_enabled) return;
-      return save({ title_optimization_enabled: !s().title_optimization_enabled });
+      if (!s().title_optimization_enabled) {
+        if (hostedMode && !relayReady) return;
+        // 2026-11-25 先生：标题阶段与正文同费率、各自独立计量。托管下打开前必须讲清
+        // 计费规则，勾选"我已知晓"后才生效；关闭不需要确认。
+        if (!hostedMode) return save({ title_optimization_enabled: true });
+        return confirmTitleBilling(false).then(accepted => accepted ? save({ title_optimization_enabled: true }) : keepCurrent(titleToggle));
+      }
+      return save({ title_optimization_enabled: false });
     }, "title_optimization_enabled");
-    g.appendChild(row("AI 优化标题", "", titleToggle));
+    g.appendChild(row("AI 优化标题", hostedMode ? "标题优化每条转写另计 1 次基数积分，随所选托管模型的倍率" : "每条转写额外请求一次，由你的模型服务商计费", titleToggle));
     const billingMode = selectEl(s().agent_billing_mode || "byok", [
       {value:"byok",label:"自带密钥（BYOK）"}, {value:"hosted",label:"FoilPage 托管（积分）"},
-    ], value => save({agent_billing_mode:value}).then(settings => {if (settings && AppState.currentView === "settings" && section === "agent") render(); return settings;}), "agent_billing_mode");
+    ], value => {
+      const apply = () => save({agent_billing_mode:value}).then(settings => {if (settings && AppState.currentView === "settings" && section === "agent") render(); return settings;});
+      // 标题优化已开着时切到托管：计费规则从这一刻起适用，同样先确认。
+      if (value !== "hosted" || !s().title_optimization_enabled) return apply();
+      return confirmTitleBilling(true).then(accepted => accepted ? apply() : keepCurrent(billingMode));
+    }, "agent_billing_mode");
     g.appendChild(row("AI 调用方式", "", billingMode));
     g.appendChild(row("配置与修复指南", "", agentGuideControls()));
     if (hostedMode) {
@@ -582,22 +627,53 @@ window.Settings = (() => {
       // 托管模型选择（1.3.12；2026-11-16 目录驱动）：选项、标签与积分倍率
       // 全部来自服务端 /v1/health 的已复核目录——服务端加档客户端零改动。
       // 目录不足两个模型或服务未就绪时保持禁用，避免选中不可用模型。
+      let hostedCatalog = [];
       const hostedModelSelect = selectEl(String(s().agent_hosted_model || ""), [
         { value: "", label: "默认（服务端推荐）" },
-      ], (v) => save({ agent_hosted_model: v }), "agent_hosted_model");
+      ], (v) => save({ agent_hosted_model: v }).then(settings => {
+        if (settings) updateHostedModelDescription();
+        return settings;
+      }), "agent_hosted_model");
       hostedModelSelect.disabled = true;
       const hostedModelRow = row("托管模型", "按积分计费的托管整理模型", hostedModelSelect);
       const hostedModelDesc = hostedModelRow.querySelector(".set-hint");
+      // 2026-11-25 模型推荐：只讲有依据的差别（积分、速度、适用长度），不评价成稿质量高低。
+      // 档位以服务端目录为准——未在架的模型不出现在推荐里。
+      const HOSTED_MODEL_ADVICE = {
+        "qwen-turbo": "推荐场景：转写超过 2000 字（约 6 分钟）时才比默认档省积分，约为其一半；更短的两者同价，都是 1 积分。",
+        "qwen-plus": "推荐场景：日常整理的默认选择，适合大多数视频；超长转写会自动分段整理。",
+        "deepseek-flash": "推荐场景：长视频，实测 4235 字约 19 秒；消耗 3 倍积分。",
+        "qwen-max": "推荐场景：对成稿要求最高的稿件；消耗 5 倍积分。",
+      };
+      const hostedAdvice = (model) => {
+        if (HOSTED_MODEL_ADVICE[model]) return HOSTED_MODEL_ADVICE[model];
+        const listed = name => hostedCatalog.some(item => item.model === name);
+        const parts = ["推荐：日常整理用默认档。"];
+        if (listed("qwen-turbo")) parts.push("turbo 只在转写超过 2000 字（约 6 分钟）时更省积分；");
+        if (listed("deepseek-flash")) parts.push("长视频可以选 deepseek-flash（3 倍积分，实测 4235 字约 19 秒）。");
+        return parts.join("");
+      };
+      const hostedModelAdvice = document.createElement("div");
+      hostedModelAdvice.className = "set-hint";
+      hostedModelAdvice.id = "hostedModelAdvice";
+      hostedModelRow.querySelector(".set-left")?.appendChild(hostedModelAdvice);
       const multiplierText = (item) => {
         const n = Number(item?.cost_multiplier || 1);
         return n === 1 ? "基础积分" : `${n} 倍积分`;
       };
+      const updateHostedModelDescription = () => {
+        const selected = hostedCatalog.find(item => item.model === hostedModelSelect.value);
+        if (hostedModelDesc) hostedModelDesc.textContent = selected
+          ? `每次整理消耗 ${multiplierText(selected)}（每 2000 字符计 1 次基数）`
+          : "按积分计费的托管整理模型";
+        hostedModelAdvice.textContent = hostedAdvice(selected?.model);
+      };
       const applyHostedModels = (models) => {
-        const catalog = Array.isArray(models)
-          ? models.filter(item => item && item.model).map(item => ({ model: String(item.model), label: String(item.label || ""), multiplier: item.cost_multiplier }))
+        hostedCatalog = Array.isArray(models)
+          ? models.filter(item => item && item.model).map(item => ({ model: String(item.model), label: String(item.label || ""), cost_multiplier: item.cost_multiplier }))
           : [];
-        const options = [{ value: "", label: catalog.length ? "默认（服务端推荐）" : "默认（服务端仅此模型）" }];
-        catalog.forEach(item => options.push({
+        const options = [{ value: "", label: hostedCatalog.length ? "默认（服务端推荐）" : "默认（服务端仅此模型）" }];
+        hostedCatalog.forEach(item => options.push({
           value: item.model,
           label: item.label ? `${item.label}（${multiplierText(item)}）` : `${item.model}（${multiplierText(item)}）`,
         }));
@@ -605,13 +681,14 @@ window.Settings = (() => {
           const op = document.createElement("option"); op.value = opt.value; op.textContent = opt.label; return op;
         }));
         const current = String(s().agent_hosted_model || "");
-        hostedModelSelect.value = catalog.some(item => item.model === current) ? current : "";
+        const listed = hostedCatalog.some(item => item.model === current);
+        hostedModelSelect.value = listed ? current : "";
         hostedModelSelect.dataset.initialValue = hostedModelSelect.value;
-        hostedModelSelect.disabled = catalog.length < 2 || !relayReady;
-        const selected = catalog.find(item => item.model === hostedModelSelect.value);
-        if (hostedModelDesc) hostedModelDesc.textContent = selected
-          ? `每次整理消耗 ${multiplierText(selected)}（每 2000 字符计 1 次基数）`
-          : "按积分计费的托管整理模型";
+        // 所选档位已被服务端摘下时（如配额未开通），显示与生效的一致回到默认档，
+        // 否则每次整理都会报"所选托管模型不可用"。
+        if (current && !listed && hostedCatalog.length && relayReady) save({ agent_hosted_model: "" }, false);
+        hostedModelSelect.disabled = hostedCatalog.length < 2 || !relayReady;
+        updateHostedModelDescription();
       };
       applyHostedModels([]);
       const refresh = async (probe) => {
@@ -659,13 +736,12 @@ window.Settings = (() => {
           if (preset.base) patch.agent_base_url = preset.base;
           if (preset.model) patch.agent_model = preset.model;
         }
-        const hadKey = !!String(s().agent_api_key || "").trim();
-        return save(patch).then(settings => {
+        return save(patch, false).then(settings => {
           if (settings && AppState.currentView === "settings" && section === "agent") render();
-          if (settings && (settings.agent_key_cleared || hadKey)) {
-            toast("已切换服务商：接口与默认模型已带出，请重新填写 API Key", "error");
+          if (settings?.agent_key_cleared) {
+            toast("已切换服务商，旧 API Key 已清空，请重新填写", "error");
           } else if (settings) {
-            toast(`已应用${preset ? preset.label : ""}预设：接口与默认模型已带出`);
+            toast(v === "custom" ? "已切换为自定义服务商" : `已应用${preset ? preset.label : ""}预设，接口与默认模型已带出`);
           }
           return settings;
         });
@@ -673,14 +749,17 @@ window.Settings = (() => {
       "agent_provider"
     );
     g.appendChild(row("服务商", "切换预设自动填入接口与模型；MiMo/OpenAI 可读取视频帧字幕辅助纠错", provider));
-    const baseUrl = inputEl(s().agent_base_url || PROVIDER_PRESETS.mimo.base, (v) => save({ agent_base_url: v }));
+    const baseUrl = inputEl(s().agent_base_url || PROVIDER_PRESETS.mimo.base, (v) => save({ agent_base_url: v }).then(settings => {
+      if (settings?.agent_key_cleared && inSection("agent")) render();
+      return settings;
+    }));
     g.appendChild(row("接口地址", "", baseUrl));
     const agentModel = inputEl(s().agent_model || PROVIDER_PRESETS.mimo.model, (v) => save({ agent_model: v }));
     g.appendChild(row("模型", "", agentModel));
     const apiKey = inputEl(s().agent_api_key || "", (v) => save({ agent_api_key: v }), { password: true });
     apiKey.dataset.tour = "agent-key";
     g.appendChild(row("API Key", "", apiKey));
-    const profile = selectEl(s().agent_profile || "auto", profileOptions(), (v) => save({ agent_profile: v }), "agent_profile");
+    const profile = selectEl(s().agent_profile || "auto", SettingsModel.profileOptions(s()), (v) => save({ agent_profile: v }), "agent_profile");
     g.appendChild(row("默认策略", "", profile));
     const temp = inputEl(String(s().agent_temperature ?? 0.6), (v) => {
       const n = parseFloat(v);
@@ -695,8 +774,9 @@ window.Settings = (() => {
     }, { number: true });
     g.appendChild(row("超时（秒）", "", timeout));
     const visionToggle = toggleEl(!!s().agent_vision_enabled, () => save({ agent_vision_enabled: !s().agent_vision_enabled }), "agent_vision_enabled");
-    visionToggle.disabled = hostedMode;
-    g.appendChild(row("启用字幕视觉校对", hostedMode ? "托管目前仅支持文本；视觉核对需切换到自带密钥" : "发现视频帧字幕时，优先用画面核对含糊词；无法确认时保留原词并标记待确认", visionToggle));
+    // 2026-11-19 托管视觉：deepseek-flash 原生多模态可开；默认档（qwen-plus）
+    // 仍为纯文本，开关保持可切但运行时不生效（engine 侧按生效模型门控）。
+    g.appendChild(row("启用字幕视觉校对", hostedMode ? "deepseek-flash 托管档支持画面核对；默认档为纯文本，此开关不生效" : "发现视频帧字幕时，优先用画面核对含糊词；无法确认时保留原词并记入文末存疑清单", visionToggle));
     const visionModel = inputEl(s().agent_vision_model || PROVIDER_PRESETS.mimo.model, (v) => save({ agent_vision_model: v }));
     g.appendChild(row("视觉模型", `留空跟随主模型；建议与主模型同厂商（当前预设建议 ${PROVIDER_PRESETS.mimo.model}）`, visionModel));
     const visionFrames = inputEl(String(s().agent_vision_frame_count || 6), (v) => {
@@ -905,10 +985,11 @@ window.Settings = (() => {
     dot.className = "worker-dot" + (w.running ? " on" : "");
     dot.style.cssText = "width:11px;height:11px;border-radius:50%;background:" + (w.running ? "var(--primary)" : "var(--faint)");
     const label = document.createElement("span");
-    label.style.cssText = "font-size:13px;color:var(--text2);font-weight:600";
+    label.className = "set-value";
+    label.style.fontWeight = "600";
     label.textContent = w.label || "Worker 已停止";
     const meta = document.createElement("span");
-    meta.style.cssText = "font-size:11px;color:var(--muted)";
+    meta.className = "settings-worker-meta";
     meta.textContent = w.meta || "";
     const btn = document.createElement("button");
     btn.className = "btn " + (w.running ? "danger small" : "primary small");
@@ -1190,60 +1271,152 @@ window.Settings = (() => {
   }
 
   /* ---------------- 数据 ---------------- */
-  function renderReconcile(box, res) {
+  function renderReconcile(box, res, checkBtn, selection) {
     if (!box.isConnected || !inSection("data")) return;
-    box.innerHTML = "";
+    box.hidden = false;
+    box.replaceChildren();
     if (!res?.ok) {box.textContent = res?.error || "数据自检失败，请重试"; return;}
-    box.style.maxHeight = "220px";
-    box.style.overflowY = "auto";
-    const add = (text, cls) => {
-      const line = document.createElement("div");
-      line.className = cls || "reconcile-line";
-      line.textContent = text;
-      box.appendChild(line);
-    };
     const fixed = (res.stale_fixed || []).length;
     const orphansOut = res.orphan_outputs || [];
-    const orphansDl = res.orphan_downloads || [];
-    add("悬空任务已收敛：" + fixed + " 条", fixed ? "reconcile-ok" : "reconcile-muted");
+    const outputPaths = new Set(orphansOut.map(item => item.path));
+    const orphansDl = (res.orphan_downloads || []).filter(item => !outputPaths.has(item.path));
+    if (fixed) {
+      const status = document.createElement("div");
+      status.className = "reconcile-ok";
+      status.textContent = I18n.t("已将 {count} 条超时任务标记为可重试").replace("{count}", fixed);
+      box.appendChild(status);
+    }
     if (!orphansOut.length && !orphansDl.length) {
-      add("未发现孤儿产物。", "reconcile-muted");
+      const empty = document.createElement("div");
+      empty.className = "reconcile-muted";
+      empty.textContent = "未发现可清理的残留文件。";
+      box.appendChild(empty);
       return;
     }
-    add("孤儿产物（无任务记录，可安全清理）：", "");
-    [...orphansOut, ...orphansDl].forEach((item) => {
-      const wrap = document.createElement("div");
-      wrap.className = "reconcile-line";
-      const name = document.createElement("span");
-      name.textContent = (item.name || item.path || "?") + "  ";
-      const clean = document.createElement("button");
-      clean.className = "btn ghost tiny";
-      clean.textContent = "清理";
-      clean.onclick = () => {
-        if (clean.disabled) return;
-        ConfirmDelete.run({
-          message: "确定清理孤儿产物？\n" + (item.path || ""),
-          onConfirm: async () => {
-            const isOut = item.path && orphansOut.includes(item);
-            const payload = isOut ? { outputs: [item.path], downloads: [] } : { outputs: [], downloads: [item.path] };
-            clean.disabled = true;
-            try {
-              const result = await AppApi.cleanupOrphans(payload.outputs, payload.downloads);
-              if (!result?.ok) throw new Error(result?.error || "清理失败，请重试");
-              const removed = [...(result.removed_outputs || []), ...(result.removed_downloads || [])];
-              if (!removed.includes(item.path)) throw new Error("文件未被清理，请重新自检后重试");
-              if (!box.isConnected || !inSection("data")) return;
-              toast("已清理", "success");
-              renderReconcile(box, await AppApi.dataReconcile());
-            } catch (e) {if (box.isConnected && inSection("data")) toast(e?.message || "清理失败，请重试", "error");}
-            finally {clean.disabled = false;}
-          },
-        });
-      };
-      wrap.appendChild(name);
-      wrap.appendChild(clean);
-      box.appendChild(wrap);
-    });
+    const preset = s().residue_cleanup_default ?? "outputs";
+    const list = document.createElement("div");
+    list.className = "reconcile-list";
+    const checks = [];
+    for (const [kind, label, items] of [
+      ["outputs", "转写残留", orphansOut],
+      ["downloads", "下载残留", orphansDl],
+    ]) {
+      if (!items.length) continue;
+      const group = document.createElement("fieldset");
+      group.className = "reconcile-group";
+      const legend = document.createElement("legend");
+      legend.textContent = label;
+      group.appendChild(legend);
+      for (const item of items) {
+        const wrap = document.createElement("label");
+        wrap.className = "reconcile-item";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = selection ? selection[kind].has(item.path) : preset === "all" || preset === kind;
+        const text = document.createElement("span");
+        const name = document.createElement("span");
+        name.textContent = item.name || item.path;
+        name.setAttribute("data-i18n-skip", "");
+        input.setAttribute("aria-label", name.textContent);
+        text.appendChild(name);
+        if (item.path && item.path !== name.textContent) {
+          const path = document.createElement("span");
+          path.className = "reconcile-path";
+          path.id = "residue-path-" + checks.length;
+          path.textContent = item.path;
+          path.setAttribute("data-i18n-skip", "");
+          input.setAttribute("aria-describedby", path.id);
+          text.appendChild(path);
+        }
+        wrap.append(input, text);
+        group.appendChild(wrap);
+        checks.push({input, kind, path: item.path});
+      }
+      list.appendChild(group);
+    }
+    const toolbar = document.createElement("div");
+    toolbar.className = "reconcile-toolbar";
+    const all = document.createElement("button");
+    all.type = "button";
+    all.className = "btn ghost small";
+    all.textContent = "全选";
+    const none = document.createElement("button");
+    none.type = "button";
+    none.className = "btn ghost small";
+    none.textContent = "取消全选";
+    const count = document.createElement("span");
+    count.className = "reconcile-muted";
+    count.setAttribute("role", "status");
+    if (checks.length > 1) toolbar.append(all, none);
+    toolbar.appendChild(count);
+    const clean = document.createElement("button");
+    clean.type = "button";
+    clean.className = "btn danger small reconcile-cleanup";
+    clean.textContent = "清理所选";
+    function updateSelection() {
+      const total = checks.filter(({input}) => input.checked).length;
+      all.disabled = total === checks.length;
+      none.disabled = clean.disabled = total === 0;
+      count.textContent = I18n.t("已选 {count} 项").replace("{count}", total);
+    }
+    function setChecks(checked) {
+      checks.forEach(({input}) => { input.checked = checked; });
+      updateSelection();
+      (checked ? none : all).focus();
+    }
+    all.onclick = () => setChecks(true);
+    none.onclick = () => setChecks(false);
+    list.onchange = updateSelection;
+    clean.onclick = () => {
+      if (checkBtn.disabled || clean.disabled) return;
+      const picked = {outputs: new Set(), downloads: new Set()};
+      for (const {input, kind, path} of checks) {
+        if (input.checked) picked[kind].add(path);
+      }
+      const outputs = [...picked.outputs], downloads = [...picked.downloads];
+      ConfirmDelete.run({
+        settingKey: "confirm_residue_cleanup",
+        message: I18n.t("永久删除选中的 {count} 项残留？FoilPage 会在删除前重新核对文件。")
+          .replace("{count}", outputs.length + downloads.length),
+        onConfirm: async () => {
+          if (checkBtn.disabled || !box.isConnected || !inSection("data")) return;
+          checkBtn.disabled = true;
+          all.disabled = none.disabled = clean.disabled = true;
+          clean.textContent = "正在清理…";
+          checks.forEach(({input}) => { input.disabled = true; });
+          try {
+            const result = await AppApi.cleanupOrphans(outputs, downloads);
+            if (!result?.ok) throw new Error(result?.error || "清理失败，请重试");
+            const removedOut = new Set(result.removed_outputs || []);
+            const removedDl = new Set(result.removed_downloads || []);
+            const removed = removedOut.size + removedDl.size;
+            if (!removed) throw new Error("文件未被清理，请重新自检后重试");
+            if (!box.isConnected || !inSection("data")) return;
+            const partial = removed < outputs.length + downloads.length;
+            toast(partial ? "部分文件未被清理，请重新自检后重试" : "已清理", partial ? "error" : "success");
+            renderReconcile(box, {
+              ...res,
+              orphan_outputs: orphansOut.filter(item => !removedOut.has(item.path)),
+              orphan_downloads: orphansDl.filter(item => !removedDl.has(item.path)),
+            }, checkBtn, picked);
+          } catch (e) {
+            if (box.isConnected && inSection("data")) toast(e?.message || "清理失败，请重试", "error");
+          } finally {
+            checkBtn.disabled = false;
+            if (clean.isConnected) {
+              clean.textContent = "清理所选";
+              checks.forEach(({input}) => { input.disabled = false; });
+              updateSelection();
+            }
+            if (box.isConnected && inSection("data") && document.activeElement === document.body) {
+              (box.querySelector(".reconcile-cleanup:not(:disabled)") || checkBtn).focus({preventScroll: true});
+            }
+          }
+        },
+      });
+    };
+    box.append(toolbar, list, clean);
+    updateSelection();
   }
 
   /* ---------------- 缓存清理 ---------------- */
@@ -1526,55 +1699,63 @@ window.Settings = (() => {
     pane.appendChild(g);
 
       g = group("数据自检与备份");
-      const statusEl = document.createElement("div");
-      statusEl.className = "hint";
-      statusEl.textContent = "自检会收敛超时悬空任务，并列出没有任务记录的孤儿产物。";
-      g.appendChild(statusEl);
+      const preset = selectEl(s().residue_cleanup_default ?? "outputs", [
+        {value: "outputs", label: "转写残留"},
+        {value: "downloads", label: "下载残留"},
+        {value: "all", label: "两类残留"},
+        {value: "none", label: "不预选"},
+      ], value => save({residue_cleanup_default: value}), "residue_cleanup_default");
+      g.appendChild(row("默认勾选范围", "每次数据自检后预选符合范围的项目，可在清理前调整。", preset));
+      const shouldConfirm = () => s().confirm_residue_cleanup !== false;
+      const confirmation = toggleEl(shouldConfirm(), () => save({confirm_residue_cleanup: !shouldConfirm()}),
+        shouldConfirm, false);
+      g.appendChild(row("清理残留前确认", "关闭后，点击「清理所选」直接清理已勾选的项目。", confirmation));
       const resultBox = document.createElement("div");
       resultBox.className = "reconcile-box";
+      resultBox.hidden = true;
       const checkBtn = document.createElement("button");
+      checkBtn.type = "button";
       checkBtn.className = "btn small";
       checkBtn.textContent = "运行数据自检";
       checkBtn.onclick = () => {
         checkBtn.disabled = true;
+        resultBox.hidden = true;
         checkBtn.textContent = "自检中…";
         AppApi.dataReconcile().then((res) => {
           if (!resultBox.isConnected || !inSection("data")) return;
-          renderReconcile(resultBox, res || {});
+          renderReconcile(resultBox, res || {}, checkBtn);
           toast(res && res.ok ? "自检完成" : "自检失败", res && res.ok ? "info" : "error");
-        }).catch((e) => {if (resultBox.isConnected && inSection("data")) {resultBox.textContent = "数据自检失败，请重试"; toast("自检失败：" + (e && e.message || e), "error");}})
+        }).catch((e) => {
+          if (!resultBox.isConnected || !inSection("data")) return;
+          renderReconcile(resultBox, {ok: false}, checkBtn);
+          toast("自检失败：" + (e && e.message || e), "error");
+        })
           .finally(() => { checkBtn.disabled = false; checkBtn.textContent = "运行数据自检"; });
       };
-      const btnWrap = document.createElement("div");
-      btnWrap.style.display = "flex";
-      btnWrap.style.gap = "8px";
-      btnWrap.style.alignItems = "center";
-      btnWrap.appendChild(checkBtn);
-      btnWrap.appendChild(resultBox);
-      g.appendChild(btnWrap);
+      g.append(checkBtn, resultBox);
 
       const backupBtn = document.createElement("button");
       backupBtn.className = "btn small";
-      backupBtn.textContent = "导出备份";
+      backupBtn.textContent = "导出文稿备份";
       backupBtn.onclick = () => {
         const stamp = new Date().toISOString().slice(0, 10);
-        AppApi.pickSaveFile("FoilPage-Backup-" + stamp + ".zip").then((r) => {
+        AppApi.pickSaveFile("FoilPage-Documents-" + stamp + ".zip").then((r) => {
           if (!r || !r.ok || r.cancelled) return;
           return AppApi.exportBackup(r.path);
         }).then((r) => {
           if (!r) return;
-          toast(r.ok ? "备份已导出：" + r.path : r.error || "导出失败", r.ok ? "success" : "error");
+          toast(r.ok ? "文稿备份已导出：" + r.path : r.error || "导出失败", r.ok ? "success" : "error");
         }).catch((e) => toast("导出失败：" + (e && e.message || e), "error"));
       };
 
       const importBtn = document.createElement("button");
       importBtn.className = "btn small";
-      importBtn.textContent = "导入备份";
+      importBtn.textContent = "导入文稿备份";
       importBtn.onclick = () => {
         AppApi.pickOpenFile().then((r) => {
           if (!r || !r.ok || r.cancelled) return;
           ConfirmDelete.run({
-            message: "导入备份会覆盖当前设置与任务库，导入前会自动备份现状。确定继续？",
+            message: "导入文稿备份会覆盖当前文稿、设置与任务库，导入前会自动备份现状。备份不包含视频文件。确定继续？",
             onConfirm: () => AppApi.importBackup(r.path).then((res) => {
               if (res && res.ok) toast(res.message || "导入完成，请重启 FoilPage", "success");
               else toast(res && res.error || "导入失败", "error");
@@ -1666,6 +1847,16 @@ window.Settings = (() => {
       const show = currentPack() === "custom";
       customSoundRows.forEach((r) => { r.style.display = show ? "" : "none"; });
     };
+    async function previewSound(kind, pack, path) {
+      try {
+        const result = await AppApi.previewNotificationSound(kind, pack, path);
+        if (!result?.ok) throw new Error(result?.error || "试听失败");
+        return result;
+      } catch (error) {
+        if (inSection("startup") && pane.isConnected) toast(error.message || "试听失败", "error");
+        return false;
+      }
+    }
     const soundPathCtrl = (kind, hint) => {
       const key = "notification_sound_" + kind + "_path";
       const wrap = document.createElement("div");
@@ -1673,11 +1864,13 @@ window.Settings = (() => {
       const box = document.createElement("div");
       box.className = "path-box";
       const txt = document.createElement("span");
+      const playBtn = document.createElement("button");
       const showPath = () => {
         const value = String(s()[key] || "");
         txt.className = "path-text" + (value ? "" : " is-empty");
         txt.textContent = value || "未选择";
         txt.title = value;
+        playBtn.disabled = !value;
       };
       showPath();
       box.appendChild(txt);
@@ -1685,6 +1878,7 @@ window.Settings = (() => {
       const pickBtn = document.createElement("button");
       pickBtn.className = "btn ghost small";
       pickBtn.textContent = "选择";
+      pickBtn.setAttribute("aria-label", kind === "success" ? "选择成功提示音" : "选择失败提示音");
       pickBtn.onclick = () => runControl(pickBtn, async () => {
         const owner = section;
         try {
@@ -1693,26 +1887,32 @@ window.Settings = (() => {
           if (!res?.ok || typeof res.settings?.[key] !== "string" || !res.settings[key]) throw new Error(res?.error || "选择失败");
           AppState.settings = {...AppState.settings, [key]: res.settings[key]};
           showPath();
-          if (inSection(owner) && wrap.isConnected) toast("提示音已更新");
-          await AppApi.previewNotificationSound(kind, "custom", res.settings[key]);
+          if (inSection(owner) && wrap.isConnected) {
+            toast("提示音已更新");
+            await previewSound(kind, "custom", res.settings[key]);
+          }
           return res;
         } catch (error) { if (inSection(owner) && wrap.isConnected) toast(error.message || "选择失败", "error"); }
       }, true);
       wrap.appendChild(pickBtn);
-      const playBtn = document.createElement("button");
       playBtn.className = "btn ghost small";
       playBtn.textContent = "试听";
-      playBtn.onclick = () => runControl(playBtn, () => AppApi.previewNotificationSound(kind, "custom", String(s()[key] || "")));
+      playBtn.setAttribute("aria-label", kind === "success" ? "试听成功提示音" : "试听失败提示音");
+      playBtn.onclick = () => runControl(playBtn, () => previewSound(kind, "custom", String(s()[key] || "")));
+      pickBtn.syncConfirmedDisplay = showPath;
       wrap.appendChild(playBtn);
       return row(kind === "success" ? "成功提示音" : "失败提示音", hint, wrap);
     };
     customSoundRows.push(soundPathCtrl("success", "任务完成时播放的 WAV 文件"));
     customSoundRows.push(soundPathCtrl("error", "任务失败时播放的 WAV 文件"));
     const packSelect = selectEl(currentPack(), SOUND_PACKS, async (v) => {
-      await save({ notification_sound_pack: v }, false);
-      refreshCustomSoundRows();
-      if (v !== "custom") await AppApi.previewNotificationSound("success", v, "");
+      const saved = await save({notification_sound_pack: v});
+      if (saved && inSection("startup") && pane.isConnected && v !== "custom" && v !== "silent") {
+        await previewSound("success", saved.notification_sound_pack, "");
+      }
+      return saved;
     }, "notification_sound_pack");
+    packSelect.syncConfirmedDisplay = refreshCustomSoundRows;
     g.appendChild(row("提示音", "任务终态时播放；预设组或自定义 WAV 文件", packSelect));
     customSoundRows.forEach((r) => g.appendChild(r));
     refreshCustomSoundRows();
@@ -1793,7 +1993,7 @@ window.Settings = (() => {
   function buildAbout() {
     const pane = document.createElement("div");
       let g = group("FoilPage");
-      const version = valueEl("v" + (window.APP_VERSION || "0.1.5"));
+      const version = valueEl("v" + (window.APP_VERSION || "0.1.6"));
       g.appendChild(row("版本", "", version));
       g.appendChild(row("产品", "", valueEl("FoilPage")));
       const updateBtn = document.createElement("button");
@@ -1906,7 +2106,7 @@ window.Settings = (() => {
     const host = document.getElementById("page-settings");
     host.innerHTML = `
       <div class="settings-layout">
-        <div class="settings-nav" id="settingsNav"></div>
+        <nav class="settings-nav" id="settingsNav" aria-label="设置"></nav>
         <div class="settings-pane" id="settingsPane"></div>
       </div>`;
     const nav = document.getElementById("settingsNav");
@@ -1942,7 +2142,15 @@ window.Settings = (() => {
     const pane = document.getElementById("settingsPane");
     pane.dataset.section = section;
     pane.innerHTML = "";
-    pane.appendChild(BUILDERS[section]());
+    const content = BUILDERS[section]();
+    if (returnFocus?.previousSwitch) {
+      const changed = [...content.querySelectorAll('[role="switch"]')].find(node => controlKey(node) === returnFocus.key);
+      if (changed && changed.getAttribute("aria-checked") !== returnFocus.previousSwitch.checked) {
+        changed.style.setProperty("--thumb-from", returnFocus.previousSwitch.thumb);
+        changed.dataset.switchChanged = "";
+      }
+    }
+    pane.appendChild(content);
     pane.querySelectorAll('input,textarea,select,button').forEach(control => {
       const key = controlKey(control), draft = editingDrafts.get(section)?.get(key);
       if (draft && 'value' in control) {control.value = draft.value; if (draft.invalid) control.setAttribute("aria-invalid", draft.invalid);}

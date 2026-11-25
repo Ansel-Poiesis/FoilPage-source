@@ -90,6 +90,7 @@ def test_batch_isolates_single_failure() -> None:
 
     assert result["done"] == 1
     assert result["failed"] == 1
+    assert result["failed_ids"] == ["a"]
     assert "a: RuntimeError" in result["errors"][0]
     assert queue.replaced == ["a", "b"]  # 失败阶段也持久化，已有转写仍可用
 

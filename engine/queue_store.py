@@ -146,11 +146,15 @@ def _stage_metadata(value: dict, *, strict: bool = False) -> dict:
 _MANIFEST_STRING_FIELDS = frozenset({
     "source_title", "original_source_title", "segments_path", "agent_profile",
     "agent_model", "agent_status", "agent_prompt_version", "agent_editing_level",
+    "agent_fidelity_fallback_reason",
     "title_status", "title_skill_version", "title_model", "title_error",
     # TASK-8.24 文章翻译：状态/方向/语言与产物路径。
-    "translation_status", "translation_direction", "translation_lang",
+    "translation_status", "translation_direction", "translation_lang", "translation_source_tab",
     "translation_path", "translation_segments_path", "translation_error",
+    "translation_run_id", "translation_source_revision", "translation_prompt_version",
 })
+# 保真降级只记录固定分类（编造数字 / 成稿过短），不接受任意文本。
+_FIDELITY_FALLBACK_REASONS = frozenset({"", "numbers", "short", "numbers+short"})
 _MANIFEST_BOOL_FIELDS = frozenset({
     "agent_vision_used", "agent_fidelity_fallback",
     "text_outputs_cleared",
@@ -174,7 +178,8 @@ def _manifest_metadata(value: dict, *, strict: bool = False) -> dict:
             continue
         item = value[key]
         if key in _MANIFEST_STRING_FIELDS:
-            valid = isinstance(item, str)
+            valid = isinstance(item, str) and (
+                key != "agent_fidelity_fallback_reason" or item in _FIDELITY_FALLBACK_REASONS)
         elif key in _MANIFEST_BOOL_FIELDS:
             valid = isinstance(item, bool)
         elif key in _MANIFEST_FLOAT_FIELDS:
@@ -688,38 +693,56 @@ class QueueStore:
         A filesystem context can stage/restore its files on preparation or SQL
         failure. Commit happens before that context finalizes physical removal.
         """
+        return self._remove_library_outputs(
+            job_id, mode="text", stage=(lambda _db, job, manifest: remove_files(job, manifest)) if remove_files else None,
+        )
+
+    def remove_library_outputs(
+        self, job_id: str, *, remove_record: bool,
+        stage: Callable[[sqlite3.Connection, Job, Optional[Manifest]], ContextManager],
+    ) -> bool:
+        """Remove library outputs and update their related registrations in one write."""
+        return self._remove_library_outputs(job_id, mode="record" if remove_record else "files", stage=stage)
+
+    def _remove_library_outputs(self, job_id: str, *, mode: str, stage) -> bool:
         with self._lock:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
                 row = self._require_job_row(job_id)
                 if row["status"] in ("queued", "running", "retryable"):
-                    raise QueueStateError("运行中的任务请先取消后再删除文本")
+                    raise QueueStateError("运行中的任务请先取消后再删除")
                 manifest_row = self._conn.execute(
                     "SELECT * FROM manifests WHERE job_id=?", (job_id,)
                 ).fetchone()
                 manifest = self._row_to_manifest(manifest_row) if manifest_row else None
-                if not (row["raw_path"] or row["final_path"] or
-                        manifest and any(manifest.get(key) for key in
-                                         ("raw_path", "final_path", "segments_path"))):
+                has_text = row["raw_path"] or row["final_path"] or manifest and any(
+                    manifest.get(key) for key in ("raw_path", "final_path", "segments_path", "translation_path",
+                                                  "translation_segments_path"))
+                if mode == "text" and not has_text:
                     self._conn.commit()
                     return False
-                cleanup = remove_files(self._row_to_job(row), manifest) if remove_files else None
+                cleanup = stage(self._conn, self._row_to_job(row), manifest) if stage else None
                 with cleanup if cleanup is not None else nullcontext():
                     # Commit inside the filesystem context: a failed COMMIT also
                     # restores staged text/sidecars before the outer rollback.
                     with self._conn:
-                        self._conn.execute(
-                            "UPDATE jobs SET raw_path=NULL, final_path=NULL, updated_at=? WHERE id=?",
-                            (_now(), job_id),
-                        )
-                        if manifest is not None:
-                            metadata = _manifest_metadata(manifest)
-                            metadata.update(segments_path="", text_outputs_cleared=True)
+                        if mode == "record":
+                            self._conn.execute("DELETE FROM manifests WHERE job_id=?", (job_id,))
+                            self._conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+                        else:
                             self._conn.execute(
-                                """UPDATE manifests SET raw_path='', final_path='', metadata_json=?
-                                   WHERE job_id=?""",
-                                (json.dumps(metadata, ensure_ascii=False), job_id),
+                                "UPDATE jobs SET raw_path=NULL, final_path=NULL, updated_at=? WHERE id=?",
+                                (_now(), job_id),
                             )
+                            if manifest is not None:
+                                metadata = {key: value for key, value in _manifest_metadata(manifest).items()
+                                            if not key.startswith("translation_")}
+                                metadata.update(segments_path="", text_outputs_cleared=True)
+                                self._conn.execute(
+                                    """UPDATE manifests SET raw_path='', final_path='', metadata_json=?
+                                       WHERE job_id=?""",
+                                    (json.dumps(metadata, ensure_ascii=False), job_id),
+                                )
                 return True
             except BaseException:
                 if self._conn.in_transaction:
@@ -747,6 +770,21 @@ class QueueStore:
             ).fetchone()
             return self._row_to_manifest(row) if row else None
 
+    def manifest_file_paths(self) -> list[tuple[str, str]]:
+        """Get files referenced by live document, subtitle and translation metadata."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM manifests").fetchall()
+        paths = []
+        for row in rows:
+            manifest = self._row_to_manifest(row)
+            if not manifest.get("text_outputs_cleared"):
+                paths.extend(
+                    (manifest["job_id"], manifest[key])
+                    for key in ("raw_path", "final_path", "segments_path", "translation_path", "translation_segments_path")
+                    if manifest.get(key)
+                )
+        return paths
+
     def list_jobs(self, status: Optional[str] = None) -> list[Job]:
         if status is not None and status not in validate._JOB_STATUSES:
             raise validate.ContractValidationError(f"Job.status 非法: {status!r}")
@@ -770,10 +808,18 @@ class QueueStore:
                 self._conn.execute("BEGIN IMMEDIATE")
                 row = self._conn.execute(
                     """
-                    SELECT id FROM jobs
-                     WHERE status='queued'
-                       AND cancel_requested=0
-                       AND attempts < max_attempts
+                    WITH queued AS (
+                        SELECT id, attempts, max_attempts, created_at,
+                               CASE WHEN json_valid(error) THEN COALESCE(
+                                   json_extract(error, '$.code')='worker_shutdown_requeued'
+                                   AND COALESCE(json_extract(error, '$.attempt_refunded'), 0)=0,
+                                   0
+                               ) ELSE 0 END AS refund_shutdown
+                          FROM jobs
+                         WHERE status='queued' AND cancel_requested=0
+                    )
+                    SELECT id, attempts, refund_shutdown FROM queued
+                     WHERE attempts - refund_shutdown < max_attempts
                      ORDER BY created_at, id
                      LIMIT 1
                     """
@@ -787,11 +833,13 @@ class QueueStore:
                     UPDATE jobs
                        SET status='running', worker_id=:worker_id,
                            claimed_at=:now, heartbeat_at=:now,
-                           attempts=attempts + 1, updated_at=:now, error=NULL,
+                           attempts=:attempts, updated_at=:now, error=NULL,
                            progress=0
                      WHERE id=:id AND status='queued'
                     """,
-                    {"worker_id": worker_id, "now": now, "id": row["id"]},
+                    {"worker_id": worker_id, "now": now, "id": row["id"],
+                     # Older shutdown rows still include the interrupted claim.
+                     "attempts": max(0, row["attempts"] - row["refund_shutdown"]) + 1},
                 )
                 if cursor.rowcount != 1:
                     raise QueueStateError("原子领取失败")
@@ -934,30 +982,31 @@ class QueueStore:
                 recovered.append(row["id"])
         return recovered
 
-    def requeue_interrupted(self, job_id: str) -> bool:
-        """先生 2026-11-16：退出中断的 running 任务直接置回 queued。
+    def requeue_interrupted(self, job_id: str, *, worker_id: str | None = None) -> bool:
+        """Return an interrupted claim and restore its retry allowance.
 
-        与 recover_stale_jobs 的崩溃回收同语义（不吃尝试次数、清租约字
-        段、进度归零），但由 Worker 在协作取消点主动调用——用户取消仍走
-        cancelled 终态，二者以 cancel_requested 区分。行不存在或已非
-        running 时静默跳过并返回 False。
+        Lease ownership and user-cancel flags guard the state transition.
+        The refund marker also distinguishes these rows from older shutdowns.
         """
         with self._write_transaction():
             cursor = self._conn.execute(
                 """
                 UPDATE jobs
-                   SET status='queued', progress=0,
+                   SET status='queued', progress=0, attempts=MAX(0, attempts - 1),
                        error=:error, updated_at=:now,
                        worker_id=NULL, claimed_at=NULL, heartbeat_at=NULL
                  WHERE id=:id AND status='running' AND cancel_requested=0
+                   AND (:worker_id IS NULL OR worker_id=:worker_id)
                 """,
                 {
                     "error": _error_json({
                         "code": "worker_shutdown_requeued",
                         "message": "应用退出中断，任务已重新排队",
+                        "attempt_refunded": True,
                     }),
                     "now": _now(),
                     "id": job_id,
+                    "worker_id": worker_id,
                 },
             )
             return cursor.rowcount > 0

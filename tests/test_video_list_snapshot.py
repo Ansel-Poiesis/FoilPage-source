@@ -87,12 +87,19 @@ def test_historical_jobs_do_not_probe_paths_while_listing_videos(application, tm
         registered(controller, tmp_path / "originals" / f"{index}.mp4", f"video-{index}".encode())
     # A long history can contain moved or disconnected sources. Such files
     # cannot be active, and resolving all history paths stalls every UI read.
-    historical = [{"source_path": f"Z:/offline/{index}.mp4", "status": status}
+    historical = [{"id": f"history-{index}-{status}", "source_path": f"Z:/offline/{index}.mp4", "status": status}
         for index in range(240) for status in ("done", "failed", "cancelled")]
     monkeypatch.setattr(controller.queue, "list_jobs", lambda: historical)
     from engine import queue_store
     probe = Mock(side_effect=AssertionError("historical path must not be probed"))
     monkeypatch.setattr(queue_store, "_source_paths_equivalent", probe)
+    original_resolve = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        assert not path.as_posix().startswith("Z:/offline/"), "historical path must not be resolved"
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
     result = bridge.get_downloaded_videos()
     assert result["ok"] and result["total"] == 12
     assert all(item["deletable"] for item in result["items"])

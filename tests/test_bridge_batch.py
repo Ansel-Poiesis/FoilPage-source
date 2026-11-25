@@ -87,3 +87,22 @@ def test_batch_worker_failure_fallback_is_readable(tmp_path) -> None:
     assert status["running"] is False
     assert status["failed"] == 1
     assert status["errors"] == ["boom"]
+    assert status["failed_ids"] == ["job:a"]
+
+
+def test_batch_receipt_identity_and_failed_ids_survive_the_diagnostic_limit(tmp_path) -> None:
+    bridge, _ = make_bridge({"agent_enabled": True, "agent_api_key": "fixture"}, account_dir=tmp_path / "data")
+    ids = [str(index) for index in range(12)]
+    with mock.patch("app.bridge.threading.Thread"), mock.patch(
+        "app.agent_service.batch_apply_agent_translation",
+        return_value={"done": 0, "skipped": 0, "failed": 12, "failed_ids": ids, "errors": ["fixture"] * 12},
+    ):
+        started = bridge.batch_agent_translate([f"job:{job_id}" for job_id in ids])
+        bridge._batch_agent_worker(ids)
+        status = bridge.get_batch_agent_status()
+        assert status["run_id"] == started["run_id"]
+        assert status["task_ids"] == [f"job:{job_id}" for job_id in ids]
+        assert len(status["errors"]) == 10
+        assert status["failed_ids"] == status["task_ids"]
+        next_batch = bridge.batch_agent_translate(["job:next"])
+        assert next_batch["run_id"] != started["run_id"]

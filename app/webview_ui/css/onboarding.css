@@ -9,7 +9,7 @@
 .ob-eyebrow { font-size:11px; color:var(--muted); letter-spacing:.06em; }
 .ob-skip { display:inline-flex; align-items:center; flex-shrink:0; min-height:32px; padding:6px 8px; border:0; border-radius:7px; color:var(--muted); background:transparent; font:500 12px/1.4 var(--font-ui); cursor:pointer; }
 .ob-skip:hover { color:var(--text); background:var(--hover); }
-.ob-body { padding:4px 22px 12px; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; min-height:0; }
+.ob-body { padding:4px 22px 12px; overflow:auto; overscroll-behavior:contain; min-height:0; }
 .ob-index { margin:0 0 16px; }
 .ob-index-summary { display:block; width:fit-content; padding:5px 0; color:var(--primary); font-size:12px; cursor:pointer; list-style:none; }
 .ob-index-summary::-webkit-details-marker { display:none; }

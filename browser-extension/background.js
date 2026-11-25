@@ -1,8 +1,11 @@
 // Copyright (c) 2026 Ansel
 // SPDX-License-Identifier: MPL-2.0
-import { getToken, request } from "./api.js";
+import { getToken, health, request } from "./api.js";
 import { browserFallbackMediaUrls } from "./fallback-policy.js";
 import { pickDouyinResolveCookies } from "./douyin-cookies.js";
+import "./ui-contract.js";
+
+const {errorInfo, isTerminalTask, isTemporaryOffline, needsDesktopConnection, percent: taskPercent} = globalThis.FoilPageContract;
 
 /* 更新检查复用已有消息、心跳与恢复事件，不额外保活。仅在弹窗关闭且
    下载/转写/恢复工作均空闲时尝试重载当前注册目录；无法迁移旧解压路径。 */
@@ -107,6 +110,35 @@ async function selfUpdateCheck() {
     if (data?.ok) void storeClientConfig(data.client_config).catch(() => {});
     const mine = chrome.runtime.getManifest?.().version || "";
     const latest = String(data?.extension_latest || '');
+    // 先生 2026-11-18：同版本号热修——桌面暴露扩展目录内容指纹，指纹变化
+    // 即重载，升版本号不再是热修前置。先记指纹再重载：重载后指纹相等即
+    // 静默，天然一次语义；护栏（进行中任务/弹窗/防抖）与版本通道同套。
+    // 首次遇到指纹（存量扩展无记录）也会触发一次重载，自愈「文件已更新
+    // 但扩展未重载」的状态。旧桌面不返回指纹则整段跳过。
+    const contentRevision = String(data?.extension_revision || "");
+    if (data?.ok && contentRevision) {
+      const saved = await chrome.storage.local.get([
+        'shengjianExtensionRevision', 'shengjianSelfReloadAt',
+        DOWNLOAD_JOB_MAP_KEY, PENDING_IMPORTS_KEY, WATCHED_TASKS_KEY, SUBMISSION_QUEUE_KEY,
+      ]);
+      if (String(saved.shengjianExtensionRevision ?? "") !== contentRevision
+          && !hasActiveExtensionWork() && !hasRecentPersistentWork(saved)
+          && now - (Number(saved.shengjianSelfReloadAt) || 0) >= SELF_RELOAD_DEBOUNCE_MS
+          && !await extensionPopupIsOpen()) {
+        const previousRevision = saved.shengjianExtensionRevision ?? null;
+        const activitySnapshot = extensionActivityRevision;
+        await chrome.storage.local.set({
+          shengjianExtensionRevision: contentRevision,
+          shengjianSelfReloadAt: now,
+        });
+        if (await extensionPopupIsOpen() || hasActiveExtensionWork()
+            || activitySnapshot !== extensionActivityRevision) {
+          await chrome.storage.local.set({ shengjianExtensionRevision: previousRevision });
+          return false;
+        }
+        try { chrome.runtime.reload(); return true; } catch { return false; }
+      }
+    }
     if (!data?.ok || !isNewerExtensionVersion(latest, mine)) return false;
     if (hasActiveExtensionWork() || await extensionPopupIsOpen()) return false;
     const saved = await chrome.storage.local.get([
@@ -365,6 +397,7 @@ async function handleDesktopDouyinDownload(message) {
   desktopRequestsInFlight.add(requestId);
   let claimed = false;
   let session = null;
+  let capturePathUsed = false;
   let phase = "desktop_dispatch";
   try {
     // Claim before reading credentials. A reconnect or a second paired profile
@@ -373,14 +406,35 @@ async function handleDesktopDouyinDownload(message) {
       method: "POST", body: "{}",
     });
     claimed = true;
+    // 先生 2026-11-19「粘贴链接必败」：粘贴流程没有页面捕获，原样只交
+    // Cookie 会撞详情解析墙。按 videoId 复用已开标签的新鲜捕获；没有就
+    // 后台开一个标签等捕获（签名地址只能来自真实页面会话），候选随回执
+    // 交桌面走直下通道。
+    const canonicalVideoId = videoIdFromPageUrl(url);
+    const hasMedia = value => Boolean(value && (value.mediaUrl || (value.mediaCandidates || []).some(Boolean)));
+    let fresh = canonicalVideoId ? await askTabsForFreshMedia(canonicalVideoId).catch(() => null) : null;
+    if (canonicalVideoId && !hasMedia(fresh) && typeof chrome.tabs?.create === "function") {
+      await notifyTabs("正在后台打开视频页以获取下载地址…").catch(() => {});
+      try { await chrome.tabs.create({ url, active: false }); } catch { /* 开不了标签就只能走解析墙 */ }
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        fresh = await askTabsForFreshMedia(canonicalVideoId).catch(() => null);
+        if (hasMedia(fresh)) break;
+      }
+    }
     phase = "extension_authorization";
-    session = await oneShotDouyinSession();
+    if (hasMedia(fresh)) capturePathUsed = true;
+    else session = await oneShotDouyinSession();
     phase = "local_api_submit";
     const result = await request(`/v1/desktop-downloads/${requestId}`, {
       method: "POST",
       body: JSON.stringify({
-        browser_session: session,
+        browser_session: session || [],
         user_agent: String(globalThis.navigator?.userAgent || "").slice(0, 512),
+        ...(fresh?.mediaUrl ? { media_url: String(fresh.mediaUrl).slice(0, 4096) } : {}),
+        ...(Array.isArray(fresh?.mediaCandidates) && fresh.mediaCandidates.length
+          ? { media_candidates: fresh.mediaCandidates.slice(0, 8) } : {}),
       }),
     });
     const job = result?.job;
@@ -396,7 +450,7 @@ async function handleDesktopDouyinDownload(message) {
       title,
       phase,
       channel: "browser_extension",
-      code: session ? "extension_error" : "douyin_session_unavailable",
+      code: (session || capturePathUsed) ? "extension_error" : "douyin_session_unavailable",
       message: detail,
       diagnostic: {
         error_name: String(error?.name || "Error").slice(0, 80),
@@ -433,10 +487,6 @@ async function handleDesktopDouyinDownload(message) {
 let desktopEventsConnectPromise = null;
 let desktopEventsReconnectDelay = 5000;
 let desktopConnectionState = "offline";
-function isTemporaryOffline(error) {
-  return ["local_api_unavailable", "local_api_timeout"].includes(error?.code)
-    || Number(error?.status) >= 500;
-}
 function scheduleDesktopEventsReconnect() {
   if (desktopEventsReconnectTimer) return;
   const delay = desktopEventsReconnectDelay;
@@ -514,6 +564,20 @@ chrome.storage?.onChanged?.addListener?.((changes, area) => {
   if (area === "local" && changes.localApiToken) void connectDesktopEvents();
 });
 
+// 先生 2026-11-18：候选签名年龄（观测）与自动重捕获的取代血缘随载荷下发，
+// 形状由桌面 options 白名单复核。
+function captureAgeOptions(message) {
+  const ages = Array.isArray(message?.candidateAgesMs)
+    ? message.candidateAgesMs.slice(0, 8)
+        .map(value => Math.max(0, Math.min(2147483647, Math.round(Number(value) || 0))))
+    : [];
+  const recaptureOf = /^[a-f0-9]{12}$/.test(String(message?.recaptureOf || "")) ? String(message.recaptureOf) : "";
+  return {
+    ...(ages.length ? { media_candidate_ages_ms: ages } : {}),
+    ...(recaptureOf ? { recapture_of: recaptureOf } : {}),
+  };
+}
+
 async function performAuthorizedDownload(message) {
   const videoId = String(message?.videoId || "");
   if (!validVideoId(videoId)) throw new Error("未识别当前视频");
@@ -550,6 +614,7 @@ async function performAuthorizedDownload(message) {
         language: "zh",
         referer: detailUrl,
         user_agent: userAgent,
+        ...captureAgeOptions(message),
       },
     };
     if (session) payload.browser_session = session;
@@ -852,6 +917,12 @@ async function notifyTabs(message, error = false, job = null, stage = "progress"
       "https://www.youtube.com/*", "https://m.youtube.com/*", "https://youtu.be/*",
     ],
   }).catch(() => []);
+  // A late poll for an earlier submit must not cover the new attempt's receipt.
+  if (stage === "failure" && job?.url) {
+    const sameVideo = [...submissionQueue.values()].filter(entry => entry.url === job.url);
+    const belongsToJob = entry => entry?.taskId === job.id || entry?.clientId === job.id;
+    if (sameVideo.some(belongsToJob) && !belongsToJob(sameVideo.at(-1))) return;
+  }
   let acknowledged = false;
   const requiresReceiptAck = isDouyinPageUrl(job?.url) && ["submitted", "download"].includes(stage);
   for (const tab of tabs) {
@@ -893,9 +964,13 @@ function transcriptionTerminal(job) {
 
 function localTaskProgressMessage(job) {
   const status = String(job?.status || "");
-  const percent = Math.max(0, Math.min(100, Math.round(Number(job?.progress || 0) * 100)));
+  const percent = taskPercent(job);
   if (status === "done") return job?.job_id ? transcriptionTerminal(job).message : "下载成功";
-  if (status === "failed") return '下载失败，请在 FoilPage 查看';
+  if (status === "failed") {
+    if (job.download_complete) return "转写失败，请在 FoilPage 查看";
+    if (job.error?.code === "douyin_verification_required") return submissionFailureNotice(job.error);
+    return "下载失败，请在 FoilPage 查看";
+  }
   if (status === "cancelled") return '任务已取消';
   if (status === "downloading") return `正在下载 ${percent}%`;
   if (["imported", "queued", "transcribing"].includes(status)) return '正在转写';
@@ -922,8 +997,12 @@ function askTabForFreshMedia(tabId, expectedVideoId = "") {
       chrome.tabs.sendMessage(tabId, { type: "shengjian-fresh-media", videoId: expectedVideoId }, (response) => {
         // 只有媒体地址时可用；只有 play 端点时同样有用（回退序会用到）；
         // 图集应答带整组图片地址（TASK-8.18），三者皆空才算无效。
-        if (chrome.runtime.lastError || !response?.ok
-            || (!response?.mediaUrl && !response?.playUrl && !Array.isArray(response?.gallery))) { resolve(null); return; }
+        if (chrome.runtime.lastError || !response?.ok) { resolve(null); return; }
+        const hasMedia = response.mediaUrl || response.playUrl
+          || (Array.isArray(response.mediaCandidates) && response.mediaCandidates.some(Boolean));
+        const hasImages = Array.isArray(response.gallery)
+          && response.gallery.some(row => Array.isArray(row) && row.some(Boolean));
+        if (!hasMedia && !hasImages) { resolve(null); return; }
         resolve(response);
       });
     } catch {
@@ -951,21 +1030,26 @@ function askActiveTabForFreshMedia() {
 async function askTabsForFreshMedia(expectedVideoId) {
   // host_permissions 覆盖 douyin.com，因此可以按 URL 匹配该站标签（无需
   // tabs 权限即可见这些标签的 url）。目标视频页未必是当前活动标签（弹窗
-  // 提交、多窗口、页面在后台），先逐个询问所有抖音标签，取第一个
-  // videoId 匹配的应答；全部落空再退回原活动标签行为。
+  // 提交、多窗口、页面在后台）。详情页和当前正在显示原视频的标签优先，
+  // 其他标签中的同作品缓存仅作补充。
   if (expectedVideoId) {
     try {
       const tabs = await new Promise((resolve) => {
         chrome.tabs.query({ url: ["https://*.douyin.com/*"] }, (result) => resolve(result));
       });
-      for (const tab of (Array.isArray(tabs) ? tabs : []).slice(0, 8)) {
-        if (typeof tab?.id !== "number") continue;
+      const ordered = (Array.isArray(tabs) ? tabs : []).filter(tab => typeof tab?.id === "number");
+      const priority = tab => videoIdFromPageUrl(tab.url) === expectedVideoId ? 2 : Number(Boolean(tab.active));
+      ordered.sort((a, b) => priority(b) - priority(a));
+      let cached = null;
+      for (const tab of ordered.slice(0, 8)) {
         const response = await askTabForFreshMedia(tab.id, expectedVideoId);
         if (response && String(response.videoId || "") === String(expectedVideoId)) {
-          return response;
+          if (response.activeTarget === true || (response.activeTarget == null && priority(tab) === 2)) return response;
+          cached ??= response;
         }
       }
-    } catch { /* 查询失败退回活动标签 */ }
+      return cached;
+    } catch { return null; }
   }
   return expectedVideoId ? null : askActiveTabForFreshMedia();
 }
@@ -977,6 +1061,91 @@ function videoIdFromPageUrl(value) {
 
 const fallbacksInFlight = new Set();
 const fallbackReassured = new Set();
+
+// 先生 2026-11-18 风控波：终态双通道失败后的自动重捕获重试（每任务一次，
+// 30s 退避——短时高频重试会加剧平台拦截）。跨 SW 重启经提交队列的
+// recaptureRetried 旗标持久去重。
+const recaptureRetried = new Set();
+function recaptureAlreadyScheduled(taskId) {
+  return recaptureRetried.has(taskId)
+    || [...submissionQueue.values()].some(entry => entry.taskId === taskId && entry.recaptureRetried);
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value || "")));
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// 桌面已拒（rejected_media）/已试（browser_attempted）的地址哈希不再占用
+// 回退候选名额——8 条载荷预算留给未参与过被拒请求的新签名。
+async function withoutRejectedCandidates(fresh, job) {
+  if (!fresh) return fresh;
+  // 无 WebCrypto（旧测试沙箱/受限环境）时不过滤，退回既有行为。
+  if (!globalThis.crypto?.subtle?.digest) return fresh;
+  const hashes = new Set([
+    ...(Array.isArray(job?.options?.rejected_media) ? job.options.rejected_media : []),
+    ...(Array.isArray(job?.options?.browser_attempted) ? job.options.browser_attempted : []),
+  ].map(value => String(value || "")).filter(value => /^[0-9a-f]{64}$/.test(value)));
+  if (!hashes.size) return fresh;
+  const rejected = async (value) => hashes.has(await sha256Hex(value));
+  const mediaUrl = String(fresh.mediaUrl || "");
+  const playUrl = String(fresh.playUrl || "");
+  const candidates = Array.isArray(fresh.mediaCandidates) ? fresh.mediaCandidates.filter(Boolean) : [];
+  const keptCandidates = [];
+  for (const value of candidates) { if (!await rejected(value)) keptCandidates.push(value); }
+  return {
+    ...fresh,
+    mediaUrl: await rejected(mediaUrl) ? "" : mediaUrl,
+    playUrl: await rejected(playUrl) ? "" : playUrl,
+    mediaCandidates: keptCandidates,
+  };
+}
+
+// 重试用 chrome.alarms（MV3 SW 空闲 ~30s 即挂起，setTimeout 会被一起杀掉
+// ——2026-11-18 22:34 实测重试未触发，改为 0.5 分钟一次性闹钟）。
+const RECAPTURE_ALARM_PREFIX = "shengjianRecaptureRetry-";
+
+async function runRecaptureRetry(taskId) {
+  try {
+    const result = await request(`/v1/downloads/${encodeURIComponent(taskId)}`);
+    const job = result?.job;
+    const videoId = videoIdFromPageUrl(String(job?.url || ""));
+    if (!videoId || String(job?.status || "") !== "failed") return;
+    const tabs = await new Promise((resolve) => {
+      chrome.tabs.query({ url: ["https://*.douyin.com/*"] }, (queryResult) => resolve(queryResult));
+    });
+    const tab = (Array.isArray(tabs) ? tabs : [])
+      .filter(entry => typeof entry?.id === "number" && videoIdFromPageUrl(entry.url) === videoId)
+      .sort((left, right) => (right.active ? 1 : 0) - (left.active ? 1 : 0))[0];
+    if (!tab) return;
+    chrome.tabs.sendMessage(tab.id, { type: "shengjian-recapture-retry", videoId, taskId }, (response) => {
+      if (chrome.runtime.lastError || !response?.ok) return;
+      console.log("[FoilPage] 自动重捕获重试已派发，原任务", taskId,
+        response?.reload ? "（页面重载重取）" : "");
+    });
+  } catch { /* 桌面离线/任务不存在：静默，任务页保留失败指引 */ }
+}
+
+chrome.alarms?.onAlarm?.addListener?.((alarm) => {
+  if (alarm?.name && alarm.name.startsWith(RECAPTURE_ALARM_PREFIX)) {
+    void runRecaptureRetry(alarm.name.slice(RECAPTURE_ALARM_PREFIX.length));
+  }
+});
+
+function scheduleRecaptureRetry(job) {
+  const taskId = String(job?.id || "");
+  if (!taskId || recaptureAlreadyScheduled(taskId)) return;
+  if (String(job?.error?.code || "") !== "douyin_verification_required") return;
+  // 本任务若已是重捕获重试的产物，不再链式触发下一轮（每视频至多自动两次
+  // 提交：原始＋重捕获一次；再失败交还用户手动处理）。
+  if (job?.options?.recapture_of) return;
+  const videoId = videoIdFromPageUrl(String(job?.url || ""));
+  if (!videoId) return;
+  recaptureRetried.add(taskId);
+  void markTaskNotification(taskId, "recaptureRetried").catch(() => {});
+  void notifyTabs("下载被平台风控拦截，稍后将自动重新获取地址重试一次", false, job, "fallback").catch(() => {});
+  chrome.alarms?.create?.(`${RECAPTURE_ALARM_PREFIX}${taskId}`, { delayInMinutes: 0.5 });
+}
 async function handleLocalTaskFailed(job) {
   const taskId = String(job?.id || "");
   const pending = job?.error?.diagnostic?.fallback_pending;
@@ -989,12 +1158,15 @@ async function handleLocalTaskFailed(job) {
   try {
     if (!fallbackReassured.has(taskId)) {
       fallbackReassured.add(taskId);
-      await notifyTabs("别急，正在尝试其他下载办法；结果会在这里通知", false, job, "fallback").catch(() => {});
+      await notifyTabs("正在重试下载", false, job, "fallback").catch(() => {});
     }
     const expectedVideoId = videoIdFromPageUrl(job.url);
     const fresh = pending === "browser" ? await askTabsForFreshMedia(expectedVideoId) : null;
     const remembered = submitMediaHints.get(taskId) || {};
-    const matchingFresh = String(fresh?.videoId || "") === expectedVideoId ? fresh : null;
+    // 先生 2026-11-18：fresh-media 应答前页面已尝试刷新捕获；这里再剔除
+    // 桌面已拒/已试的地址，让 8 条候选预算全部留给新签名。
+    const usableFresh = fresh ? await withoutRejectedCandidates(fresh, job) : null;
+    const matchingFresh = String(usableFresh?.videoId || "") === expectedVideoId ? usableFresh : null;
     const mediaCandidates = pending === "browser" ? browserFallbackMediaUrls({
       code: String(job?.error?.code || ""), remembered, matchingFresh,
     }) : [];
@@ -1073,7 +1245,7 @@ async function pollLocalTask(taskId) {
       await handleLocalTaskFailed(job);
     } else {
       const downloaded = Boolean(job.download_complete);
-      const percent = Math.max(0, Math.min(100, Math.round(Number(job?.progress || 0) * 100)));
+      const percent = taskPercent(job);
       const bucket = Math.floor(percent / 10) * 10;
       const terminal = isTerminalTask(job.status);
       if (downloaded && !state.downloadNotified) {
@@ -1096,7 +1268,7 @@ async function pollLocalTask(taskId) {
           state.failureNotified = true;
           await saveWatchedTasks();
           await markTaskNotification(taskId, "failureNotified");
-          await notifyTabs(downloaded ? "转写失败，请在 FoilPage 查看" : "下载失败，请在 FoilPage 查看", true, job, "failure");
+          await notifyTabs(localTaskProgressMessage(job), true, job, "failure");
         }
         else if (job.status === "cancelled") await notifyTabs("任务已取消", false, job, "waiting");
         else if (!terminal && !receiptJustAccepted(taskId)) await notifyTabs(localTaskProgressMessage(job), false, job, "progress");
@@ -1104,6 +1276,7 @@ async function pollLocalTask(taskId) {
       await saveWatchedTasks();
       if (terminal) {
         if (job.status === "cancelled") await cancelOwnedBrowserDownloads(taskId);
+        if (job.status === "failed") scheduleRecaptureRetry(job);
         localTaskWatchers.delete(taskId);
         submitMediaHints.delete(taskId);
         fallbackReassured.delete(taskId);
@@ -1200,13 +1373,32 @@ async function handleBrowserDownloadInterrupted(downloadId) {
     const stored=await chrome.storage.local.get(DOWNLOAD_JOB_MAP_KEY);
     const meta=stored[DOWNLOAD_JOB_MAP_KEY]?.[key] || inFlightBrowserDownloads.get(key);
     if(!meta?.taskId)return;
+    // Interrupted events and recovery checks can arrive after Chrome has already resumed.
+    if (item === undefined || (item && item.state !== "interrupted")) return;
+    if (item?.canResume && ["NETWORK_FAILED", "NETWORK_TIMEOUT", "NETWORK_DISCONNECTED"].includes(item.error)
+        && !meta.resumeAttempted && typeof chrome.downloads.resume === "function") {
+      const claimed = await withFailureQueueLock(async () => {
+        const data = await chrome.storage.local.get(DOWNLOAD_JOB_MAP_KEY);
+        const map = data[DOWNLOAD_JOB_MAP_KEY] || {};
+        if (!map[key] || map[key].resumeAttempted) return false;
+        map[key].resumeAttempted = true;
+        await chrome.storage.local.set({ [DOWNLOAD_JOB_MAP_KEY]: map });
+        return true;
+      });
+      if (!claimed) return;
+      try {
+        await chrome.downloads.resume(downloadId);
+        return;
+      } catch { /* Resume unavailable: let the same task continue its fallback. */ }
+    }
     const rawCode=String(item?.error || "").trim().toUpperCase();
     const browserError=/^[A-Z0-9_]{1,64}$/.test(rawCode)?rawCode:"BROWSER_INTERRUPTED_UNKNOWN";
     const result=await request(`/v1/downloads/${meta.taskId}/browser-failure`,{
       method:"POST",body:JSON.stringify({browser_error:browserError,bytes_received:Number(item?.bytesReceived)||0,total_bytes:Number(item?.totalBytes)>=0?Number(item.totalBytes):null}),
     });
+    if (result?.job?.id !== meta.taskId) return;
     await takeBrowserDownload(downloadId);
-    if(result?.job)watchLocalTask(result.job);
+    watchLocalTask(result.job);
   } catch(error) {
     // Keep the original owned transfer until the backend acknowledges the
     // interruption. Transport/auth loss never creates a detached terminal task.
@@ -1368,16 +1560,17 @@ async function performGalleryDownload(message) {
 }
 
 async function performPageDownload(message) {
-  if (message?.kind === "gallery" || Array.isArray(message?.galleryImages) || Array.isArray(message?.gallery)) {
+  if (message?.kind === "gallery" || (Array.isArray(message?.galleryImages) && message.galleryImages.length)
+      || (Array.isArray(message?.gallery) && message.gallery.length)) {
     return performGalleryDownload(message);
   }
   const rawUrl = String(message?.url || "").trim().slice(0, 4096);
   if (!rawUrl) throw new Error("未识别当前页面链接");
-  const mediaUrl = String(message?.mediaUrl || "").trim().slice(0, 4096);
   const playUrl = String(message?.playUrl || "").trim().slice(0, 4096);
   const mediaCandidates = Array.isArray(message?.mediaCandidates)
     ? [...new Set(message.mediaCandidates.map((value) => String(value || "").trim().slice(0, 4096)).filter(Boolean))].slice(0, 8)
     : [];
+  const mediaUrl = String(message?.mediaUrl || mediaCandidates[0] || "").trim().slice(0, 4096);
   const selectedMediaUrl = mediaUrl || playUrl;
   const title = String(message?.title || "").trim().slice(0, 240);
   // Prefer Chrome for every observed single-file Douyin stream. A playlist
@@ -1396,6 +1589,8 @@ async function performPageDownload(message) {
         coverUrl: String(message?.coverUrl || ""),
         transcribe: Boolean(message?.transcribe),
         userAgent: String(message?.userAgent || globalThis.navigator?.userAgent || "").slice(0, 512),
+        candidateAgesMs: message.candidateAgesMs,
+        recaptureOf: message.recaptureOf,
         recoveryToYtDlp: true,
       });
     }
@@ -1425,6 +1620,7 @@ async function performPageDownload(message) {
         language: "zh",
         referer: rawUrl,
         user_agent: String(message?.userAgent || globalThis.navigator?.userAgent || "").slice(0, 512),
+        ...captureAgeOptions(message),
       },
     };
     if (mediaUrl) payload.media_url = mediaUrl;
@@ -1469,7 +1665,6 @@ async function performPageDownload(message) {
   }
 }
 
-function isTerminalTask(status) { return ["done", "failed", "cancelled"].includes(status); }
 function safeTaskSnapshot(job) {
   if (!job?.id) return null;
   return {
@@ -1657,10 +1852,11 @@ async function submitPageDownload(message) {
   // 意图（先「下载」后「转写」原来会新建第二条）。未发出的凭据直接并入
   // 转写旗标；已发出的不动原身份（换旗标重放同凭据会被服务端回执校验拒
   // 绝），此时放行走新凭据，靠服务端「活跃任务就地补转写旗标」合并。
-  const existing = [...submissionQueue.values()].find(entry => entry.url === url && !isTerminalTask(entry.lastJob?.status || entry.status));
+  const activeForUrl = [...submissionQueue.values()].filter(entry => entry.url === url && !isTerminalTask(entry.lastJob?.status || entry.status));
+  const existing = activeForUrl.find(entry => entry.transcribe) || activeForUrl[0];
   if (existing) {
     const notDispatched = !existing.submitting && !existing.taskId && !existing.submissionAttempted;
-    if (existing.transcribe === transcribe || notDispatched) {
+    if (!transcribe || existing.transcribe || notDispatched) {
       if (transcribe && !existing.transcribe && notDispatched) {
         existing.transcribe = true;
         await saveSubmissionQueue();
@@ -1685,6 +1881,12 @@ async function submitPageDownload(message) {
     // TASK-8.17：封面地址随提交提示进队列中转（内存态，与签名媒体地址同待遇
     // 不落盘）；漏存这一跳会把 cover_url 在 flush 时丢成空串。
     coverUrl:String(message?.coverUrl || "").slice(0,4096),
+    // 先生 2026-11-18：候选签名年龄（观测）与重捕获血缘同走此跳，漏存即丢。
+    candidateAgesMs:Array.isArray(message?.candidateAgesMs)
+      ? message.candidateAgesMs.slice(0,8).map(value => Math.max(0, Math.min(2147483647, Math.round(Number(value) || 0))))
+      : [],
+    ...(String(message?.recaptureOf || "").match(/^([a-f0-9]{12})$/)?.[1]
+      ? { recaptureOf: String(message.recaptureOf) } : {}),
     ...(galleryImages ? { galleryImages, kind: "gallery" } : {}) });
   await saveSubmissionQueue(); // The click is durable before any network request.
   await flushSubmissionQueue();
@@ -1721,18 +1923,6 @@ async function cancelQueuedTask(taskId) {
   await flushSubmissionQueue();
   return queuedTaskView(entry);
 }
-// 近窗失败摘要（先生 2026-11-15）：确认卡文案由后台统一给，页面脚本不再
-// 各自维护错误码→中文映射。
-function recentFailureSummary(code) {
-  if (code === "douyin_verification_required") return "被抖音校验拦截";
-  if (code === "browser_download_interrupted") return "浏览器下载被平台中断";
-  if (code === "authorization_required") return "平台未接受当前登录态";
-  if (code === "source_rate_limited") return "被平台限流";
-  if (code === "media_forbidden") return "媒体地址被平台拒绝";
-  if (code === "network_error") return "网络错误";
-  return "下载失败";
-}
-
 async function checkExistingDownloads(url) {
   // 提交前预检（先生 2026-10-08）：同视频已有任务时页面先确认再提交。
   // 以桌面任务库为准——扩展自己的队列看不到其他入口（桌面粘贴/弹窗/
@@ -1749,20 +1939,7 @@ async function checkExistingDownloads(url) {
     // 服务端就地补置转写旗标）。
     const activeTranscribing = activeJobs.some((job) => Boolean(job?.options?.transcribe_after_download));
     const done = jobs.some((job) => String(job?.status || "") === "done");
-    // 先生 2026-11-15：近窗失败确认。实机库里同一抖音 URL 反复点「转写」
-    // 最多积累 7 行失败记录（douyin_verification_required 连拦）——平台拦截
-    // 类失败在短时间内重提只会加剧风控。10 分钟内的最近失败带回页面确认。
-    let recentFailure = null;
-    for (const job of jobs) {
-      if (String(job?.status || "") !== "failed") continue;
-      const at = Date.parse(String(job?.updated_at || job?.requested_at || "")) || 0;
-      if (!recentFailure || at > recentFailure.at) {
-        const code = String(job?.error?.code || "");
-        recentFailure = { at, code, summary: recentFailureSummary(code) };
-      }
-    }
-    if (recentFailure && Date.now() - recentFailure.at > 10 * 60 * 1000) recentFailure = null;
-    return { ok: true, active, done, activeTranscribing, recentFailure };
+    return { ok: true, active, done, activeTranscribing };
   } catch {
     return { ok: true, active: false, done: false };
   }
@@ -1781,45 +1958,61 @@ void resumeBackgroundQueue().catch(() => {});
 // “本地任务未能创建”，没有任何反馈或解决办法的引导）。
 function submissionFailureNotice(error) {
   const code = String(error?.code || "");
+  const failure = errorInfo(code, error?.status, error?.retryable);
   const detail = safeFailureText(error?.message || "", 160);
   if (code === "login_required") return "请先在 FoilPage 桌面端登录，再回到本页重试下载。";
-  if (["unauthorized", "local_api_token_missing", "pairing_closed"].includes(code)) {
+  if (needsDesktopConnection(code)) {
     return "浏览器扩展尚未连接或连接已失效。请在 FoilPage「浏览器」页允许连接，再打开扩展重新连接。";
   }
   if (code === "douyin_verification_required") {
-    return "抖音校验暂拦了后台解析。请留在当前视频页让视频播放 2 秒，再点一次「下载」；仍失败请到 FoilPage 任务页查看。";
+    return "抖音要求网页校验。请在当前视频页完成验证，确认能播放后再点下载。";
   }
-  if (["local_api_unavailable", "local_api_timeout"].includes(code)) {
+  if (failure.category === "connection") {
     return "FoilPage 桌面端未连接。请打开或重启 FoilPage，确认它在运行后回到本页再点「下载」。";
   }
   if (detail) return `下载任务未能创建：${detail}。请到 FoilPage 任务页查看原因后重试。`;
   return "下载任务未能创建。请确认 FoilPage 桌面端正在运行；仍失败请到 FoilPage 任务页查看原因。";
 }
 
+
+function pageSubmissionReply(job) {
+  const failed = Boolean(job?.submission_failed);
+  return {
+    ok: !failed, job, feedback_sent: failed,
+    message: failed ? job.error?.message || "下载未能提交" : "",
+    ...(failed && needsDesktopConnection(job.error?.code) ? { needs_connection: true } : {}),
+  };
+}
+
+function pageSubmissionFailure(error) {
+  return {
+    ok: false, message: submissionFailureNotice(error),
+    ...(needsDesktopConnection(error?.code) ? { needs_connection: true } : {}),
+  };
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   void selfUpdateCheck();
   if (message?.type === "shengjian-authorized-download") {
     void withExtensionOperation(() => submitAuthorizedDownload(message))
-      .then((job) => sendResponse({ ok: !job?.submission_failed, job, feedback_sent:Boolean(job?.submission_failed), message:job?.submission_failed ? job.error?.message || "下载未能提交" : "" }))
-      .catch((error) => sendResponse({ ok: false, message: submissionFailureNotice(error) }));
+      .then((job) => sendResponse(pageSubmissionReply(job)))
+      .catch((error) => sendResponse(pageSubmissionFailure(error)));
     return true;
   }
   if (message?.type === "shengjian-page-submit") {
     void withExtensionOperation(() => submitPageDownload(message))
-      .then((job) => sendResponse({ ok: !job?.submission_failed, job, feedback_sent:Boolean(job?.submission_failed), message:job?.submission_failed ? job.error?.message || "下载未能提交" : "" }))
-      .catch((error) => sendResponse({ ok: false, message: submissionFailureNotice(error) }));
+      .then((job) => sendResponse(pageSubmissionReply(job)))
+      .catch((error) => sendResponse(pageSubmissionFailure(error)));
     return true;
   }
   if (message?.type === "shengjian-launch-attempt") {
-    // 先生 2026-11-16：离线卡点「启动」后的上线监听。协议处理器缺失/未注
-    // 册时 Windows 会弹"找不到应用"错误窗且扩展无法感知——20s 内桌面仍未
-    // 连上就给发起页一条手动指引，把静默失败变成可操作提示。
+    // A desktop that started but still needs pairing must not report a failed launch.
     void (async () => {
       await new Promise(resolve => setTimeout(resolve, 20000));
       if (desktopConnectionState === "online") return;
       try {
-        await request("/v1/downloads?limit=1");
-        return; // 探测成功：桌面其实在线（WS 可能尚未建连）。
+        await health();
+        return;
       } catch { /* 仍离线 */ }
       await notifyTabs(
         "未能自动启动 FoilPage：请从开始菜单手动打开 FoilPage（刚安装/更新过的话，重启浏览器后再试）。暂存的任务会在连接恢复后自动提交。",

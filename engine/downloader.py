@@ -570,7 +570,8 @@ def normalized_download_error(
     if _is_network_like_error(exc, lowered):
         return DownloadAdapterError(
             "network_error",
-            "网络连接不稳定或平台暂时无响应，请稍后重试",
+            "网络连接不稳定或平台暂时无响应，请稍后重试；使用 VPN/代理时"
+            "国内平台（抖音/B 站）可能拒绝境外出口",
             retryable=True,
         )
     if "fresh cookies" in lowered:
@@ -604,7 +605,9 @@ def normalized_download_error(
     if "412" in lowered or "precondition failed" in lowered:
         return DownloadAdapterError(
             "source_rate_limited",
-            "B 站暂时拒绝了请求（HTTP 412），请稍后重试或先在浏览器登录后再下载",
+            "B 站暂时拒绝了请求（HTTP 412），请稍后重试或先在浏览器登录后再下载；"
+            "若在使用 VPN/代理（含系统代理模式），国内平台会拒绝境外出口，"
+            "请关闭或配置放行国内域名——关闭代理后此前被拦截的任务会自动重新下载",
             retryable=True,
         )
     if any(marker in lowered for marker in (

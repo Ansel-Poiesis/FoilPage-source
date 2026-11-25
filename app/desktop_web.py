@@ -37,7 +37,9 @@ from app.native_notifications import APP_NAME, register_identity, show_toast
 from app.window_chrome import NativeDragController, install_resize_frame
 from app.windows_icons import NativeWindowIcons
 from app.webview_api import expose_bridge
-from engine.settings import SettingsStore, default_logs_dir
+from engine import service_http
+from engine.settings import SettingsError, SettingsStore, default_logs_dir
+from engine.library_location import LibraryLocationError, validate_storage_path
 
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
@@ -192,7 +194,9 @@ class WebDesktopApp:
             command,
             auto_restart=settings.get("worker_auto_restart", True),
             log_callback=self._worker_log_line,
+            environment_provider=self._worker_environment,
         )
+        from engine.postprocess_store import PostprocessStore
         self.bridge = Bridge(
             self.controller,
             self.worker,
@@ -204,6 +208,7 @@ class WebDesktopApp:
             notifier=self._notify_bubble,
             launch_context_provider=lambda: self._launch_context,
             native_drag_provider=lambda: bool(self._native_drag and self._native_drag.enabled),
+            postprocess_store=PostprocessStore(settings["database_path"]),
         )
         self._notifications = TaskNotifications(self._notify_bubble, beep=self._notify_beep)
         self._notifications.update(self.bridge.get_notification_tasks())
@@ -517,6 +522,14 @@ class WebDesktopApp:
                     time.sleep(0.25)
             threading.Thread(target=_navigate, name="shengjian-show-page", daemon=True).start()
 
+    def _worker_environment(self) -> dict[str, str]:
+        settings = self.controller.settings
+        policy = service_http.network_policy_for(
+            settings.get("download_proxy_policy"),
+            settings.get("download_proxy_url"),
+        )
+        return service_http.worker_environment(os.environ, policy)
+
     def _effective_concurrency(self) -> int:
         """云端套餐并发独立；已验签的本地试用与解锁使用三任务并发。"""
         try:
@@ -647,6 +660,7 @@ class WebDesktopApp:
                 cleanups.append(lambda: local_api.stop(timeout=2))
             bridge = getattr(self, "bridge", None)
             if bridge is not None:
+                cleanups.append(bridge.close_postprocessing)
                 cleanups.append(bridge.close_media_preview)
             cleanups.append(self.controller.close)
             if tray is not None:
@@ -678,15 +692,20 @@ class WebDesktopApp:
 
 
 
-def _runtime_log_dir() -> Path:
+_LOG_DIRECTORY: Path | None = None
+
+
+def _runtime_log_dir(base_dir: str | Path | None = None) -> Path:
     """运行数据目录下的 logs 子目录（F06：日志统一落盘并轮转）。"""
-    log_dir = default_logs_dir()
+    log_dir = validate_storage_path(default_logs_dir(base_dir=base_dir))
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 
 
-def _setup_logging() -> None:
-    log_dir = _runtime_log_dir()
+def _setup_logging(base_dir: str | Path | None = None) -> None:
+    global _LOG_DIRECTORY
+    log_dir = _runtime_log_dir(base_dir)
+    _LOG_DIRECTORY = log_dir
     level = logging.DEBUG if os.environ.get("SHENGJIAN_DEBUG_LOG") else logging.INFO
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     handler = logging.handlers.RotatingFileHandler(
@@ -778,17 +797,6 @@ def _verify_packaged_browser_import(app, source: Path) -> None:
 
 
 def _main(argv: list[str] | None = None) -> int:
-    # 一次性品牌改名迁移（1.3.8→1.3.9）：必须先于 _setup_logging——日志句柄会
-    # 打开旧数据根下的文件，随后的目录重命名必然自锁（WinError 5）。仅打包版
-    # 且未显式指定数据/演示/冒烟目录时执行；源码运行与测试不触碰真实资料。
-    pre_argv = [str(item) for item in (argv if argv is not None else sys.argv[1:])]
-    if (getattr(sys, "frozen", False)
-            and not any(item.startswith(("--data-dir", "--smoke", "--demo")) for item in pre_argv)):
-        from engine.settings import migrate_legacy_data_root
-
-        migrate_legacy_data_root()
-    _setup_logging()
-    log.info("desktop_web starting, args=%s", argv)
     parser = argparse.ArgumentParser(description="FoilPage 桌面工作台（WebView2）")
     parser.add_argument("--data-dir", default=None, help="覆盖运行数据目录（测试用）")
     parser.add_argument("--demo", action="store_true", help="载入演示媒体，不启动 Worker")
@@ -810,6 +818,8 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.smoke_preview and (not args.smoke or not args.data_dir):
         parser.error("预览检查须使用 --smoke 和独立 --data-dir")
+    _setup_logging(args.data_dir)
+    log.info("desktop_web starting, args=%s", argv)
     if args.smoke:
         import yt_dlp
 
@@ -855,11 +865,18 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point with crash logging (packaged builds have no console)."""
     try:
         return _main(argv)
+    except (LibraryLocationError, SettingsError) as exc:
+        message = f"原资料库暂不可用，已停止启动以保留原资料。\n\n{exc}"
+        print(message, file=sys.stderr)
+        if getattr(sys, "frozen", False):
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, message, "FoilPage · 资料位置", 0x10)
+        return 2
     except BaseException:
         import traceback
         try:
-            log_dir = _runtime_log_dir()
-            (log_dir / "desktop_crash.log").write_text(traceback.format_exc(), encoding="utf-8")
+            if _LOG_DIRECTORY is not None:
+                (_LOG_DIRECTORY / "desktop_crash.log").write_text(traceback.format_exc(), encoding="utf-8")
         except Exception:
             pass
         raise

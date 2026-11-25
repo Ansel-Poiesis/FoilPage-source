@@ -4,14 +4,20 @@
 from __future__ import annotations
 
 import sys
+import sqlite3
 import tempfile
+from contextlib import closing
+from hashlib import sha256
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine.media_store import (  # noqa: E402
     MediaStore,
+    MediaStoreError,
     MediaTypeError,
     RelocationMismatchError,
 )
@@ -194,6 +200,75 @@ def test_media_and_queue_tables_share_one_database() -> None:
         finally:
             queue_store.close()
             media_store.close()
+
+
+def test_future_media_schema_is_refused_without_journal_or_schema_writes(tmp_path, monkeypatch):
+    db = tmp_path / "future-media.db"
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute("CREATE TABLE app_schema (component TEXT PRIMARY KEY, version INTEGER NOT NULL)")
+        connection.execute("INSERT INTO app_schema VALUES ('media', 99)")
+        connection.execute("CREATE TABLE future_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO future_data VALUES ('preserved')")
+    fingerprint = sha256(db.read_bytes()).hexdigest()
+    statements = []
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+    with pytest.raises(MediaStoreError, match="媒体库版本 99.*支持版本 2"):
+        MediaStore(str(db))
+    assert sha256(db.read_bytes()).hexdigest() == fingerprint
+    assert not any(sql.strip().upper().startswith(("CREATE", "ALTER", "INSERT", "UPDATE", "PRAGMA JOURNAL_MODE="))
+                   for sql in statements)
+    assert not db.with_name(db.name + "-wal").exists()
+    with closing(connect(db)) as connection:
+        assert connection.execute("SELECT version FROM app_schema WHERE component='media'").fetchone()[0] == 99
+        assert connection.execute("SELECT value FROM future_data").fetchone()[0] == "preserved"
+        assert connection.execute("SELECT name FROM sqlite_master WHERE name='media'").fetchone() is None
+
+
+def test_media_migration_rolls_back_added_column_and_content_after_version_write_failure(tmp_path):
+    from engine.media_store import _SCHEMA
+
+    db = tmp_path / "legacy-media.db"
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.executescript(_SCHEMA)
+        connection.execute("INSERT INTO app_schema VALUES ('media', 1)")
+        connection.execute(
+            """INSERT INTO media VALUES
+               ('old', 'old.wav', 'old.wav', 'old.wav', '.wav', 'audio', 4, 1,
+                'original-content', 1.0, 0, '2026-01-01', '2026-01-01')"""
+        )
+        connection.execute(
+            """CREATE TRIGGER reject_version BEFORE UPDATE ON app_schema
+               WHEN NEW.component='media' BEGIN SELECT RAISE(ABORT, 'version write failed'); END"""
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="version write failed"):
+        MediaStore(str(db))
+    with closing(sqlite3.connect(db)) as connection, connection:
+        assert connection.execute("SELECT version FROM app_schema WHERE component='media'").fetchone()[0] == 1
+        assert "original_content_sha256" not in {row[1] for row in connection.execute("PRAGMA table_info(media)")}
+        assert connection.execute("SELECT content_sha256 FROM media WHERE id='old'").fetchone()[0] == "original-content"
+        connection.execute("DROP TRIGGER reject_version")
+    with closing(MediaStore(str(db))) as store:
+        assert store._conn.execute("SELECT original_content_sha256 FROM media WHERE id='old'").fetchone()[0] == "original-content"
+        assert store._conn.execute("SELECT version FROM app_schema WHERE component='media'").fetchone()[0] == 2
+
+
+def test_media_migration_rechecks_version_inside_transaction(tmp_path):
+    with closing(MediaStore(str(tmp_path / "media.db"))) as store:
+        with store._conn:
+            store._conn.execute("UPDATE app_schema SET version=99 WHERE component='media'")
+        schema = store._conn.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall()
+        with pytest.raises(MediaStoreError, match="媒体库版本 99"):
+            store._migrate()
+        assert store._conn.execute("SELECT version FROM app_schema WHERE component='media'").fetchone()[0] == 99
+        assert store._conn.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall() == schema
+        assert not store._conn.in_transaction
 
 
 if __name__ == "__main__":

@@ -6,13 +6,15 @@ from __future__ import annotations
 import base64
 import http.client
 import json
-import os
 import re
 import socket
 from pathlib import Path
 from typing import Any
 
 from engine.agent_protocol import AGENT_MAX_BODY_BYTES, derive_agent_token
+from engine.library_location import (
+    LibraryLocationError, default_library_root, read_library_identity, validate_storage_path,
+)
 
 
 MAX_SETTINGS_BYTES = 2 * 1024 * 1024
@@ -40,22 +42,11 @@ class AgentError(RuntimeError):
 
 
 def default_data_dir() -> Path:
-    """Resolve the user's profile without importing mutable SettingsStore.
-
-    Mirrors engine.settings.default_app_data_dir's legacy fallback on purpose:
-    the desktop owns the one-time rename migration (VideoToArticle → FoilPage,
-    1.3.8), the CLI only resolves — current root first, legacy root while the
-    desktop has not migrated yet (or a downgrade left only the legacy path).
-    """
-    root = os.environ.get("LOCALAPPDATA")
-    base = Path(root).expanduser().resolve() if root else (
-        Path(os.environ.get("USERPROFILE", str(Path.home()))).expanduser().resolve()
-        / "AppData" / "Local")
-    current = base / "FoilPage"
-    legacy = base / "VideoToArticle"
-    if not current.exists() and legacy.exists():
-        return legacy
-    return current
+    """Use the same read-only profile resolver as Desktop, without SettingsStore."""
+    try:
+        return default_library_root()
+    except LibraryLocationError as exc:
+        raise AgentError("invalid_profile", str(exc)) from None
 
 
 def _unprotect_connection_token(value: str) -> str:
@@ -87,6 +78,10 @@ class AgentClient:
     def from_data_dir(cls, data_dir: Path | str | None = None, *, timeout: float = 15.0) -> "AgentClient":
         path = (Path(data_dir).expanduser().resolve() if data_dir is not None else default_data_dir()) / "settings.json"
         try:
+            validate_storage_path(path.parent)
+        except LibraryLocationError as exc:
+            raise AgentError("invalid_profile", str(exc)) from None
+        try:
             with path.open("rb") as stream:
                 encoded = stream.read(MAX_SETTINGS_BYTES + 1)
             if len(encoded) > MAX_SETTINGS_BYTES:
@@ -98,6 +93,14 @@ class AgentClient:
             raise AgentError("invalid_profile", "无法读取 FoilPage 配置，请在应用中检查配置") from None
         if not isinstance(data, dict):
             raise AgentError("invalid_profile", "FoilPage 配置必须是 JSON 对象")
+        expected_id = data.get("library_id", "")
+        if expected_id:
+            try:
+                database = validate_storage_path(data.get("database_path", ""))
+                if read_library_identity(database) != expected_id:
+                    raise LibraryLocationError("此位置不是配置记录的资料库，请选择原资料位置或恢复备份")
+            except (LibraryLocationError, TypeError, ValueError) as exc:
+                raise AgentError("invalid_profile", str(exc)) from None
         local_token = data.get("local_api_token", "")
         if not isinstance(local_token, str) or not local_token or len(local_token) > 8192:
             raise AgentError("invalid_profile", "本机连接授权缺失，请先启动 FoilPage")

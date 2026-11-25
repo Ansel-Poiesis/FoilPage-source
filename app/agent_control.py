@@ -7,6 +7,9 @@ never arbitrary reflection, OS execution or payment administration.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import math
 import re
 from typing import Any
@@ -16,7 +19,7 @@ from app.agent_operations import AgentOperations, ApplicationOperationError
 from engine.account_access import AccountLoginRequired
 from engine.account_access import require_account_access
 from engine.agent_protocol import (
-    AGENT_MAX_BODY_BYTES, AGENT_MAX_TEXT_BYTES, AGENT_PROTOCOL_VERSION,
+    AGENT_MAX_BODY_BYTES, AGENT_MAX_TEXT_BYTES, AGENT_MAX_CURSOR_CHARS, AGENT_PROTOCOL_VERSION,
     DocumentRevisionConflict, DocumentTooLargeError, DocumentUnavailableError,
 )
 from engine.download_store import DownloadNotFoundError, DownloadStateError
@@ -38,9 +41,9 @@ METHODS = (
 )
 _SCHEMAS = {
     "info": ({}, set()),
-    "tasks.list": ({"query": str, "status": str, "limit": int}, set()),
+    "tasks.list": ({"query": str, "status": str, "limit": int, "cursor": str}, set()),
     "tasks.get": ({"task_id": str}, {"task_id"}),
-    "documents.list": ({"query": str, "limit": int}, set()),
+    "documents.list": ({"query": str, "limit": int, "cursor": str}, set()),
     "documents.read": ({"task_id": str, "tab": str}, {"task_id"}),
     "documents.update": (
         {"task_id": str, "tab": str, "text": str, "expected_revision": str},
@@ -67,6 +70,32 @@ class AgentControlError(RuntimeError):
 
 def _invalid() -> AgentControlError:
     return AgentControlError(400, "invalid_request", "Agent 请求参数无效")
+
+
+def _list_digest(value: Any) -> str:
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _read_list_cursor(cursor: str, scope: str) -> tuple[str, tuple[str, str]] | None:
+    if not cursor:
+        return None
+    try:
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        value = json.loads(raw.decode("utf-8"))
+        if (not isinstance(value, list) or len(value) != 5
+                or any(type(item) is not str for item in value)
+                or value[0] != "1" or value[1] != scope
+                or not _REVISION.fullmatch(value[2]) or not _TASK_ID.fullmatch(value[4])):
+            raise ValueError
+    except (ValueError, UnicodeError, RecursionError):
+        raise AgentControlError(400, "invalid_cursor", "分页游标无效或筛选已变更，请从第一页查询") from None
+    return value[2], (value[3], value[4])
+
+
+def _write_list_cursor(scope: str, snapshot: str, key: tuple[str, str]) -> str:
+    raw = json.dumps(["1", scope, snapshot, *key], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 def _public_task(row: dict, *, kind: str | None = None) -> dict:
@@ -153,6 +182,9 @@ class AgentControl:
             raise _invalid()
         if "query" in params and len(params["query"]) > 1000:
             raise _invalid()
+        if "cursor" in params and (len(params["cursor"]) > AGENT_MAX_CURSOR_CHARS
+                or not re.fullmatch(r"[A-Za-z0-9_-]*", params["cursor"])):
+            raise _invalid()
         if "status" in params and params["status"] not in _STATUSES | {""}:
             raise _invalid()
         if "tab" in params and params["tab"] not in {"raw", "final"}:
@@ -225,7 +257,7 @@ class AgentControl:
                                  "model_calls": "batch_agent_translate" in facade,
                                  "payment_operations": "create_alipay_order" in facade,
                                  "application_operations": bool(facade), "destructive_confirmation_required": True,
-                                 "retry_may_trigger_processing": True},
+                                 "retry_may_trigger_processing": True, "list_pagination": True},
             }
         if method == "operations.list":
             return self.operations.list(category=params.get("category", ""))
@@ -272,6 +304,8 @@ class AgentControl:
     def _list(self, method: str, params: dict) -> dict:
         query = params.get("query", "").strip().casefold()
         limit = params.get("limit", 50)
+        scope = _list_digest([method, query, params.get("status", "")])
+        cursor = _read_list_cursor(params.get("cursor", ""), scope)
         items = []
         with self.controller.media_action_lock:
             rows = self.controller.task_rows(include_archived=True)
@@ -301,5 +335,17 @@ class AgentControl:
                 if query and query not in search.casefold():
                     continue
                 items.append(public)
-        items.sort(key=lambda value: (value["updated_at"], value["task_id"]), reverse=True)
-        return {"items": items[:limit], "total": len(items)}
+        def order_key(value):
+            return value["updated_at"], value["task_id"]
+        items.sort(key=order_key, reverse=True)
+        total = len(items)
+        snapshot = _list_digest([order_key(item) for item in items])
+        if cursor:
+            previous_snapshot, after = cursor
+            # A moved or removed row must not silently disappear between pages.
+            if previous_snapshot != snapshot:
+                raise AgentControlError(409, "cursor_stale", "列表已变更，请从第一页重新查询")
+            items = [item for item in items if order_key(item) < after]
+        page = items[:limit]
+        next_cursor = _write_list_cursor(scope, snapshot, order_key(page[-1])) if len(items) > limit else None
+        return {"items": page, "total": total, "next_cursor": next_cursor}

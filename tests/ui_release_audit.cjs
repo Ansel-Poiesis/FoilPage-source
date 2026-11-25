@@ -21,7 +21,7 @@ const sources=files.map(file=>({path:path.relative(root,file).replaceAll('\\','/
 async function open(browser,size,options={},overrides={}){
   const page=await browser.newPage({viewport:{width:size.width,height:size.height},reducedMotion:'reduce'});
   page.setDefaultTimeout(7000);page.auditErrors=[];page.on('pageerror',error=>page.auditErrors.push(error.message));
-  await page.addInitScript(installMock,{loggedIn:true,paymentServer:'https://audit.example.invalid',nativeChrome:true,installed:true,scale:size.scale,...options});
+  await page.addInitScript(installMock,{loggedIn:true,paymentServer:'https://audit.example.invalid',nativeChrome:true,installed:true,taskCover:true,scale:size.scale,...options});
   await page.addInitScript(overrides=>{for(const [method,value] of Object.entries(overrides))__MOCK__[method]=()=>value;},overrides);
   await page.goto(pathToFileURL(path.join(root,'app/webview_ui/index.html')).href,{waitUntil:'domcontentloaded'});
   await page.waitForSelector('.nav-row[aria-current=page]');return page;
@@ -44,25 +44,29 @@ async function capture(page,name,{expand=false}={}){
       const label=node.getAttribute('aria-label') || (node.labels && [...node.labels].map(label=>label.textContent).join(' ')) || node.innerText || node.title || node.placeholder || '';
       const rect=node.getBoundingClientRect();return{selector:selector(node),tag:node.tagName,role:node.getAttribute('role'),name:label.trim().replace(/\s+/g,' '),title:node.title || '',placeholder:node.placeholder || '',disabled:node.disabled===true,width:Math.round(rect.width),height:Math.round(rect.height)};
     });
-    return{viewport:{width:innerWidth,height:innerHeight},page:root.id,text,controls,horizontalOverflow:document.documentElement.scrollWidth>innerWidth};
+    const scrollRegions=[document.querySelector('#nav'),document.querySelector('.brand'),...root.querySelectorAll('#jobList,.wb-right,.doc-list,.reader,.settings-pane,.tool-page,.setup-stage,.video-grid')].filter(node=>node && visible(node));
+    const overflowingRegions=scrollRegions.filter(node=>node.scrollWidth>node.clientWidth+2).map(selector);
+    const scrollbars=[...scrollRegions,...document.querySelectorAll('.ob-body,.plan-comparison-scroll,.modal-body')].filter(visible).map(node=>({selector:selector(node),width:getComputedStyle(node).scrollbarWidth,color:getComputedStyle(node).scrollbarColor,corner:getComputedStyle(node,'::-webkit-scrollbar-corner').backgroundColor}));
+    const inconsistentScrollbars=CSS.supports('selector(::-webkit-scrollbar)') ? scrollbars.filter(item=>item.width!=='auto' || item.color!=='auto' || item.corner!=='rgba(0, 0, 0, 0)') : [];
+    return{viewport:{width:innerWidth,height:innerHeight},page:root.id,text,controls,overflowingRegions,scrollbars,inconsistentScrollbars,horizontalOverflow:document.documentElement.scrollWidth>innerWidth};
   });
   record.name=name;record.errors=[...(page.auditErrors || [])];
   record.unnamedControls=record.controls.filter(control=>!control.name);
   record.suspiciousText=record.text.filter(row=>/undefined|\bNaN\b|\[object Object\]|\uFFFD|\?{3,}/.test(row.text));
   records.push(record);
-  if(record.horizontalOverflow || record.errors.length || record.unnamedControls.length || record.suspiciousText.length)failures.push({name,horizontalOverflow:record.horizontalOverflow,errors:record.errors,unnamedControls:record.unnamedControls,suspiciousText:record.suspiciousText});
+  if(record.horizontalOverflow || record.overflowingRegions.length || record.inconsistentScrollbars.length || record.errors.length || record.unnamedControls.length || record.suspiciousText.length)failures.push({name,horizontalOverflow:record.horizontalOverflow,overflowingRegions:record.overflowingRegions,inconsistentScrollbars:record.inconsistentScrollbars,errors:record.errors,unnamedControls:record.unnamedControls,suspiciousText:record.suspiciousText});
   await page.mouse.move(0,0);await page.screenshot({path:path.join(output,name+'.png'),animations:'disabled'});
 }
 (async()=>{
   const browser=await chromium.launch({headless:true});
   try{
-    for(const size of sizes){
-      const suffix=size.width+'x'+size.height+'-scale'+size.scale;
-      const page=await open(browser,size);
+    for(const theme of ['dark','paper']) for(const size of sizes){
+      const suffix=theme+'-'+size.width+'x'+size.height+'-scale'+size.scale;
+      const page=await open(browser,size,{theme});
       for(const view of pages){
         await page.evaluate(view=>switchView(view),view);
         if(view==='videos')await page.waitForSelector('.video-card');
-        if(view==='subscription')await page.waitForSelector('#softwareAccessState');
+        if(view==='subscription')await page.waitForSelector('.plan-comparison');
         await capture(page,view+'-'+suffix,{expand:view==='subscription'});
       }
       await page.evaluate(()=>switchView('settings'));

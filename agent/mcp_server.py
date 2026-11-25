@@ -56,9 +56,9 @@ def build_server(client: AgentClient, *, allow_write: bool = False, allow_proces
         return call("info", {})
 
     @server.tool(name="list_tasks", title="搜索任务", annotations=read_annotations)
-    def list_tasks(query: str = "", status: str = "", limit: StrictInt = 50) -> dict[str, Any]:
-        """按标题和状态搜索任务；返回受限的任务摘要，不返回签名 URL 或凭据。"""
-        params = checked(validate.listing, query, limit)
+    def list_tasks(query: str = "", status: str = "", limit: StrictInt = 50, cursor: str = "") -> dict[str, Any]:
+        """按标题和状态分页搜索任务；续页传 next_cursor 并沿用筛选，cursor_stale 时重新查询。"""
+        params = checked(validate.listing, query, limit, cursor)
         params["status"] = checked(validate.status, status)
         return call("tasks.list", params)
 
@@ -68,9 +68,9 @@ def build_server(client: AgentClient, *, allow_write: bool = False, allow_proces
         return call("tasks.get", {"task_id": checked(validate.task_id, task_id)})
 
     @server.tool(name="list_documents", title="搜索文本库", annotations=read_annotations)
-    def list_documents(query: str = "", limit: StrictInt = 50) -> dict[str, Any]:
-        """按标题搜索已有文本库，正文需要随后用 read_document 单独读取。"""
-        return call("documents.list", checked(validate.listing, query, limit))
+    def list_documents(query: str = "", limit: StrictInt = 50, cursor: str = "") -> dict[str, Any]:
+        """分页搜索文本库；续页传 next_cursor 并沿用筛选，正文用 read_document 读取。"""
+        return call("documents.list", checked(validate.listing, query, limit, cursor))
 
     @server.tool(name="read_document", title="读取正文", annotations=read_annotations)
     def read_document(task_id: str, tab: str = "final") -> dict[str, Any]:

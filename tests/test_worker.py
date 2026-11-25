@@ -16,6 +16,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -177,6 +178,34 @@ def test_delete_process_files_agent_article_keeps_article():
     finally:
         import shutil
         shutil.rmtree(job_dir, ignore_errors=True)
+
+
+def test_worker_main_uses_custom_route_from_environment_snapshot(monkeypatch, tmp_path):
+    database = tmp_path / "queue.db"
+    database.write_bytes(b"fixture")
+    settings_store = mock.Mock(base_dir=tmp_path)
+    settings_store.load.return_value = {
+        "database_path": str(database),
+        "download_proxy_url": "http://127.0.0.1:9999",
+    }
+    monkeypatch.setenv("FOILPAGE_WORKER_NETWORK_POLICY", "custom")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:7890")
+    store = mock.Mock()
+    worker_instance = mock.Mock()
+    with (
+        mock.patch("app.worker.SettingsStore", return_value=settings_store),
+        mock.patch("app.worker.preflight_library"),
+        mock.patch("app.worker.validate_storage_path", side_effect=lambda value: Path(value).expanduser().resolve()),
+        mock.patch("app.worker.queue_store.QueueStore", return_value=store),
+        mock.patch("app.worker.Worker", return_value=worker_instance) as worker_class,
+    ):
+        assert worker.main(["--settings-dir", str(tmp_path)]) == 0
+
+    policy = worker_class.call_args.kwargs["network_policy"]
+    assert policy.mode == "custom"
+    assert policy.proxy_route == "http://127.0.0.1:7890"
+    worker_instance.run_forever.assert_called_once_with()
+    store.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

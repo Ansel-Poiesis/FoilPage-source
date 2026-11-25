@@ -52,6 +52,132 @@ async function waitForRequest(page,method,count) {
   await page.waitForFunction(({method,count})=>window.__configurationRequests[method].calls.length===count,{method,count});
 }
 
+for (const width of [1280, 560]) {
+  test(`settings typography follows shared group and field roles at ${width}px across font scales`, async () => {
+    const page = await open('settings', 'startup', {loggedIn:true, settings:{font_scale:1.15}}, {width, height:800});
+    const font = locator => locator.evaluate(node => parseFloat(getComputedStyle(node).fontSize));
+    function near(actual, expected, description) {
+      assert.ok(Math.abs(actual - expected) <= 0.1, `${description}: expected ${expected.toFixed(2)}px, got ${actual}px`);
+    }
+    try {
+      const pane = page.locator('#settingsPane');
+      for (const scale of [1.15, 0.9, 1.3]) {
+        await page.locator('[data-page=settings]').click();
+        await page.locator('.sitem[data-section=startup]').click();
+        await page.evaluate(scale => Settings.save({font_scale:scale}, false), scale);
+        const scaled = normal => Math.max(12, normal * scale / 1.15);
+        const heading = await font(pane.getByRole('heading', {name:'启动与托盘', exact:true}));
+        const label = await font(pane.getByText('开机静默启动', {exact:true}));
+        near(heading, scaled(16), 'group heading');
+        near(label, scaled(14), 'field label');
+        near(await font(pane.locator('.set-hint:visible').first()), scaled(12), 'field hint');
+        near(await font(pane.getByRole('combobox', {name:'提示音', exact:true})), scaled(14), 'field value');
+        near(await font(pane.getByRole('button', {name:'测试通知', exact:true})), scaled(12.5), 'compact action');
+
+        await page.locator('.sitem[data-section=data]').click();
+        for (const title of ['目录', '下载', '视频读取', '队列节奏']) {
+          const header = pane.getByText(title, {exact:true}).and(pane.locator('h3, .settings-section-fold > summary'));
+          near(await font(header), heading, title);
+        }
+        const downloadRow = pane.locator('.set-row').filter({has:page.getByText('下载目录', {exact:true})});
+        near(await font(downloadRow.locator('.path-text')), scaled(14), 'directory value');
+        if (scale === 1.15) {
+          await page.locator('[data-page=faq]').click();
+          near(await font(page.locator('#page-faq').getByRole('heading', {name:'下载与任务', exact:true})), heading, 'FAQ group');
+          await page.locator('[data-page=subscription]').click();
+          const subscription = page.locator('#page-subscription');
+          near(await font(subscription.getByRole('heading', {name:'云端积分', exact:true})), heading, 'subscription group');
+          for (const id of ['subscriptionTools','subscriptionConnectionDetails']) {
+            const details = subscription.locator('#' + id);
+            if (!await details.evaluate(node => node.open)) await details.locator(':scope > summary').click();
+          }
+          near(await font(subscription.getByText('服务地址', {exact:true})), label, 'subscription field');
+        }
+      }
+      assert.deepEqual(page.errors, []);
+    } finally { await page.close(); }
+  });
+}
+
+test('font size repairs a rejected preview and reflects a confirmed save after section reentry', async () => {
+  const page = await open('settings', 'ui', {settings:{font_scale:1}});
+  try {
+    await holdMock(page, 'save_settings');
+    const slider = page.getByRole('slider', {name:'界面字号'});
+    await slider.focus();
+    await slider.press('End');
+    await waitForRequest(page, 'save_settings', 1);
+    assert.equal(await slider.getAttribute('aria-busy'), 'true');
+    assert.equal(await page.evaluate(() => document.body.style.fontSize), '19.5px');
+    await releaseMock(page, 'save_settings', {ok:false, error:'写入失败'});
+    await page.waitForFunction(() => document.body.style.fontSize === '15px');
+    assert.equal(await slider.inputValue(), '1');
+    assert.equal(await slider.getAttribute('aria-valuetext'), '15px');
+    assert.equal(await slider.isEnabled(), true);
+    assert.equal(await slider.evaluate(control => control === document.activeElement), true);
+    await slider.press('End');
+    await waitForRequest(page, 'save_settings', 2);
+    await page.locator('.sitem[data-section=recognition]').click();
+    await page.locator('.sitem[data-section=ui]').click();
+    assert.equal(await slider.isDisabled(), true);
+    await releaseMock(page, 'save_settings', {font_scale:1.3});
+    await page.waitForFunction(() => document.querySelector('.fs-slider')?.value === '1.3');
+    assert.equal(await slider.isEnabled(), true);
+    assert.equal(await slider.getAttribute('aria-valuetext'), '20px');
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
+test('notification pack previews only confirmed choices; a failed preview keeps the saved selection', async () => {
+  const page = await open('settings', 'startup', {settings:{notification_sound_pack:'system'}});
+  try {
+    await page.evaluate(() => {
+      window.__previews = [];
+      __MOCK__.preview_notification_sound = (...args) => {
+        __previews.push(args);
+        return {ok:false, error:'声音设备暂不可用'};
+      };
+    });
+    await holdMock(page, 'save_settings');
+    const pack = page.getByRole('combobox', {name:'提示音', exact:true});
+    await pack.selectOption('crisp');
+    await waitForRequest(page, 'save_settings', 1);
+    await releaseMock(page, 'save_settings', {ok:false, error:'写入失败'});
+    await page.waitForFunction(() => !document.querySelector('[aria-label="提示音"]').disabled);
+    assert.equal(await pack.inputValue(), 'system');
+    assert.deepEqual(await page.evaluate(() => __previews), []);
+    await pack.selectOption('soft');
+    await waitForRequest(page, 'save_settings', 2);
+    await releaseMock(page, 'save_settings', {notification_sound_pack:'soft'});
+    await page.waitForFunction(() => !document.querySelector('[aria-label="提示音"]').disabled);
+    assert.equal(await pack.inputValue(), 'soft');
+    assert.equal(await pack.getAttribute('aria-invalid'), null);
+    assert.match(await page.locator('.toast').innerText(), /声音设备暂不可用/);
+    await pack.selectOption('custom');
+    await waitForRequest(page, 'save_settings', 3);
+    await page.locator('.sitem[data-section=ui]').click();
+    await page.locator('.sitem[data-section=startup]').click();
+    await releaseMock(page, 'save_settings', {notification_sound_pack:'custom'});
+    await page.waitForFunction(() => !document.querySelector('[aria-label="提示音"]').disabled);
+    const preview = page.getByRole('button', {name:'试听成功提示音', exact:true});
+    assert.equal(await preview.isVisible(), true);
+    assert.equal(await preview.isDisabled(), true);
+    assert.deepEqual(await page.evaluate(() => __previews), [['success','soft','']]);
+    await holdMock(page, 'pick_notification_sound');
+    await page.getByRole('button', {name:'选择成功提示音', exact:true}).click();
+    await waitForRequest(page, 'pick_notification_sound', 1);
+    await page.locator('.sitem[data-section=ui]').click();
+    await page.locator('.sitem[data-section=startup]').click();
+    await releaseMock(page, 'pick_notification_sound', {ok:true, settings:{notification_sound_success_path:'synthetic.wav'}});
+    await page.waitForFunction(() => !document.querySelector('[aria-label="试听成功提示音"]').disabled);
+    assert.equal(await page.getByRole('button', {name:'试听失败提示音', exact:true}).isDisabled(), true);
+    await preview.click();
+    await page.waitForFunction(() => __previews.length === 2);
+    assert.deepEqual(await page.evaluate(() => __previews.at(-1)), ['success','custom','synthetic.wav']);
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
 test('rejected settings do not change the switch or emit success; retry emits one acknowledgement',async()=>{
   const page=await open('settings','control');try{
     await page.evaluate(()=>{window.__realSave=__MOCK__.save_settings;__MOCK__.save_settings=()=>({ok:false,error:'测试保存失败'});});
@@ -336,19 +462,139 @@ test('link drafts and single pending submission persist across navigation; rejec
 test('failed data checks and rejected orphan cleanup never report empty or cleaned data, and allow retry',async()=>{
   const page=await open('settings','data');try{
     await page.evaluate(()=>{
-      window.__cleanupCalls=0;window.__checkFails=true;
+      window.__checkFails=true;
       __MOCK__.data_reconcile=()=>__checkFails?{ok:false,error:'自检读取失败'}:{ok:true,stale_fixed:[],orphan_outputs:[{name:'测试产物',path:'C:\\fixture\\orphan.md'}],orphan_downloads:[]};
-      __MOCK__.cleanup_orphans=async()=>{++__cleanupCalls;await new Promise(resolve=>setTimeout(resolve,120));return __cleanupCalls===1?{ok:false,error:'清理失败，请重试'}:{ok:true,removed_outputs:[],removed_downloads:[]};};
     });
-    await page.getByRole('button',{name:'运行数据自检'}).click();await page.waitForFunction(()=>__configurationToasts.length===1);
-    assert.equal(await page.locator('.reconcile-box').textContent(),'自检读取失败');assert.equal(await page.getByText('未发现孤儿产物。',{exact:true}).count(),0);
-    await page.evaluate(()=>{__checkFails=false;});await page.getByRole('button',{name:'运行数据自检'}).click();
-    await page.locator('.reconcile-box .btn').waitFor();await page.locator('.reconcile-box .btn').click();await page.locator('#dlgOk').click();
-    await page.waitForFunction(()=>__configurationToasts.length===3);assert.equal(await page.evaluate(()=>__configurationToasts.at(-1).kind),'error');
-    assert.match(await page.locator('.reconcile-box').textContent(),/测试产物/);assert.equal(await page.locator('.reconcile-box .btn').isDisabled(),false);
-    await page.locator('.reconcile-box .btn').click();await page.locator('#dlgOk').click();await page.waitForFunction(()=>__configurationToasts.length===4);
+    await holdMock(page,'cleanup_orphans');
+    const scan=page.getByRole('button',{name:'运行数据自检',exact:true});
+    const clean=page.getByRole('button',{name:'清理所选',exact:true});
+    const candidate=page.getByRole('checkbox',{name:'测试产物',exact:true});
+    await scan.click();await page.waitForFunction(()=>__configurationToasts.length===1);
+    assert.equal(await page.locator('.reconcile-box').textContent(),'自检读取失败');
+    assert.equal(await page.getByText('未发现可清理的残留文件。',{exact:true}).count(),0);
+    await page.evaluate(()=>{__checkFails=false;});await scan.click();
+    assert(await candidate.isChecked());
+    await clean.click();await page.locator('#dlgOk').click();
+    await waitForRequest(page,'cleanup_orphans',1);
+    assert(await page.locator('.reconcile-box .reconcile-cleanup').isDisabled());
+    assert(await candidate.isDisabled());
+    assert(await scan.isDisabled());
+    await releaseMock(page,'cleanup_orphans',{ok:false,error:'清理失败，请重试'});
+    await page.waitForFunction(()=>__configurationToasts.length===3);
+    assert.deepEqual(await page.evaluate(()=>__configurationToasts.at(-1)),{message:'清理失败，请重试',kind:'error'});
+    assert(await candidate.isChecked());
+    assert(await clean.isEnabled());
+    await clean.click();await page.locator('#dlgOk').click();
+    await waitForRequest(page,'cleanup_orphans',2);
+    await releaseMock(page,'cleanup_orphans',{ok:true,removed_outputs:[],removed_downloads:[]});
+    await page.waitForFunction(()=>__configurationToasts.length===4);
     assert.match(await page.evaluate(()=>__configurationToasts.at(-1).message),/未被清理/);assert.equal(await page.evaluate(()=>__configurationToasts.some(item=>item.message==='已清理')),false);
+    assert(await candidate.isChecked());
     await shot(page,'settings-data-cleanup-rejected');assert.deepEqual(page.errors,[]);
+  }finally{await page.close();}
+});
+
+test('residue cleanup previews the default range and sends only the confirmed selection',async()=>{
+  const page=await open('settings','data');try{
+    await page.evaluate(()=>{
+      window.__cleanupRequests=[];
+      __MOCK__.data_reconcile=()=>({ok:true,stale_fixed:[],
+        orphan_outputs:[
+          {name:'已勾选的转写目录',path:'C:\\fixture\\output',kind:'cleared_output',bytes:24},
+          {name:'要保留的转写目录',path:'C:\\fixture\\keep',kind:'output',bytes:40},
+        ],
+        orphan_downloads:[{name:'旧下载.mp4',path:'C:\\fixture\\download.mp4',kind:'download',bytes:1024}]});
+      __MOCK__.cleanup_orphans=(outputs, downloads)=>{
+        __cleanupRequests.push([outputs, downloads]);
+        return {ok:true,removed_outputs:outputs,removed_downloads:[]};
+      };
+    });
+    const output=page.getByRole('checkbox',{name:'已勾选的转写目录',exact:true});
+    const kept=page.getByRole('checkbox',{name:'要保留的转写目录',exact:true});
+    const download=page.getByRole('checkbox',{name:'旧下载.mp4',exact:true});
+    const clean=page.getByRole('button',{name:'清理所选',exact:true});
+    await page.getByRole('button',{name:'运行数据自检',exact:true}).click();
+    assert(await output.isChecked());
+    assert(await kept.isChecked());
+    assert.equal(await download.isChecked(),false);
+    await page.getByRole('button',{name:'全选',exact:true}).click();
+    assert(await download.isChecked());
+    await page.getByRole('button',{name:'取消全选',exact:true}).click();
+    assert(await clean.isDisabled());
+    await output.check();
+    await download.check();
+    await clean.click();
+    await page.locator('#dlgCancel').click();
+    assert.deepEqual(await page.evaluate(()=>__cleanupRequests),[]);
+    assert(await output.isChecked());
+    assert(await download.isChecked());
+    await clean.click();
+    await page.locator('#dlgOk').click();
+    await output.waitFor({state:'detached'});
+    assert.deepEqual(await page.evaluate(()=>__cleanupRequests),[[['C:\\fixture\\output'],['C:\\fixture\\download.mp4']]]);
+    assert(await download.isChecked(),'the rejected file remains selected for another attempt');
+    assert.equal(await kept.isChecked(),false,'an unchecked file stays unchecked after a partial cleanup');
+    assert.equal(await page.evaluate(()=>__configurationToasts.at(-1).kind),'error');
+    assert.deepEqual(page.errors,[]);
+  }finally{await page.close();}
+});
+
+test('saved cleanup preferences apply on the next scan and confirmation stays local to residue cleanup',async()=>{
+  const page=await open('settings','data',{settings:{confirm_delete:false}});try{
+    await page.evaluate(()=>{
+      const originalSave=__MOCK__.save_settings;
+      window.__residueSaves=[];
+      window.__cleanupRequests=[];
+      __MOCK__.save_settings=changes=>{
+        __residueSaves.push(changes);
+        return originalSave(changes);
+      };
+      __MOCK__.data_reconcile=()=>({ok:true,stale_fixed:[],
+        orphan_outputs:[{name:'转写过程目录',path:'C:\\fixture\\process'}],
+        orphan_downloads:[{name:'历史下载.mp4',path:'C:\\fixture\\historical.mp4'}]});
+      __MOCK__.cleanup_orphans=(outputs,downloads)=>{
+        __cleanupRequests.push([outputs,downloads]);
+        return {ok:true,removed_outputs:outputs,removed_downloads:downloads};
+      };
+    });
+    const scan=page.getByRole('button',{name:'运行数据自检',exact:true});
+    const clean=page.getByRole('button',{name:'清理所选',exact:true});
+    const preset=page.getByLabel('默认勾选范围',{exact:true});
+    const confirm=page.getByRole('switch',{name:'清理残留前确认',exact:true});
+    const output=page.getByRole('checkbox',{name:'转写过程目录',exact:true});
+    const download=page.getByRole('checkbox',{name:'历史下载.mp4',exact:true});
+    assert.equal(await preset.inputValue(),'outputs');
+    assert.equal(await confirm.getAttribute('aria-checked'),'true');
+    for (const [value,outChecked,dlChecked] of [['none',false,false],['all',true,true],['downloads',false,true]]) {
+      await preset.selectOption(value);
+      await page.waitForFunction(value=>AppState.settings.residue_cleanup_default===value,value);
+      await scan.click();
+      assert.equal(await output.isChecked(),outChecked,value);
+      assert.equal(await download.isChecked(),dlChecked,value);
+      assert.deepEqual(await page.evaluate(()=>__cleanupRequests),[],'scanning never removes any files');
+    }
+    await clean.click();
+    await page.locator('#dlgCancel').click();
+    await confirm.click();
+    await page.waitForFunction(()=>AppState.settings.confirm_residue_cleanup===false);
+    await page.locator('.sitem[data-section=ui]').click();
+    await page.locator('.sitem[data-section=data]').click();
+    assert.equal(await preset.inputValue(),'downloads');
+    assert.equal(await confirm.getAttribute('aria-checked'),'false');
+    assert.equal(await page.evaluate(()=>AppState.settings.confirm_delete),false);
+    assert.deepEqual(await page.evaluate(()=>__residueSaves),[
+      {residue_cleanup_default:'none'},{residue_cleanup_default:'all'},
+      {residue_cleanup_default:'downloads'},{confirm_residue_cleanup:false},
+    ]);
+    await scan.click();
+    assert.equal(await output.isChecked(),false);
+    assert(await download.isChecked());
+    await clean.click();
+    await download.waitFor({state:'detached'});
+    assert.deepEqual(await page.evaluate(()=>__cleanupRequests),[[[],['C:\\fixture\\historical.mp4']]]);
+    assert.equal(await page.locator('#dlgOk').count(),0);
+    assert(await output.isVisible());
+    assert.deepEqual(page.errors,[]);
   }finally{await page.close();}
 });
 

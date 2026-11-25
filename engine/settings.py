@@ -15,6 +15,10 @@ import threading
 from pathlib import Path
 from typing import Any, Mapping
 
+from engine.library_location import (
+    INITIALIZED_MARKER, LibraryLocationError, default_library_root, preflight_library, validate_storage_path,
+)
+
 try:
     import win32crypt
 except Exception:  # pragma: no cover - non-Windows development fallback
@@ -99,20 +103,10 @@ def _unprotect_secret(value: str) -> str:
 
 
 def default_app_data_dir(environment: Mapping[str, str] | None = None) -> Path:
-    env = os.environ if environment is None else environment
-    local = env.get("LOCALAPPDATA")
-    if local:
-        root = Path(local)
-    else:
-        profile = Path(env.get("USERPROFILE", str(Path.home())))
-        root = profile / "AppData" / "Local"
-    current = root / APP_DIRECTORY_NAME
-    # 1.3.8 起目录名为 FoilPage；桌面端完成一次性改名迁移前，老用户资料仍在
-    # VideoToArticle 旧根下，解析必须继续命中旧根，否则登录态与资料库"消失"。
-    legacy = root / LEGACY_APP_DIRECTORY_NAME
-    if not current.exists() and legacy.exists():
-        return legacy
-    return current
+    try:
+        return default_library_root(environment)
+    except LibraryLocationError as exc:
+        raise SettingsError(str(exc)) from exc
 
 
 def migrate_legacy_data_root(environment: Mapping[str, str] | None = None) -> bool:
@@ -158,9 +152,10 @@ def migrate_legacy_data_root(environment: Mapping[str, str] | None = None) -> bo
     return True
 
 
-def default_logs_dir(environment: Mapping[str, str] | None = None) -> Path:
+def default_logs_dir(environment: Mapping[str, str] | None = None, *, base_dir: str | Path | None = None) -> Path:
     """Log 目录的唯一推导入口；改名只动这里，别处不允许自行拼接。"""
-    return default_app_data_dir(environment) / "logs"
+    return (Path(base_dir).expanduser().resolve() if base_dir is not None
+            else default_app_data_dir(environment)) / "logs"
 
 
 class SettingsStore:
@@ -177,10 +172,15 @@ class SettingsStore:
         )
         self.path = self.base_dir / "settings.json"
         self._lock = threading.RLock()
+        try:
+            validate_storage_path(self.base_dir, environment=environment)
+        except LibraryLocationError as exc:
+            raise SettingsError(str(exc)) from exc
 
     def defaults(self) -> dict[str, Any]:
         return {
             "schema_version": CURRENT_SETTINGS_VERSION,
+            "library_id": "",
             "database_path": str(self.base_dir / "library.db"),
             "output_dir": str(self.base_dir / "output"),
             "whisper_model": "tiny",
@@ -247,6 +247,8 @@ class SettingsStore:
             "agent_custom_profiles": [],
             "delete_source_after_translation": False,
             "confirm_delete": True,
+            "residue_cleanup_default": "outputs",
+            "confirm_residue_cleanup": True,
             "animations": True,
             "subscription_plan": "free",
             "subscription_active": False,
@@ -295,7 +297,12 @@ class SettingsStore:
     def load(self) -> dict[str, Any]:
         with self._lock:
             if not self.path.exists():
-                return self.defaults()
+                defaults = self.defaults()
+                try:
+                    preflight_library(self, defaults)
+                except LibraryLocationError as exc:
+                    raise SettingsError(str(exc)) from exc
+                return defaults
             try:
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
@@ -312,6 +319,11 @@ class SettingsStore:
                 for field in _SECRET_FIELDS
             )
             if migrated != decrypted or needs_secret_upgrade:
+                if migrated.get("library_id") or (self.base_dir / INITIALIZED_MARKER).exists():
+                    try:
+                        preflight_library(self, migrated)
+                    except LibraryLocationError as exc:
+                        raise SettingsError(str(exc)) from exc
                 self.save(migrated)
             return migrated
 
@@ -382,6 +394,9 @@ class SettingsStore:
         )
 
     def validate(self, settings: Mapping[str, Any]) -> None:
+        library_id = settings.get("library_id", "")
+        if not isinstance(library_id, str) or library_id and not re.fullmatch(r"[a-f0-9]{32}", library_id):
+            raise SettingsValidationError("资料库身份记录无效")
         for name in ("terms_accepted_version", "terms_cross_border_accepted_version"):
             if type(settings.get(name, 0)) is not int or not 0 <= settings.get(name, 0) <= 1_000_000:
                 raise SettingsError("条款版本无效")
@@ -399,6 +414,15 @@ class SettingsStore:
                 raise SettingsValidationError(f"{field} 必须是非空字符串")
             if any(part.casefold() == "poiesis" for part in Path(settings[field]).parts):
                 raise SettingsValidationError(f"{field} 不得位于 Poiesis 目录")
+            try:
+                validate_storage_path(settings[field])
+            except LibraryLocationError as exc:
+                raise SettingsValidationError(f"{field}: {exc}") from exc
+        if settings.get("model_dir"):
+            try:
+                validate_storage_path(settings["model_dir"])
+            except LibraryLocationError as exc:
+                raise SettingsValidationError(f"model_dir: {exc}") from exc
         if settings["device"] not in ("cpu", "cuda"):
             raise SettingsValidationError("device 必须是 cpu 或 cuda")
         model_dir = settings.get("model_dir", "")
@@ -429,12 +453,14 @@ class SettingsStore:
             raise SettingsValidationError("download_pending_timeout_minutes 必须是 5–1440 的整数分钟")
         for field in (
             "worker_auto_start", "worker_auto_restart", "launch_at_startup", "ci_runner_wakeup",
-            "close_to_tray", "confirm_delete", "transcribe_after_download", "download_covers",
+            "close_to_tray", "confirm_delete", "confirm_residue_cleanup", "transcribe_after_download", "download_covers",
             "delete_video_after_transcribe", "delete_process_files_after_transcribe",
             "update_title_after_transcribe", "title_optimization_enabled", "task_notifications",
         ):
             if not isinstance(settings.get(field), bool):
                 raise SettingsValidationError(f"{field} 必须是 bool")
+        if settings.get("residue_cleanup_default") not in ("outputs", "downloads", "all", "none"):
+            raise SettingsValidationError("残留清理的默认勾选范围无效")
         if settings.get("task_sort_order") not in ("newest", "oldest"):
             raise SettingsValidationError("task_sort_order 必须是 newest 或 oldest")
         if settings.get("notification_sound_pack") not in NOTIFICATION_SOUND_PACKS:

@@ -88,6 +88,61 @@ def test_agent_service_preserves_raw_and_writes_article_manifest() -> None:
         saved = json.loads((root / "原视频_manifest.json").read_text(encoding="utf-8"))
         assert saved["agent_profile"] == "knowledge"
         assert saved["agent_tags"] == ["复盘", "访谈"]
+        assert saved["agent_fidelity_fallback"] is False and saved["agent_fidelity_fallback_reason"] == ""
+
+        # 2026-11-25：保真降级的原因随清单落盘，只有固定分类能通过白名单。
+        manifest["text_outputs_cleared"] = False
+        with mock.patch("app.agent_service.rewrite_transcript", return_value=mock.Mock(
+                profile="knowledge", markdown="# 文章\n", model="deepseek-chat", tags=(), fidelity_fallback=True, fidelity_fallback_reason="numbers")):
+            updated = apply_agent_translation(manifest, _settings("knowledge"), source_title="原视频")
+        assert updated["agent_fidelity_fallback"] is True and updated["agent_fidelity_fallback_reason"] == "numbers"
+        assert json.loads((root / "原视频_manifest.json").read_text(encoding="utf-8"))["agent_fidelity_fallback_reason"] == "numbers"
+
+
+def test_agent_service_rebuilds_raw_from_segments_once_process_files_are_cleaned() -> None:
+    """2026-11-25："转写后删除过程文件"后原始转写不在，重新整理用字幕分段逐字重建。"""
+    from app.agent_service import _load_segments, _raw_transcript_text, apply_title_optimization
+
+    with tempfile.TemporaryDirectory(prefix="agent_service_") as temp:
+        root = Path(temp)
+        segments = root / "原视频_segments.json"
+        segments.write_text(json.dumps([{"start": 0.0, "end": 2.0, "text": "第一段原话"},
+                                        {"start": 2.0, "end": 4.0, "text": " 第二段原话 "},
+                                        {"start": 4.0, "end": 5.0, "text": ""}], ensure_ascii=False), encoding="utf-8")
+        manifest = {
+            "job_id": "job-2", "source_path": "source.mp4", "source_sha256": None,
+            "backend": "local", "model": "tiny", "language": "zh", "duration_sec": 5.0,
+            "raw_path": str(root / "原视频_raw.md"), "final_path": str(root / "原视频.md"),
+            "content_mode": "raw", "prompt_version": "v1", "created_at": "2026-01-01T00:00:00",
+            "segments_path": str(segments),
+        }
+        seen = {}
+
+        def fake_rewrite(raw_text, _settings, **kwargs):
+            seen["raw"], seen["segments"] = raw_text, kwargs.get("segments")
+            return mock.Mock(profile="knowledge", markdown="# 文章\n", model="deepseek-chat", tags=())
+
+        with mock.patch("app.agent_service.rewrite_transcript", side_effect=fake_rewrite):
+            updated = apply_agent_translation(manifest, _settings("knowledge"), source_title="原视频")
+        assert seen["raw"] == "第一段原话第二段原话" and len(seen["segments"]) == 3
+        assert Path(updated["final_path"]).read_text(encoding="utf-8") == "# 原视频\n"
+        assert not Path(manifest["raw_path"]).exists(), "重建只服务本次整理，不把过程文件写回磁盘"
+
+        with mock.patch("engine.title_optimizer.optimize_title", return_value="准确的新标题") as optimize:
+            updated = apply_title_optimization(updated, {"title_optimization_enabled": True}, write_manifest_file=False)
+        assert optimize.call_args.args[0] == "第一段原话第二段原话" and updated["source_title"] == "准确的新标题"
+
+        english_segments = root / "en_segments.json"
+        english_segments.write_text(json.dumps([{"text": "first\n line"}, {"text": " second"}]), encoding="utf-8")
+        english = {"raw_path": str(root / "gone.md"), "language": "en", "segments_path": str(english_segments)}
+        assert _raw_transcript_text(english, _load_segments(english)) == "first line second"
+
+        try:
+            apply_agent_translation({**manifest, "segments_path": ""}, _settings("knowledge"), source_title="原视频")
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("既无原始转写也无分段时必须明确失败")
 
 
 def test_agent_tag_marker_is_optional_and_never_leaks_into_markdown() -> None:

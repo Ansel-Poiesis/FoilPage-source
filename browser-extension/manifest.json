@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "111",
   "name": "FoilPage",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "经逐次授权在本机下载当前抖音 / B 站 / YouTube 视频，完成后交给 FoilPage 桌面端转写。",
   "icons": {
     "16": "icons/icon-16.png",
@@ -42,6 +42,7 @@
         "content.js"
       ],
       "css": [
+        "brand.css",
         "content.css"
       ],
       "run_at": "document_start"
@@ -63,9 +64,11 @@
         "https://bilibili.com/*"
       ],
       "js": [
+        "ui-contract.js",
         "content-bili.js"
       ],
       "css": [
+        "brand.css",
         "content-bili.css"
       ],
       "run_at": "document_idle"
@@ -77,9 +80,11 @@
         "https://youtu.be/*"
       ],
       "js": [
+        "ui-contract.js",
         "content-youtube.js"
       ],
       "css": [
+        "brand.css",
         "content-youtube.css"
       ],
       "run_at": "document_idle"

@@ -89,6 +89,13 @@ async function openPopup(options = {}, theme = 'light') {
   }, options);
   await page.route('http://127.0.0.1:18765/**', route => {
     const pathname = new URL(route.request().url()).pathname;
+    if (pathname === '/v1/downloads') {
+      if (route.request().method() === 'OPTIONS') {
+        return route.fulfill({status:204,headers:{'access-control-allow-origin':'*'}});
+      }
+      assert.equal(route.request().headers().authorization,'Bearer fixture-only');
+      return route.fulfill({json:{jobs:[]},headers:{'access-control-allow-origin':'*'}});
+    }
     if (pathname !== '/health') throw new Error('Unexpected local API request: ' + pathname);
     return route.fulfill({contentType:'application/json', headers:{'access-control-allow-origin':'*'}, body:JSON.stringify({ok:true,service:'VideoToArticle',api_version:'1',extension_latest:options.latest ?? '0.17.0'})});
   });
@@ -193,14 +200,13 @@ test('fixed-directory instructions remain accessible at 560 by 500 with long pat
   }
 });
 
-test('matching popup versions explain desktop updates and refresh without claiming an update just completed', async () => {
+test('matching popup versions display the running version and omit update instructions', async () => {
   for (const latest of ['0.17.0', '0.17.0.0']) {
     const page = await openPopup({latest});
     try {
-      const note = await page.locator('#versionNote').textContent();
-      assert.equal(note, '扩展 0.17.0：固定目录随桌面更新，升级后刷新视频页。');
-      assert.equal(await page.locator('#versionNote').isVisible(), true);
-      assert.doesNotMatch(note, /已更新|更新成功|最新版本/);
+      assert.equal(await page.locator('#versionNote').isHidden(), true);
+      assert.match(await page.locator('#extensionVersion').textContent(), /0\.17\.0/);
+      assert.equal(await page.locator('#extensionVersion').isVisible(), true);
       assert.deepEqual(page.errors, []);
     } finally {await page.close();}
   }

@@ -5,7 +5,7 @@ FoilPage 自有源码采用 MPL-2.0。第三方代码、依赖、字体、模型
 | 仓库内组件 | 材料位置 | 许可 |
 | --- | --- | --- |
 | MicroModal 0.7.0 | app/webview_ui/vendor/micromodal.min.js 和 micromodal-LICENSE.txt | MIT |
-| LXGW WenKai Screen 字体 | assets/fonts/OFL.txt，browser-extension/fonts | SIL OFL 1.1 |
+| LXGW WenKai Screen 字体 | app/webview_ui/assets/fonts、assets/fonts、browser-extension/fonts，许可见 assets/fonts/OFL.txt | SIL OFL 1.1 |
 | FFmpeg 许可及来源索引 | assets/third-party | GPLv3 原文及二进制来源索引 |
 
 assets/sample.mp4 由黑色画面与 Windows System.Speech 合成英文语音组成，文本为“Today we will test the video transcription pipeline. The moon is bright above the quiet ocean.”。图标和提示音的自有素材随本项目提供。

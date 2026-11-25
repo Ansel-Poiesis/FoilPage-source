@@ -172,6 +172,7 @@ _SECRET_KEYS = frozenset({
 })
 _AUTO_DELETE_SETTINGS = frozenset({"delete_source_after_translation", "delete_video_after_transcribe",
                                     "delete_process_files_after_transcribe"})
+_DELETE_CONFIRM_SETTINGS = frozenset({"confirm_delete", "confirm_residue_cleanup"})
 
 
 def public_result(value: Any, *, redact: tuple[str, ...] = (), depth: int = 0) -> Any:
@@ -265,7 +266,7 @@ class AgentOperations:
             raise ApplicationOperationError(400, "invalid_request", "应用操作参数与已声明字段不匹配")
         for name, value in arguments.items():
             _validate_value(value, spec.fields[name][0])
-        for name in ("zip_path", "dest_path"):
+        for name in ("zip_path", "dest_path", "candidate_path"):
             if name in arguments:
                 _local_path(arguments[name])
         for name in ("paths", "outputs", "downloads"):
@@ -292,9 +293,12 @@ class AgentOperations:
                 raise ApplicationOperationError(409, "confirmation_required", "开启定期清理需要明确设置 confirm=true")
             if "js_runtime_path" in changes:
                 raise ApplicationOperationError(400, "protected_setting", "执行器路径须由用户在桌面设置中配置")
-            if any(key in changes and type(changes[key]) is not bool for key in _AUTO_DELETE_SETTINGS | {"confirm_delete"}):
+            if any(key in changes and type(changes[key]) is not bool for key in _AUTO_DELETE_SETTINGS | _DELETE_CONFIRM_SETTINGS):
                 raise ApplicationOperationError(400, "invalid_request", "删除设置必须使用布尔值")
-            if confirm is not True and (any(changes.get(key) is True for key in _AUTO_DELETE_SETTINGS) or changes.get("confirm_delete") is False):
+            if confirm is not True and (
+                any(changes.get(key) is True for key in _AUTO_DELETE_SETTINGS)
+                or any(changes.get(key) is False for key in _DELETE_CONFIRM_SETTINGS)
+            ):
                 raise ApplicationOperationError(409, "confirmation_required", "启用自动删除或关闭删除确认需要明确设置 confirm=true")
         if spec.destructive and confirm is not True:
             raise ApplicationOperationError(409, "confirmation_required", "此操作会删除、替换或解绑数据，请明确设置 confirm=true")

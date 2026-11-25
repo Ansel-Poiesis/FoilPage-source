@@ -1,0 +1,67 @@
+/* Copyright (c) 2026 Ansel | SPDX-License-Identifier: MPL-2.0 */
+
+/* Ordinary commands settle on release. Navigation keeps its hit areas still. */
+button.btn {
+  transition: background-color 100ms ease-out, color 100ms ease-out,
+    border-color 100ms ease-out, box-shadow 120ms var(--ease-out),
+    transform 125ms var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  button.btn:not(:disabled):not([aria-disabled="true"]):hover {
+    border-color: color-mix(in srgb, currentColor 32%, var(--border));
+  }
+  .settings-nav .sitem:not(.active):hover {
+    background-color: var(--hover);
+    color: var(--text);
+  }
+  .settings-pane .toggle:not(:disabled):hover {
+    border-color: color-mix(in srgb, var(--text) 48%, var(--border));
+  }
+  .settings-pane .accent-swatch:not(:disabled):hover {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--text) 22%, transparent);
+  }
+}
+button.btn:not(:disabled):not([aria-disabled="true"]):active {
+  box-shadow: var(--neo-inset);
+  transition-duration: 55ms;
+}
+.settings-nav .sitem {
+  border: 1px solid transparent;
+  transition: background-color 90ms ease-out, color 90ms ease-out;
+}
+.settings-nav .sitem:not(:disabled):active {
+  background-color: var(--primary-dim);
+  color: var(--text);
+}
+
+/* The saved value determines the destination. A rebuilt switch can start at
+   the previous thumb's actual position, including a mid-gesture reversal. */
+.settings-pane .toggle { --thumb-x: 0px; }
+.settings-pane .toggle[aria-checked="true"] { --thumb-x: 18px; }
+.settings-pane .toggle::after {
+  transform: translateX(var(--thumb-x));
+  transition: transform 165ms cubic-bezier(.3, .05, .42, 1), scale 85ms var(--ease-out);
+}
+.settings-pane .toggle:active::after { transform: translateX(var(--thumb-x)); }
+.settings-pane .toggle:disabled:not([aria-busy="true"]) { opacity: .55; }
+@media (prefers-reduced-motion: no-preference) {
+  body:not([data-animations="off"]) button.btn:not(:disabled):not([aria-disabled="true"]):active {
+    transform: translateY(1px) scale(.985);
+  }
+  body:not([data-animations="off"]) .settings-pane .toggle:not(:disabled):active::after {
+    scale: .88;
+  }
+  @starting-style {
+    body:not([data-animations="off"]) .settings-pane .toggle[data-switch-changed]::after {
+      transform: var(--thumb-from);
+    }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  body :is(.btn, .icon-btn, .nav-row, .window-control, .state-pill, .job-check-input):not(:disabled):active,
+  body .accent-swatch:hover,
+  body .video-card .video-cover .video-play { transform: none; }
+}
+body[data-animations="off"] :is(.btn, .icon-btn, .nav-row, .window-control, .state-pill, .job-check-input):not(:disabled):active,
+body[data-animations="off"] .accent-swatch:hover,
+body[data-animations="off"] .video-card .video-play { transform: none; }

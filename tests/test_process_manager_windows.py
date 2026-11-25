@@ -15,6 +15,7 @@ from unittest import mock
 import pytest
 
 from app.process_manager import _send_windows_stop_signal
+from engine.queue_store import QueueStore
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows console lifecycle")
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,7 @@ def test_windowed_parent_stops_real_hidden_worker_gracefully(tmp_path):
     pythonw = Path(sys.executable).with_name("pythonw.exe")
     if not pythonw.is_file():
         pytest.skip("This Windows Python distribution has no pythonw executable")
+    QueueStore(tmp_path / "queue.db").close()
     report = tmp_path / "report.json"
     script = tmp_path / "windowed_parent.py"
     script.write_text(f'''

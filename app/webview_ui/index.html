@@ -11,6 +11,8 @@
 <link rel="stylesheet" href="css/product.css">
 <link rel="stylesheet" href="css/onboarding.css">
 <link rel="stylesheet" href="css/setup.css">
+<link rel="stylesheet" href="css/settings-motion.css">
+<link rel="stylesheet" href="css/brand.css">
 </head>
 <body data-theme="dark">
 <a class="skip-link" href="#content">跳到主要内容</a>
@@ -19,16 +21,17 @@
   <aside class="sidebar" aria-label="FoilPage 主界面导航">
     <div class="brand window-drag-region" aria-label="FoilPage">
       <img class="mark" src="assets/foilpage.png" alt="FoilPage 标志">
-      <div class="brand-name"><span class="brand-product">FoilPage</span><span class="brand-ver" hidden id="brandVer">v0.1.5</span></div>
+      <div class="brand-name"><span class="brand-product">FoilPage</span><span class="brand-ver" hidden id="brandVer">v0.1.6</span></div>
     </div>
     <nav class="nav" id="nav" aria-label="主要导航"></nav>
     <a class="author-credit" id="authorCredit" href="https://keeppoiesis.com/" target="_blank" rel="noopener noreferrer" aria-label="访问 Ansel 的个人网站 keeppoiesis.com" title="Ansel · keeppoiesis.com">
-      <span class="author-credit-copy"><span class="author-credit-name">by Ansel</span><span class="author-credit-site">keeppoiesis.com</span></span>
+      <span class="author-credit-copy"><span class="author-credit-name">Ansel</span><span class="author-credit-site">keeppoiesis.com</span></span>
       <svg class="author-credit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg>
     </a>
   </aside>
   <main class="main">
     <header class="topbar window-drag-region">
+      <button id="materialBack" class="icon-btn material-back" type="button" aria-label="返回" title="返回" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg><span></span></button>
       <div class="topbar-copy window-drag-region">
         <h1 class="title" id="pageTitle" tabindex="-1">任务</h1>
       </div>
@@ -58,6 +61,7 @@
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <div id="modalRoot"></div>
 <div id="onboardingRoot"></div>
+<script src="js/ui-contract.js"></script>
 <script src="js/native-select.js"></script>
 <script src="js/api.js"></script>
 <script src="js/markdown.js"></script>
@@ -65,10 +69,14 @@
 <script src="js/i18n.js"></script>
 <script src="js/tools.js"></script>
 <script src="js/setup.js"></script>
+<script src="js/material-navigation.js"></script>
+<script src="js/text-diff.js"></script>
 <script src="js/workbench.js"></script>
+<script src="js/library-model.js"></script>
 <script src="js/library.js"></script>
 <script src="js/videos.js"></script>
 <script src="js/faq-data.js"></script>
+<script src="js/settings-model.js"></script>
 <script src="js/settings.js"></script>
 <script src="vendor/micromodal.min.js"></script>
 <script src="js/terms-metadata.js"></script>

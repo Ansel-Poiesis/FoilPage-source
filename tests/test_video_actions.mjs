@@ -135,6 +135,20 @@ test('mixed aspect covers render at natural ratios in a masonry flow',async()=>{
     assert.deepEqual(page.errors,[]);
   }finally{await page.close();}
 });
+test('portrait cover playback stays in the first visible area of narrow and short windows',async()=>{
+  for(const size of [{width:560,height:500},{width:960,height:500}]){
+    const page=await open({nativeChrome:true,scale:size.width===560?1.3:1},size);try{
+      await page.waitForFunction(()=>document.querySelector('.video-card .video-cover img')?.naturalWidth>0);
+      const visible=await page.locator('.video-card').first().evaluate(card=>{
+        const grid=card.closest('#videoGrid').getBoundingClientRect();
+        const play=card.querySelector('.video-play').getBoundingClientRect();
+        return play.top>=grid.top&&play.bottom<=grid.bottom&&play.left>=grid.left&&play.right<=grid.right;
+      });
+      assert(visible,`playback must be visible at ${size.width}x${size.height}`);
+      assert.deepEqual(page.errors,[]);
+    }finally{await page.close();}
+  }
+});
 test('masonry scrolls vertically and never horizontally when overflowing',async()=>{
   const vertical='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADwAAABpCAAAAABD1B/qAAAAf0lEQVR4nGNgYOHgERSVlFNS09Y3trBxcPX0DQqLik9OzykoqaxtbO3qmzR99vwlK9Zs3Lpz36Fjp89fvnHnwdOXbz99+/WfYVTzqOZRzaOaRzWPah7VPKp5VPOo5lHNo5pHNY9qHtU8qnlU86jmUc2jmkc1j2oe1TyqeZBqBgBmATaCT64IVgAAAABJRU5ErkJggg==';
   const horizontal='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAKAAAABaCAAAAAAarQKOAAABKElEQVR4nO3O4SpDAQCA0SvSRIsmTZOIRLSsSUSLSEQiWSSytEUiEk1rskS0iEQkIpGIRCSaRJZoWhOJSDSJSDStSbyGH995giMIXt4+viI//wBxYJAkOEQaKgsLj4iMio6JjYtPkCcqlEnJKalp6aqMzKzsnNy8/ILCouKSUnVZeUVlVbWmRqurratvaGxqbmlt07cbjB2dpq7unt4+c//A4NDwyOjY+MTk1PTM7Nz8wuLS8srq2vrG5tb2jmV3b//g0Hp0fGI7tTvOzi8ur65vbu/uH5yPT88vr2/vH5+uL7fn++dXIEiQIEGCBAkSJEiQIEGCBAkSJEiQIEGCBAkSJEiQIEGCBAkSJEiQIEGCBAkSJEiQIEGCBAn+n+AfV/rqCpmW7FgAAAAASUVORK5CYII=';
@@ -160,6 +174,31 @@ test('refresh button lives in the topbar beside the page title',async()=>{
     await page.waitForFunction(before=>__fixtureCalls.filter(call=>call==='get_downloaded_videos').length>=before+1,before);
     await page.evaluate(()=>switchView('workbench'));
     await page.waitForFunction(()=>!document.getElementById('refreshVideos'));
+    assert.deepEqual(page.errors,[]);
+  }finally{await page.close();}
+});
+
+test('missing and failed covers keep titles and file availability visible',async()=>{
+  const page=await open({videoItems:[
+    {id:'cover:none',title:'保留没有封面的本地视频',source:'本地视频',available:true,deletable:true},
+    {id:'cover:broken',title:'封面读取失败仍可识别',source:'B站',available:true,deletable:true,thumbnail_url:'data:image/png;base64,AAAA'},
+    {id:'file:missing',title:'已经移走的视频',available:false,deletable:true},
+  ]});
+  try{
+    await page.waitForSelector('.video-card[data-video-id="cover:broken"].has-no-cover');
+    await page.mouse.move(0,0);
+    const layout=await page.locator('.video-card').evaluateAll(cards=>cards.map(node=>{
+      const cover=node.querySelector('.video-cover'), info=node.querySelector('.video-info');
+      const bounds=cover.getBoundingClientRect(), label=info.getBoundingClientRect();
+      return {opacity:getComputedStyle(info).opacity,position:getComputedStyle(info).position,ratio:bounds.width/bounds.height,below:label.top>=bounds.bottom};
+    }));
+    assert(layout.every(item=>item.opacity==='1' && item.position==='static' && item.below),'fallback text is always readable below the cover '+JSON.stringify(layout));
+    assert(layout.every(item=>Math.abs(item.ratio-16/9)<0.04),'fallbacks reserve the landscape cover area');
+    assert.equal(await page.locator('.video-cover-note:visible').count(),2);
+    assert(await page.locator('.video-card[data-video-id="file:missing"] .video-cover').isDisabled());
+    assert.equal(await page.locator('.video-card[data-video-id="file:missing"] .video-meta').textContent(),'文件不可用');
+    await page.locator('.video-card[data-video-id="file:missing"] .video-menu-trigger').click();
+    assert(await page.getByRole('menuitem',{name:'删除',exact:true}).isEnabled());
     assert.deepEqual(page.errors,[]);
   }finally{await page.close();}
 });

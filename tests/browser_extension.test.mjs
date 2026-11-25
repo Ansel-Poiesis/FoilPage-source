@@ -22,6 +22,7 @@ function createFixtureConsole() {
 const APP_VERSION = (
   await readFile(new URL("../app/bridge.py", import.meta.url), "utf8")
 ).match(/APP_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/)[1];
+const contractSource = await readFile(new URL("../browser-extension/ui-contract.js", import.meta.url), "utf8");
 
 const storage = {};
 globalThis.chrome = {
@@ -113,7 +114,7 @@ test("popup offers a page-level download fallback without extra permissions", as
   assert.match(popupJs, /bilibili/);
   assert.match(popupJs, /douyin/);
   assert.match(popupJs, /isYoutube/);
-  assert.match(popupJs, /YouTube（本地下载）/);
+  assert.match(popupJs, /isYoutube \? "YouTube"/);
   assert.match(popupJs, /shengjian-page-submit/);
   // 兑底不要求新增权限：弹窗读当前标签依赖 activeTab（用户点图标即授予）。
   const manifest = JSON.parse(await readFile(new URL("../browser-extension/manifest.json", import.meta.url), "utf8"));
@@ -141,7 +142,7 @@ test("manifest requests only the scoped authorization capability", async () => {
   assert.equal(manifest.content_scripts.length, 4);
   assert.deepEqual(manifest.content_scripts[0], {
     matches: ["https://*.douyin.com/*", "https://douyin.com/*"],
-    js: ["douyin-hosts.js", "content.js"], css: ["content.css"], run_at: "document_start",
+    js: ["douyin-hosts.js", "content.js"], css: ["brand.css", "content.css"], run_at: "document_start",
   });
   // MAIN-world partner observes the page's own aweme detail/feed JSON so the
   // extension can still see a progressive MP4 when the logged-in player hands
@@ -154,7 +155,7 @@ test("manifest requests only the scoped authorization capability", async () => {
   // B 站内容脚本只提交页面 URL 走本地 yt-dlp 轨，不声明 cookies 用途。
   assert.deepEqual(manifest.content_scripts[2], {
     matches: ["https://*.bilibili.com/*", "https://bilibili.com/*"],
-    js: ["content-bili.js"], css: ["content-bili.css"], run_at: "document_idle",
+    js: ["ui-contract.js", "content-bili.js"], css: ["brand.css", "content-bili.css"], run_at: "document_idle",
   });
   assert.doesNotMatch(JSON.stringify(manifest), /webRequest|debugger|douyinvod|bytecdn/iu);
   for (const relativePath of Object.values(manifest.icons)) {
@@ -936,6 +937,7 @@ test("bilibili page helper extracts video ids and never touches cookies", async 
   sandbox.window.top = sandbox;
   sandbox.window.addEventListener = () => {};
   vm.createContext(sandbox);
+  vm.runInContext(contractSource, sandbox, { filename: "ui-contract.js" });
   vm.runInContext(source, sandbox, { filename: "content-bili.js" });
   const internals = sandbox.__shengjianBiliInternals;
   assert.ok(internals?.videoIdFromLocation, "content-bili.js must expose videoIdFromLocation");
@@ -1053,6 +1055,42 @@ test("MAIN observes favorite and collection video responses but ignores account 
   assert.equal(sandbox.document.documentElement.dataset.shengjianMainApiRequests, "2");
   assert.equal(sandbox.document.documentElement.dataset.shengjianMainMediaItems, "2");
   assert.equal(posted.flatMap(({message}) => Array.from(message.items)).length, 2);
+});
+
+test("MAIN timestamps observations once and preserves their order across a replay before flush", async () => {
+  const {sandbox, posted} = buildMainWorldSandbox();
+  let now = 100;
+  sandbox.Date = class extends Date { static now() { return now; } };
+  vm.createContext(sandbox);
+  vm.runInContext(await readFile(new URL("../browser-extension/content-main.js", import.meta.url), "utf8"), sandbox);
+  const {offer, flush, replayCapture, captureArchive} = sandbox.__shengjianMainInternals;
+  const nonce = sandbox.document.documentElement.dataset.shengjianMainNonce;
+  const videoId = "7695284409359944995";
+  const snapshot = JSON.stringify({aweme_detail: {aweme_id: videoId,
+    video: {play_addr: {url_list: ["https://v26.douyinvod.com/sample.mp4"]}}}});
+  offer(snapshot);
+  offer(snapshot); // The clock has not advanced between two distinct observations.
+  now++;
+  assert.equal(replayCapture({nonce, videoId}), true);
+  flush();
+  const [replay, live] = posted.map(({message}) => message.items);
+  assert.ok(Number.isSafeInteger(live[0].captureRevision) && live[0].captureRevision > 0);
+  assert.ok(live[1].captureRevision > live[0].captureRevision);
+  assert.equal(replay[0].captureRevision, live[1].captureRevision);
+  assert.equal(replay[0].capturedAt, 100);
+  assert.equal(live[1].capturedAt, 100);
+
+  const ttl = 120 * 60 * 1000;
+  now = 100 + ttl;
+  assert.equal(replayCapture({nonce, videoId}), true);
+  now++;
+  assert.equal(replayCapture({nonce, videoId}), false);
+  assert.equal(captureArchive.has(videoId), false);
+  offer(snapshot);
+  flush();
+  const replacement = posted.at(-1).message.items[0];
+  assert.equal(replacement.capturedAt, now);
+  assert.ok(replacement.captureRevision > live[1].captureRevision);
 });
 
 test("MAIN pending budget keeps the selected video through later feed responses", async () => {
@@ -1487,7 +1525,7 @@ test("content hands missing MAIN hook to the authorized resolver instead of stop
   assert.equal(button.disabled, false, "button becomes available after background acknowledgement");
 });
 
-test("capture retry guidance appears only with a submitted or terminal failure notice", async () => {
+test("page acknowledges clicks synchronously and offers capture retry guidance only on final failure", async () => {
   const source = await readFile(new URL("../browser-extension/content.js", import.meta.url), "utf8");
   const hosts = await readFile(new URL("../browser-extension/douyin-hosts.js", import.meta.url), "utf8");
   const pageUrl = "https://www.douyin.com/video/7673838983419530149";
@@ -1513,16 +1551,17 @@ test("capture retry guidance appears only with a submitted or terminal failure n
     else callback?.({ ok: true });
   };
   successSandbox.__shengjianContentInternals.submit({ disabled: false, classList: { add() {}, remove() {} } }, "download");
+  assert.deepEqual(successSandbox.__toastMessages, ["正在提交…"], "click feedback precedes the asynchronous submission");
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(successSandbox.__toastMessages.length, 1, "the initiating page shows accepted status if the background toast was lost");
-  assert.match(successSandbox.__toastMessages[0], /^已提交下载（若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。）$/);
+  assert.equal(successSandbox.__toastMessages.length, 2, "the initiating page shows accepted status if the background toast was lost");
+  assert.equal(successSandbox.__toastMessages[1], "已提交下载");
   sendToast(successSandbox, { type: "shengjian-toast", taskUrl: pageUrl, stage: "progress", message: "正在解析" });
-  assert.equal(successSandbox.__toastMessages.length, 1, "progress remains hidden on Douyin");
+  assert.equal(successSandbox.__toastMessages.length, 2, "progress remains hidden on Douyin");
   sendToast(successSandbox, { type: "shengjian-toast", taskUrl: pageUrl, taskId: "abc123def456", stage: "submitted", message: "已提交下载" });
-  assert.equal(successSandbox.__toastMessages.length, 1, "the later broadcast is acknowledged without duplicating the fallback receipt");
+  assert.equal(successSandbox.__toastMessages.length, 2, "the later broadcast is acknowledged without duplicating the fallback receipt");
   sendToast(successSandbox, { type: "shengjian-toast", taskUrl: pageUrl, taskId: "abc123def456", stage: "download", message: "下载成功" });
-  assert.equal(successSandbox.__toastMessages.length, 2, "the matching video's success remains a single clean notice");
-  assert.equal(successSandbox.__toastMessages[1], "下载成功");
+  assert.equal(successSandbox.__toastMessages.length, 3, "the matching video's success remains a single clean notice");
+  assert.equal(successSandbox.__toastMessages[2], "下载成功");
 
   const failureSandbox = buildContentSandboxV2();
   loadContent(failureSandbox);
@@ -1534,10 +1573,10 @@ test("capture retry guidance appears only with a submitted or terminal failure n
   };
   failureSandbox.__shengjianContentInternals.submit({ disabled: false, classList: { add() {}, remove() {} } }, "download");
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(failureSandbox.__toastMessages, [], "background owns the single submission-failure notice");
+  assert.deepEqual(failureSandbox.__toastMessages, ["正在提交…"], "background owns the single submission-failure notice");
   sendToast(failureSandbox, { type: "shengjian-toast", taskUrl: pageUrl, taskId: "sj_request_1", stage: "failure", error: true, message: "下载未能提交" });
-  assert.equal(failureSandbox.__toastMessages.length, 1);
-  assert.match(failureSandbox.__toastMessages[0], /下载未能提交（若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。）$/);
+  assert.equal(failureSandbox.__toastMessages.length, 2);
+  assert.match(failureSandbox.__toastMessages[1], /下载未能提交（若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。）$/);
 
   const broadcastFirstSandbox = buildContentSandboxV2();
   loadContent(broadcastFirstSandbox);
@@ -1551,7 +1590,7 @@ test("capture retry guidance appears only with a submitted or terminal failure n
   };
   broadcastFirstSandbox.__shengjianContentInternals.submit({ disabled: false, classList: { add() {}, remove() {} } }, "download");
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(broadcastFirstSandbox.__toastMessages.length, 1, "broadcast-first and response-first paths both show one receipt");
+  assert.equal(broadcastFirstSandbox.__toastMessages.length, 2, "broadcast-first and response-first paths both show one receipt");
 
   const directFailureSandbox = buildContentSandboxV2();
   loadContent(directFailureSandbox);
@@ -1563,8 +1602,8 @@ test("capture retry guidance appears only with a submitted or terminal failure n
   };
   directFailureSandbox.__shengjianContentInternals.submit({ disabled: false, classList: { add() {}, remove() {} } }, "download");
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(directFailureSandbox.__toastMessages.length, 1, "a direct terminal rejection emits one error notice");
-  assert.match(directFailureSandbox.__toastMessages[0], /请先在扩展中连接 FoilPage（若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。）$/);
+  assert.equal(directFailureSandbox.__toastMessages.length, 2, "a direct terminal rejection emits one error notice");
+  assert.match(directFailureSandbox.__toastMessages[1], /请先在扩展中连接 FoilPage（若这次未完成：留在当前抖音视频页，按 F5 刷新；等待视频画面加载后，再点「下载」。）$/);
 });
 
 test("favorite modal id overrides an unrelated active feed and never borrows its player URL", async () => {
@@ -1764,7 +1803,7 @@ test("background wires the fallback policy and asks every douyin tab for fresh m
   assert.match(background, /String\(response\.videoId \|\| ""\) === String\(expectedVideoId\)/);
   assert.match(background, /await askTabsForFreshMedia\(expectedVideoId\)/);
   // 只有 play 端点、无媒体地址的应答同样有效（此前会被当成无效应答丢弃）。
-  assert.match(background, /!response\?\.mediaUrl && !response\?\.playUrl/);
+  assert.match(background, /const hasMedia = response\.mediaUrl \|\| response\.playUrl/);
 });
 
 // ---------------------------------------------------------------------------
@@ -1834,6 +1873,13 @@ test("Douyin feedback ignores progress and other videos while accepting two rece
   assert.equal(button.title,"已提交下载");
   listener({...event,stage:"download",message:"下载成功"});
   assert.equal(button.title,"下载成功");
+  const retryJob = {...event,taskId:"faced00d1234"};
+  listener({...retryJob,stage:"fallback",message:"正在重试下载"});
+  assert.equal(button.title,"正在重试下载");
+  listener({...retryJob,stage:"failure",error:true,message:"下载失败"});
+  listener({...retryJob,stage:"download",message:"下载成功"});
+  listener({...retryJob,stage:"failure",error:true,message:"迟到的失败"});
+  assert.equal(button.title,"下载成功","successful import supersedes a previous failure for the same receipt");
 });
 
 test("content gates duplicate downloads behind a confirm card", async () => {
@@ -2005,6 +2051,7 @@ test("bilibili pill maps backend progress texts onto pill states", async () => {
   sandbox.window.top = sandbox;
   sandbox.window.addEventListener = () => {};
   vm.createContext(sandbox);
+  vm.runInContext(contractSource, sandbox, { filename: "ui-contract.js" });
   vm.runInContext(source, sandbox, { filename: "content-bili.js" });
   const internals = sandbox.__shengjianBiliInternals;
   assert.ok(internals?.pillStatusFor, "content-bili.js must expose pillStatusFor");
@@ -2100,13 +2147,17 @@ test("youtube page helper extracts video ids across watch/shorts/youtu.be", asyn
     sandbox.window = sandbox;
     sandbox.window.top = sandbox;
     sandbox.window.addEventListener = () => {};
+    vm.createContext(sandbox);
     return sandbox;
+  };
+  const loadYoutube = sandbox => {
+    vm.runInContext(contractSource, sandbox, { filename: "ui-contract.js" });
+    vm.runInContext(source, sandbox, { filename: "content-youtube.js" });
   };
 
   // watch 页：从 query 提取 v 并给出规范 watch URL。
   const watch = buildSandbox("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLxyz&t=42s");
-  vm.createContext(watch);
-  vm.runInContext(source, watch, { filename: "content-youtube.js" });
+  loadYoutube(watch);
   const internals = watch.__shengjianYoutubeInternals;
   assert.ok(internals?.videoIdFromLocation, "content-youtube.js must expose videoIdFromLocation");
   assert.equal(internals.videoIdFromLocation(), "dQw4w9WgXcQ");
@@ -2115,18 +2166,15 @@ test("youtube page helper extracts video ids across watch/shorts/youtu.be", asyn
 
   // Shorts / youtu.be 短链 / 非视频页。
   const shorts = buildSandbox("https://www.youtube.com/shorts/abcdefghijk");
-  vm.createContext(shorts);
-  vm.runInContext(source, shorts, { filename: "content-youtube.js" });
+  loadYoutube(shorts);
   assert.equal(shorts.__shengjianYoutubeInternals.videoIdFromLocation(), "abcdefghijk");
 
   const shortLink = buildSandbox("https://youtu.be/dQw4w9WgXcQ?si=tag");
-  vm.createContext(shortLink);
-  vm.runInContext(source, shortLink, { filename: "content-youtube.js" });
+  loadYoutube(shortLink);
   assert.equal(shortLink.__shengjianYoutubeInternals.videoIdFromLocation(), "dQw4w9WgXcQ");
 
   const home = buildSandbox("https://www.youtube.com/feed/subscriptions");
-  vm.createContext(home);
-  vm.runInContext(source, home, { filename: "content-youtube.js" });
+  loadYoutube(home);
   assert.equal(home.__shengjianYoutubeInternals.videoIdFromLocation(), "");
 
   // 状态语言与 B 站同构：错误 → 可操作文案；JS 运行时缺失有专门提示。
@@ -2148,6 +2196,8 @@ test("manifest registers youtube content script with least-privilege hosts", asy
   assert.ok(youtubeEntry, "content-youtube.js must be registered in the manifest");
   assert.deepEqual(youtubeEntry.matches, ["https://www.youtube.com/*", "https://m.youtube.com/*", "https://youtu.be/*"]);
   assert.ok(youtubeEntry.css?.includes("content-youtube.css"), "youtube entry must carry its stylesheet");
+  assert.equal(youtubeEntry.js[0], "ui-contract.js");
+  assert.equal(youtubeEntry.css[0], "brand.css");
   for (const host of youtubeEntry.matches) {
     assert.ok(manifest.host_permissions.includes(host), `host_permissions must include ${host}`);
   }
@@ -2166,9 +2216,9 @@ test("manifest registers youtube content script with least-privilege hosts", asy
 // ---------------------------------------------------------------------------
 test("bili and youtube pills share one notification state language", async () => {
   const read = (name) => readFile(new URL(`../browser-extension/${name}`, import.meta.url), "utf8");
-  const [biliCss, ytCss, douyinCss, biliJs, ytJs, popupCss] = await Promise.all([
+  const [biliCss, ytCss, douyinCss, biliJs, ytJs, popupCss, contract] = await Promise.all([
     read("content-bili.css"), read("content-youtube.css"), read("content.css"),
-    read("content-bili.js"), read("content-youtube.js"), read("popup.css"),
+    read("content-bili.js"), read("content-youtube.js"), read("popup.css"), read("ui-contract.js"),
   ]);
 
   // 状态语言：百分比态只留数字（隐藏文字）。
@@ -2198,17 +2248,17 @@ test("bili and youtube pills share one notification state language", async () =>
     assert.match(css, /prefers-reduced-motion/);
   }
 
-  // 驻留口径：两站同一公式，按内容长度伸缩（短确认 2-4s / 错误 4-8s / 完成 4.5s）。
+  // 两站只保留 DOM 生命周期，状态解析与驻留公式由同一纯契约拥有。
   for (const js of [biliJs, ytJs]) {
-    assert.match(js, /function pillHoldFor\(/, "pills must compute hold from content length");
-    assert.match(js, /clamp\(2600 \+ 280 \* len, 4000, 8000\)/, "error hold must scale 4-8s");
-    assert.match(js, /clamp\(1200 \+ 220 \* len, 2000, 4000\)/, "text hold must scale 2-4s");
-    assert.doesNotMatch(js, /PILL_HOLD_MS = \{ text:/, "static hold durations must be gone");
+    assert.match(js, /const \{pillStatusFor, pillHoldFor, PILL_HOLD_MS\} = globalThis\.FoilPageContract/);
+    assert.doesNotMatch(js, /function pill(?:Status|Hold)For\(/);
     assert.doesNotMatch(js, /text\.slice\(0,\s*12\)/, "fallback must not hard-truncate into broken phrases");
-    // 关键分类两站齐备（导入失败/回原页/JS 运行时/已合并/换通道）。
-    for (const phrase of ["已下载，导入 FoilPage 失败", "请回原视频页重试", "需 JavaScript 运行时，见 FoilPage 设置", "已在处理中", "已换通道重试"]) {
-      assert.ok(js.includes(phrase), `missing shared classification: ${phrase}`);
-    }
+  }
+  assert.match(contract, /function pillHoldFor\(/);
+  assert.match(contract, /clamp\(2600 \+ 280 \* length, 4000, 8000\)/, "error hold must scale 4-8s");
+  assert.match(contract, /clamp\(1200 \+ 220 \* length, 2000, 4000\)/, "text hold must scale 2-4s");
+  for (const phrase of ["已下载，导入 FoilPage 失败", "请回原视频页重试", "需 JavaScript 运行时，见 FoilPage 设置", "已在处理中", "已换通道重试"]) {
+    assert.ok(contract.includes(phrase), `missing shared classification: ${phrase}`);
   }
 
   // 抖音页内通知已统一走 Shadow DOM 信息窗：content.css 不再有页内通知样式。
@@ -2388,7 +2438,7 @@ test("submission failure notices always carry actionable guidance", async () => 
   await import("../browser-extension/background.js");
   const notice = globalThis.__shengjianBackgroundInternals.submissionFailureNotice;
   const cases = [
-    [{ code: "douyin_verification_required" }, "播放 2 秒"],
+    [{ code: "douyin_verification_required" }, "完成验证"],
     [{ code: "local_api_unavailable" }, "FoilPage 桌面端未连接"],
     [{ code: "whatever", message: "平台校验拦截" }, "FoilPage 任务页"],
     [{}, "FoilPage 桌面端正在运行"],
@@ -2433,21 +2483,20 @@ test("repeat transcribe gets instant feedback and fallback start reassures the p
   assert.match(content, /check\.activeTranscribing/);
   assert.match(background, /const activeTranscribing = activeJobs\.some/);
   // 首错换道安抚：每任务一次，经 fallback stage 放行抖音页
-  assert.match(background, /别急，正在尝试其他下载办法/);
+  assert.match(background, /正在重试下载/);
   assert.match(background, /\["submitted", "download", "fallback"\]/);
   assert.match(background, /fallbackReassured/);
 });
 
 test("offline click shows the launch card instead of silence and video pages never lose controls", async () => {
   const content = await readFile(new URL("../browser-extension/content.js", import.meta.url), "utf8");
-  // ① 桌面未连接：queued 回执必须弹「启动 FoilPage」卡（foilpage:// 协议，
-  // 2026-11-16 品牌统一；同视频 60s 冷却防连点弹卡），不再静默
-  assert.match(content, /if \(acceptedJob\.queued\) \{\s*showOfflineLaunchCard/);
+  // Both a queued receipt and a rejected pairing can lead to a desktop launch.
+  assert.match(content, /if \(acceptedJob\.queued \|\| acceptedJob\.waiting_connection\) \{\s*showOfflineLaunchCard/);
   assert.match(content, /foilpage:\/\/launch/);
-  assert.match(content, /offlineCardShownAt/);
+  assert.match(content, /needs_connection.*showOfflineLaunchCard/);
   assert.match(content, /FoilPage 桌面端未连接/);
-  assert.match(content, /任务已暂存到扩展/);
-  assert.match(content, /若仍未开始，请在扩展弹窗查看任务状态/);
+  assert.match(content, /任务已保留/);
+  assert.match(content, /"打开 FoilPage"/);
   // ② 视频页结构识别失败时浮动兜底，不再移除按钮
   assert.match(content, /视频页绝不能没有入口/);
   assert.match(content, /container: document\.body, anchor: null, floating: true/);
@@ -2741,4 +2790,190 @@ test("modal target may adopt a fresh unbound media url while playing", async () 
   sandbox.location.search = "";
   sandbox.document.querySelector = () => ({ readyState: 4, paused: false });
   assert.equal(internals.capturedMediaUrl("7673838983419530149"), "");
+});
+
+test("new MAIN media snapshots replace the old renditions and reject older replays", async () => {
+  const sandbox = buildContentSandboxV2();
+  sandbox.location.origin = "https://www.douyin.com";
+  vm.createContext(sandbox);
+  for (const script of ["douyin-hosts.js", "content.js"]) {
+    vm.runInContext(await readFile(new URL(`../browser-extension/${script}`, import.meta.url), "utf8"), sandbox);
+  }
+  const api = sandbox.__shengjianContentInternals;
+  const target = "7673838983419530149";
+  const neighbor = "1234567890123456";
+  const media = label => [1, 2, 3].map(n => `https://v26-web.douyinvod.com/${label}-${n}.mp4`);
+  const snapshot = (videoId, captureRevision, label, capturedAt = Date.now()) => ({
+    videoId, captureRevision, capturedAt, candidates: media(label),
+    playUrl: `https://www.douyin.com/aweme/v1/play/?target=${videoId}&variant=${label}`,
+  });
+  const publish = (...items) => api.acceptMainWorldCapture({
+    origin: sandbox.location.origin, data: {source:"shengjian-media-capture",nonce:"test-nonce",items},
+  });
+  const fresh = videoId => {
+    let result;
+    sandbox.__messageListeners[0]({type:"shengjian-fresh-media",videoId}, {}, reply => {result = reply;});
+    return result;
+  };
+  const old = snapshot(target, 3, "old"), newest = snapshot(target, 6, "new");
+  publish(old, snapshot(neighbor, 4, "other"), newest);
+  publish(snapshot(target, 5, "late"), old, snapshot(target, undefined, "legacy"), snapshot(target, 7, "expired", Date.now() - 7200001));
+  assert.deepEqual(Array.from(fresh(target).mediaCandidates), media("new"));
+  assert.equal(fresh(target).playUrl, newest.playUrl);
+  assert.equal(fresh(target).activeTarget, true);
+  assert.deepEqual(Array.from(fresh(neighbor).mediaCandidates), media("other"));
+  assert.equal(fresh(neighbor).activeTarget, false);
+
+  const partial = snapshot(target, 8, "partial");
+  partial.candidates.length = 1;
+  publish(partial);
+  assert.deepEqual(Array.from(fresh(target).mediaCandidates), [partial.candidates[0], ...newest.candidates.slice(0, 2)]);
+  sandbox.document.documentElement.dataset.shengjianMainNonce = "restarted";
+  api.acceptMainWorldCapture({origin:sandbox.location.origin,data:{
+    source:"shengjian-media-capture",nonce:"restarted",items:[snapshot(target, 1, "restarted")],
+  }});
+  assert.deepEqual(Array.from(fresh(target).mediaCandidates), media("restarted"));
+});
+
+test("SSR supplements MAIN without restoring an old signature or relabelling a neighboring player's media", async () => {
+  const sandbox = buildContentSandboxV2();
+  sandbox.location.origin = "https://www.douyin.com";
+  vm.createContext(sandbox);
+  for (const script of ["douyin-hosts.js", "content.js"]) {
+    vm.runInContext(await readFile(new URL(`../browser-extension/${script}`, import.meta.url), "utf8"), sandbox);
+  }
+  const api = sandbox.__shengjianContentInternals;
+  const id = "7673838983419530149", neighbor = "1234567890123456";
+  const media = "https://v26-web.douyinvod.com/target.mp4";
+  const extra = "https://v3-web.douyinvod.com/alternative.mp4";
+  const play = `https://www.douyin.com/aweme/v1/play/?target=${id}`;
+  const script = {textContent: JSON.stringify({aweme_id:id,video:{play_addr:{url_list:[media+"?v=old",extra,play+"&v=old"]}}})};
+  const ambiguousScript = {textContent: `window.data = {"aweme_id":"${neighbor}","other":"https://v26-web.douyinvod.com/unrelated.mp4"};`};
+  const query = sandbox.document.querySelectorAll;
+  sandbox.document.querySelectorAll = selector => selector === "script" ? [script, ambiguousScript] : query(selector);
+  api.scanEmbeddedStates();
+  api.acceptMainWorldCapture({origin:sandbox.location.origin,data:{
+    source:"shengjian-media-capture",nonce:"test-nonce",items:[
+      {videoId:id,captureRevision:1,candidates:[media+"?v=new"],playUrl:play+"&v=new"},
+    ],
+  }});
+  api.scanEmbeddedStates();
+  api.scanEmbeddedStates();
+  assert.deepEqual(Array.from(api.capturedMediaCandidates(id)), [media+"?v=new",extra]);
+  assert.equal(api.playEndpointFor(id),play+"&v=new");
+  api.rememberCapture("https://v3-web.douyinvod.com/unbound.mp4");
+  const fresh = videoId => {
+    let result;
+    sandbox.__messageListeners[0]({type:"shengjian-fresh-media",videoId},{},reply => {result=reply;});
+    return result;
+  };
+  assert.equal(fresh(id).mediaUrl,media+"?v=new");
+  assert.equal(fresh(neighbor).ok,false);
+  assert.equal(fresh(neighbor).mediaUrl,"");
+  assert.deepEqual(Array.from(fresh(neighbor).mediaCandidates),[]);
+});
+
+test("switching videos clears both reused controls' old failure descriptions", async () => {
+  const sandbox = buildContentSandboxV2();
+  const labels = ["下载当前视频", "转写当前视频"];
+  const buttons = labels.map(label => ({title:label, getAttribute:key => key === "aria-label" ? label : null}));
+  const query = sandbox.document.querySelectorAll;
+  sandbox.document.querySelectorAll = selector => selector === ".shengjian-player-button" ? buttons : query(selector);
+  sandbox.document.body.querySelector = () => ({parentElement:sandbox.document.body, classList:{add(){}, toggle(){}, remove(){}}});
+  sandbox.getComputedStyle = () => ({position:"relative"});
+  let sync;
+  sandbox.requestAnimationFrame = fn => {sync = fn;};
+  vm.createContext(sandbox);
+  for (const file of ["douyin-hosts.js", "content.js"]) {
+    vm.runInContext(await readFile(new URL(`../browser-extension/${file}`, import.meta.url),"utf8"),sandbox);
+  }
+  const dispatch = sandbox.__messageListeners[0];
+  const oldFailure = {type:"shengjian-toast",stage:"failure",taskId:"abc123def456",error:true,message:"旧视频失败",
+    taskUrl:"https://www.douyin.com" + sandbox.location.pathname};
+  dispatch(oldFailure, {}, () => {});
+  assert.deepEqual(buttons.map(button => button.title),["旧视频失败","旧视频失败"]);
+  sandbox.location.pathname = "/video/1234567890123456";
+  sync();
+  dispatch(oldFailure, {}, () => {});
+  assert.deepEqual(buttons.map(button => button.title),labels);
+});
+
+// ---------------------------------------------------------------------------
+// 先生 2026-11-18 风控波：刷新捕获（页面自己的 detail 请求重放）与候选
+// 新鲜度排序。旧签名在风控波期间几乎必死，回退通道要的是未参与过被拒
+// 请求的新签名。
+// ---------------------------------------------------------------------------
+
+test("MAIN refresh replays the page's own detail request through the capture pipeline", async () => {
+  const detailPayload = JSON.stringify({aweme_detail:{
+    aweme_id:"7691206606389808419",
+    video:{play_addr:{url_list:["https://v26.douyinvod.com/refresh-signed.mp4"]}},
+  }});
+  const fetched = [];
+  const sandboxKit = buildMainWorldSandbox();
+  sandboxKit.sandbox.window.fetch = sandboxKit.sandbox.fetch = async (url, init) => {
+    fetched.push({url: String(url), credentials: init?.credentials});
+    return {ok: true, async text() { return detailPayload; }};
+  };
+  const {sandbox, posted, timers} = sandboxKit;
+  vm.createContext(sandbox);
+  vm.runInContext(await readFile(new URL("../browser-extension/content-main.js", import.meta.url), "utf8"), sandbox);
+  const nonce = sandbox.document.documentElement.dataset.shengjianMainNonce;
+  const detailUrl = "https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=7691206606389808419&a_bogus=fixture";
+  sandbox.__shengjianMainInternals.rememberDetailRequest(detailUrl);
+  const result = await sandbox.__shengjianMainInternals.refreshCapture({nonce, videoId: "7691206606389808419"});
+  assert.equal(result.ok, true);
+  assert.equal(fetched.length, 1);
+  assert.equal(fetched[0].url, detailUrl);
+  assert.equal(fetched[0].credentials, "include");
+  for (const timer of timers) timer();
+  const delivered = posted.filter(entry => entry.message?.source === "shengjian-media-capture");
+  assert.ok(delivered.some(entry => entry.message.items.some(item =>
+    item.videoId === "7691206606389808419"
+    && item.candidates.includes("https://v26.douyinvod.com/refresh-signed.mp4"))));
+});
+
+test("MAIN refresh declines without a recent detail request or a bad nonce", async () => {
+  const {sandbox} = buildMainWorldSandbox();
+  vm.createContext(sandbox);
+  vm.runInContext(await readFile(new URL("../browser-extension/content-main.js", import.meta.url), "utf8"), sandbox);
+  const nonce = sandbox.document.documentElement.dataset.shengjianMainNonce;
+  const missing = await sandbox.__shengjianMainInternals.refreshCapture({nonce, videoId: "7691206606389808419"});
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reason, "no_recent_detail_request");
+  const badNonce = await sandbox.__shengjianMainInternals.refreshCapture({nonce: "wrong", videoId: "7691206606389808419"});
+  assert.equal(badNonce, false);
+});
+
+test("capture candidates order by freshness with stale signatures demoted", async () => {
+  const sandbox = buildContentSandboxV2();
+  sandbox.location.origin = "https://www.douyin.com";
+  vm.createContext(sandbox);
+  for (const script of ["douyin-hosts.js", "content.js"]) {
+    vm.runInContext(await readFile(new URL(`../browser-extension/${script}`, import.meta.url), "utf8"), sandbox);
+  }
+  const api = sandbox.__shengjianContentInternals;
+  const target = "7673838983419530149";
+  const now = Date.now();
+  const entry = (name, ageMs, fromMain) => ({
+    url: `https://v26-web.douyinvod.com/${name}.mp4`, at: now - ageMs, rank: 3, fromMain,
+  });
+  api.capturedByTarget.set(target, {
+    url: "", at: now, playUrl: "", playAt: 0,
+    candidates: [
+      entry("stale-main", 15 * 60 * 1000, true),
+      entry("fresh-ssr", 2000, false),
+      entry("fresh-main", 1000, true),
+    ],
+  });
+  assert.deepEqual(api.capturedMediaCandidates(target), [
+    "https://v26-web.douyinvod.com/fresh-main.mp4",
+    "https://v26-web.douyinvod.com/fresh-ssr.mp4",
+    "https://v26-web.douyinvod.com/stale-main.mp4",
+  ]);
+  const ages = api.capturedCandidateAgesMs(target);
+  assert.equal(ages.length, 3);
+  assert.ok(ages[0] <= 2000 && ages[2] > 10 * 60 * 1000);
+  // 无 MAIN 世界（无 nonce）时刷新立即降级，不阻塞提交链路。
+  assert.equal((await api.requestCaptureRefresh(target, 50)).ok, false);
 });

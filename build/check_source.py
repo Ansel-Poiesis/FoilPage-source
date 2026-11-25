@@ -18,7 +18,8 @@ SECRET_PATTERNS = [
 
 def main():
     files = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
-    files = [Path(name) for name in files if name]
+    # Deleted tracked paths are not part of the current source distribution.
+    files = [Path(name) for name in files if name and (ROOT / name).is_file()]
     failures = []
     if not files:
         failures.append('Source files must be tracked before verification')

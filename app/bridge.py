@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.controller import AppController
-from app.bridge_account import AccountBridgeMixin, _safe_progress
+from app.bridge_account import AccountBridgeMixin
+from app.bridge_postprocess import PostprocessBridgeMixin, _prefixed_ids
 from engine.agent_protocol import document_revision
 from app.data_health import reconcile
 from app.maintenance import (
@@ -40,6 +41,7 @@ from app.maintenance import (
     import_backup as _import_backup,
 )
 from engine.media import find_external_media_player, probe_video_codecs
+from engine import service_http
 from engine.service_http import payment_service_headers
 from engine.subscription import activate_local, checkout, plans, status as subscription_status
 
@@ -49,7 +51,7 @@ log = logging.getLogger(__name__)
 ACTIVE_STATUSES = {"queued", "running", "retryable", "received", "resolving", "awaiting_browser", "downloading", "imported", "transcribing"}
 TERMINAL_STATUSES = {"done", "failed", "cancelled"}
 
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.1.6"
 RELEASE_CHANNEL = "formal"
 UPDATE_URL = "https://api.github.com/repos/Ansel-Poiesis/FoilPage-source/releases/latest"
 
@@ -308,13 +310,6 @@ def _safe_task_error_details(error: object) -> dict[str, Any] | None:
     return result
 
 
-def _prefixed_ids(task_ids: list, prefix: str) -> list[str]:
-    """提取指定前缀的任务 id；过滤非字符串，避免桥接层崩溃。"""
-    if not task_ids:
-        return []
-    return [t[len(prefix):] for t in task_ids if isinstance(t, str) and t.startswith(prefix)]
-
-
 _PASTED_URL_PATTERN = re.compile(
     r"https?://[^\s<>\"'\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]+",
     re.IGNORECASE,
@@ -328,6 +323,16 @@ def _extract_pasted_url(value: object) -> str:
     if not match:
         return text
     return match.group(0).rstrip(".,;:!?)]}）】》」』")
+
+
+def _safe_progress(value: object) -> float:
+    try:
+        num = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if num != num or num in (float("inf"), float("-inf")):
+        return 0.0
+    return round(max(0.0, min(1.0, num)), 4)
 
 
 def _task_progress_text(task: dict) -> str:
@@ -386,7 +391,7 @@ def _browser_extension_dir() -> Path:
     return base / "browser-extension"
 
 
-class Bridge(AccountBridgeMixin):
+class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
     def __init__(
         self,
         controller: AppController,
@@ -399,6 +404,7 @@ class Bridge(AccountBridgeMixin):
         notifier: Callable[[str, str], bool] | None = None,
         launch_context_provider: Callable[[], dict] | None = None,
         native_drag_provider: Callable[[], bool] | None = None,
+        postprocess_store=None,
     ) -> None:
         self.controller = controller
         self.worker = worker
@@ -412,6 +418,7 @@ class Bridge(AccountBridgeMixin):
         self._native_drag = native_drag_provider or (lambda: False)
         self._media_drop_element = None
         self._lock = threading.RLock()
+        self._init_postprocessing(postprocess_store)
         self._log: list[str] = []
         self._model_download = {
             "name": "",
@@ -419,16 +426,6 @@ class Bridge(AccountBridgeMixin):
             "progress": None,
             "error": "",
         }
-        self._batch_agent = {
-            "running": False,
-            "done": 0,
-            "skipped": 0,
-            "failed": 0,
-            "errors": [],
-            "message": "",
-        }
-        # TASK-8.24：单篇翻译任务态（同一时间仅一个翻译在跑，同批量整理）。
-        self._translation: dict = {"running": False, "task_id": "", "status": "", "error": "", "lang": ""}
         self._subscription_acceptance: dict | None = None
         self._subscription_service: dict | None = None
         self._subscription_service_base = ""
@@ -448,8 +445,11 @@ class Bridge(AccountBridgeMixin):
         self._product_sync_at = 0.0
         self._announcement_sync_at = 0.0
 
+
     # ---------------------------------------------------------------- state
     def _work_entry_error(self) -> dict | None:
+        if error := self._restore_entry_error():
+            return error
         from engine.account_access import AccountLoginRequired, require_account_access
         try:
             require_account_access(dict(self.controller.settings), self.settings_store.base_dir)
@@ -460,6 +460,12 @@ class Bridge(AccountBridgeMixin):
     def _processing_entry_error(self) -> dict | None:
         # TASK-8.29：解锁门槛下线，处理入口只保留登录校验（与 _work_entry_error 同口径）。
         return self._work_entry_error()
+
+    def _restore_entry_error(self) -> dict | None:
+        if getattr(self.controller, "_backup_restore_blocked", False) is True:
+            return {"ok": False, "code": "recovery_required", "error": "备份恢复尚未完成，请重启 FoilPage 继续恢复后再操作"}
+        return None
+
 
     def agent_operations_facade(self) -> dict:
         """Bind only the explicitly reviewed Agent operation registry."""
@@ -807,6 +813,25 @@ class Bridge(AccountBridgeMixin):
         with self._lock:
             all_downloads = self.controller.downloads.list(limit=100000)
             jobs = self.controller.queue.list_jobs()
+            # Import and enqueue persist canonical paths. Build the history
+            # index lexically so offline sources stay cheap to list.
+            source_keys: dict[str, str] = {}
+
+            def source_key(source: str) -> str:
+                if source not in source_keys:
+                    source_keys[source] = os.path.normcase(os.path.abspath(os.path.expanduser(source)))
+                return source_keys[source]
+
+            jobs_by_source: dict[str, list[str]] = {}
+            for job in jobs:
+                jobs_by_source.setdefault(source_key(job["source_path"]), []).append(f"job:{job['id']}")
+            downloads_by_media: dict[str, list[str]] = {}
+            for row in all_downloads:
+                if row.get("media_id"):
+                    links = downloads_by_media.setdefault(row["media_id"], [])
+                    links.append(f"dl:{row['id']}")
+                    if row.get("job_id"):
+                        links.append(f"job:{row['job_id']}")
             excluded = [row['source_path'] for row in jobs
                         if row['status'] in {'queued', 'running', 'retryable'}]
             excluded += [row.get('downloaded_path') for row in all_downloads
@@ -816,6 +841,9 @@ class Bridge(AccountBridgeMixin):
             items = []
             for media in self.controller.media.list_media(media_type="video"):
                 download = downloads.get(media["id"], {})
+                source = media["source_path"]
+                task_ids = list(dict.fromkeys(jobs_by_source.get(source_key(source), [])
+                                             + downloads_by_media.get(media["id"], [])))
                 available = Path(media["source_path"]).is_file()
                 try:
                     urls = self._preview_server().urls(media["id"]) if available else {}
@@ -826,6 +854,7 @@ class Bridge(AccountBridgeMixin):
                               "source": download.get("platform") or "本地导入", "source_url": download.get("url") or "",
                               "downloaded_at": download.get("updated_at") or media.get("created_at"),
                               "duration_seconds": media.get("duration_sec"), "available": available,
+                              "source_path": source, "task_ids": task_ids,
                               "thumbnail_url": urls.get("thumbnail_url", ""), **action})
             return {"ok": True, "items": items, "total": len(items), "scan": scan}
 
@@ -849,21 +878,7 @@ class Bridge(AccountBridgeMixin):
         active = active or any(row.get("media_id") == media["id"] and row.get("status") not in TERMINAL_STATUSES for row in downloads)
         if active:
             return {"deletable": False, "delete_label": "删除视频", "deletion_note": "视频正在转写，请在任务结束或取消后删除。"}
-        owned = False
-        for row in downloads:
-            if row.get("media_id") != media["id"] or not row.get("downloaded_path"):
-                continue
-            registered = Path(row["downloaded_path"]).expanduser().absolute()
-            root = (row.get("options") or {}).get("managed_download_root")
-            roots = [Path(self.controller.settings["download_dir"]), Path(self.settings_store.base_dir) / "downloads"]
-            if root:
-                roots.append(Path(root))
-            if (row.get("options") or {}).get("mode") == "browser" and path.parent.name == "FoilPage":
-                roots.append(path.parent)
-            original_hash = (row.get("options") or {}).get("download_content_sha256") or media.get("original_content_sha256")
-            if registered == path and path.resolve() == path and original_hash == media["content_sha256"] and any(r.expanduser().resolve() in path.parents for r in roots):
-                owned = True
-                break
+        owned = any(self.controller.is_managed_download(path, media, row) for row in downloads)
         available = path.is_file()
         label = "删除视频" if owned and available else ("从视频库移除" if available else "移除记录")
         note = ("删除下载的视频文件，保留转写任务与文本结果。" if owned and available else
@@ -1169,125 +1184,10 @@ class Bridge(AccountBridgeMixin):
         return status
 
     # ---------------------------------------------- 订阅服务端合同
-    def _apply_remote_account(self, result: dict, *, order_no: str = "",
-                              expected_session: str | None = None, expected_pending: str | None = None,
-                              expected_base: str | None = None, expected_revision: int | None = None,
-                              expected_profile_revision: int | None = None, expected_user_id: str | None = None,
-                              expected_beta_status: str | None = None) -> dict:
-        """Verify the signed license before updating account or balance locally."""
-        from engine.device import device_id
-        from engine.license import LicenseError, verify_license, signed_beta_access
-        settings = self.controller.settings
-        public_key = str(settings.get("subscription_license_public_key") or "").strip()
-        key = public_key or str(settings.get("subscription_verify_key") or "").strip()
-        if not key:
-            return {"ok": False, "error": "尚未配置许可证公钥"}
-        token = str(result.get("license_token") or "")
-        try:
-            payload = verify_license(token, signing_key=key,
-                expected_alg="EdDSA" if public_key else "HS256",
-                device_id=device_id(str(getattr(self.settings_store, "base_dir", "") or ".")))
-            account = result.get("account") or result.get("status") or {}
-            if not isinstance(account, dict):
-                raise ValueError("账户格式无效")
-            if account.get("user_id") and str(account["user_id"]) != payload["sub"]:
-                raise ValueError("账户与许可证不一致")
-            if expected_user_id is not None and payload["sub"] != expected_user_id:
-                raise ValueError("许可证与当前登录账户不一致")
-            if expected_beta_status is not None:
-                beta = signed_beta_access(payload)
-                if (expected_beta_status == "active" and beta["active"] is not True
-                        or expected_beta_status == "revoked" and beta["revoked"] is not True
-                        or expected_beta_status == "expired" and (beta["active"] or not beta["expires_at"]
-                            or datetime.fromisoformat(beta["expires_at"]) > datetime.now(timezone.utc))):
-                    raise ValueError("内测资格与签名许可证不一致")
-            balance = payload.get("credit_balance", 0)
-            if type(balance) is not int or balance < 0:
-                raise ValueError("积分余额无效")
-        except (LicenseError, TypeError, ValueError):
-            return {"ok": False, "error": "许可证校验失败，请检查服务配置"}
-        changes = {
-            "license_token": token, "license_expires_at": payload.get("exp"),
-            "subscription_plan": payload.get("plan_id") or "free",
-            "subscription_active": bool(account.get("active")),
-            "subscription_expires_at": account.get("expires_at"), "credit_balance": balance,
-        }
-        if result.get('account_access_token'):
-            from engine.account_access import account_access
-            access_settings = {**settings, **changes, 'account_user_id':payload['sub'],
-                'account_login_token':result.get('login_token') or settings.get('account_login_token') or '',
-                'account_access_token':result['account_access_token']}
-            if not account_access(access_settings, device_id=device_id(str(self.settings_store.base_dir)))['allowed']:
-                return {'ok':False,'error':'登录凭证校验失败，请重试'}
-            changes['account_access_token'] = result['account_access_token']
-        elif result.get('login_token') and result['login_token'] != settings.get('account_login_token'):
-            changes['account_access_token'] = ''
-        if result.get("login_token"):
-            changes["account_login_token"] = str(result["login_token"])
-            if expected_pending is not None or result['login_token'] != settings.get('account_login_token'):
-                changes["account_pending_login_token"] = ""
-        if account.get("user_id"):
-            changes["account_user_id"] = str(account["user_id"])
-            changes["account_display_name"] = str(account.get("display_name") or "爱发电账户")
-            from engine.account_profile import validate_avatar
-            try:
-                changes["account_avatar"] = validate_avatar(account.get("avatar") or "") or ""
-            except ValueError:
-                # A malformed image cannot turn a verified login into a failure.
-                changes["account_avatar"] = ""
-        if order_no:
-            changes["subscription_last_order_id"] = order_no
-        with self._lock:
-            current = self.controller.settings
-            if expected_revision is not None and self._account_revision != expected_revision:
-                return {"ok": False, "error": "登录请求已变更，已忽略旧响应"}
-            if expected_session is not None and str(current.get("account_login_token") or "") != expected_session:
-                return {"ok": False, "error": "账户已变更，已忽略旧响应"}
-            if expected_user_id is not None and str(current.get("account_user_id") or "").strip() != expected_user_id:
-                return {"ok": False, "error": "账户已变更，已忽略旧响应"}
-            if expected_pending is not None and str(current.get("account_pending_login_token") or "") != expected_pending:
-                return {"ok": False, "error": "登录请求已变更，已忽略旧响应"}
-            if expected_base is not None and str(current.get("subscription_server_url") or "").strip().rstrip("/") != expected_base:
-                return {"ok": False, "error": "服务配置已变更，已忽略旧响应"}
-            current_key = str(current.get("subscription_license_public_key") or "").strip() or str(current.get("subscription_verify_key") or "").strip()
-            if current_key != key:
-                return {"ok": False, "error": "许可证配置已变更，已忽略旧响应"}
-            if (expected_profile_revision is not None and self._profile_revision != expected_profile_revision
-                    and str(current.get("account_user_id") or "") == payload["sub"]):
-                # A request issued before a successful profile edit may still
-                # carry an older account view. Apply its verified entitlement,
-                # while retaining the more recently saved name and avatar.
-                changes.pop("account_display_name", None)
-                changes.pop("account_avatar", None)
-            history = current.get("subscription_expiry_notice_history")
-            service = str(current.get("subscription_server_url") or "").rstrip("/")
-            if not isinstance(history, dict) or history.get("account") != payload["sub"] or history.get("service") != service:
-                history = None
-            observed_expiry = account.get("expires_at") if account.get("active") and payload.get("plan_id") in {"standard", "advanced"} else None
-            if not observed_expiry and current.get("account_user_id") == payload["sub"] and current.get("subscription_plan") in {"standard", "advanced"}:
-                observed_expiry = current.get("subscription_expires_at")
-            if observed_expiry:
-                history = {"account": payload["sub"], "service": service, "expires_at": observed_expiry}
-            changes["subscription_expiry_notice_history"] = history
-            self.controller.save_settings(changes)
-            if "account_login_token" in changes:
-                attempt = getattr(self, "_google_login_pending", None)
-                if attempt and expected_pending == attempt["session_id"]:
-                    # This session was successfully consumed. A later cleanup
-                    # must never revoke the newly installed full login.
-                    self._google_login_pending = None
-                self._account_management = None
-                self._account_revision += 1
-                web_attempt = getattr(self,'_web_login_pending',None)
-                if web_attempt and self.controller.settings.get('account_pending_login_token') == web_attempt['session_id']:
-                    web_attempt['revision'] = self._account_revision
-                self._buyer_verification = None
-        return {"ok": True}
 
     def refresh_subscription(self) -> dict:
         """Synchronize repeat purchases and rolling licenses; never trust unsigned status."""
         import urllib.request
-        import urllib.error
         settings = self.controller.settings
         base = str(settings.get("subscription_server_url") or "").strip().rstrip("/")
         token = str(settings.get("account_login_token") or "").strip()
@@ -1316,25 +1216,22 @@ class Bridge(AccountBridgeMixin):
             body = json.dumps({"login_token": token}).encode("utf-8")
             request = urllib.request.Request(base + "/v1/license/refresh", data=body,
                 headers=payment_service_headers(), method="POST")
-            with urllib.request.urlopen(request, timeout=12) as response:
-                result = json.loads(response.read().decode("utf-8"))
+            result = service_http.request_json(
+                request,
+                timeout=12,
+                service="account",
+                operation="license_refresh",
+                opener=urllib.request.urlopen,
+            )
             if not isinstance(result, dict) or result.get("ok") is not True:
                 return rejected_session() if _subscription_session_rejected(result) else temporary("响应不是成功 JSON")
             applied = self._apply_remote_account(result, expected_session=token, expected_base=base,
                 expected_profile_revision=profile_revision)
             return {**applied, "status": self.get_subscription_status()} if applied.get("ok") else applied
-        except urllib.error.HTTPError as exc:
-            if exc.code == 401:
+        except service_http.ServiceHttpError as exc:
+            if exc.status == 401 or _subscription_session_rejected(exc.payload):
                 return rejected_session()
-            if exc.code in (403, 409):
-                try:
-                    raw = exc.read(65537)
-                    failure = json.loads(raw.decode("utf-8")) if len(raw) <= 65536 else None
-                    if _subscription_session_rejected(failure):
-                        return rejected_session()
-                except (OSError, UnicodeError, ValueError, TypeError):
-                    pass
-            return temporary(f"HTTP {exc.code}")
+            return temporary(f"HTTP {exc.status}" if exc.status is not None else exc.code)
         except Exception as exc:
             return temporary(type(exc).__name__)
 
@@ -1616,10 +1513,18 @@ class Bridge(AccountBridgeMixin):
 
     def export_backup(self, dest_path: str) -> dict:
         with self._lock:
+            if self._translation.get("running"):
+                return {"ok": False, "error": "请先等待翻译结束，再导出备份"}
+            if self._worker_state()["running"]:
+                return {"ok": False, "error": "请先在设置 → 模型停止 Worker，再导出备份"}
+            if self._batch_agent.get("running"):
+                return {"ok": False, "error": "请先等待批量整理结束，再导出备份"}
             return _export_backup(self.controller, self.settings_store, dest_path)
 
     def import_backup(self, zip_path: str) -> dict:
         with self._lock:
+            if self._translation.get("running"):
+                return {"ok": False, "error": "请先等待翻译结束，再导入备份"}
             if self._worker_state()["running"]:
                 return {"ok": False, "error": "请先在设置 → 模型停止 Worker，再导入备份"}
             if self._batch_agent.get("running"):
@@ -1629,9 +1534,30 @@ class Bridge(AccountBridgeMixin):
             if was_running:
                 api.stop()
             try:
-                return _import_backup(self.controller, self.settings_store, zip_path)
+                result = _import_backup(self.controller, self.settings_store, zip_path)
+                if result.get("ok"):
+                    try:
+                        self._postprocess.ensure_schema()
+                        self._recover_postprocess()
+                    except Exception:
+                        self.controller._backup_restore_blocked = True
+                        self._postprocess.freeze()
+                        for store in (self.controller.media, self.controller.queue, self.controller.downloads):
+                            store._conn.execute("PRAGMA query_only=ON")
+                        return {"ok": False, "recovery_required": True, "restart_required": True,
+                                "error": "备份已导入，后台处理状态尚未载入，请重启 FoilPage 后继续"}
+                    self._translation = self._postprocess.latest("translation") or {
+                        "running": False, "task_id": "", "status": "", "error": "", "lang": "",
+                    }
+                    self._batch_agent = self._postprocess.latest("batch") or {
+                        "running": False, "done": 0, "skipped": 0, "failed": 0, "errors": [], "message": "",
+                    }
+                    self._translation_failures.clear()
+                elif result.get("recovery_required"):
+                    self._postprocess.freeze()
+                return result
             finally:
-                if was_running:
+                if was_running and self._restore_entry_error() is None:
                     api.start()
 
     def export_diagnostics(self, dest_path: str) -> dict:
@@ -1835,163 +1761,13 @@ class Bridge(AccountBridgeMixin):
         webbrowser.open(url)
         return {"ok": True}
 
-    # ------------------------------------------------------- 单篇翻译（TASK-8.24）
-    def translate_text(self, task_id: str, direction: str = "auto") -> dict:
-        """对单篇已完成文本发起中英翻译（先生 2026-10-25）。
 
-        托管模式计费搭既有 body 阶段积分；BYOK 走用户自配 API。同一时间仅
-        一个翻译在跑，进度经 get_translation_status 轮询。
-        """
-        with self._lock:
-            bare = task_id[4:] if isinstance(task_id, str) and task_id.startswith("job:") else task_id
-            if not isinstance(bare, str) or not bare:
-                return {"ok": False, "error": "任务不存在"}
-            if direction not in ("auto", "zh-en", "en-zh"):
-                return {"ok": False, "error": "翻译方向无效"}
-            job = self.controller.queue.get_job(bare)
-            if job is None or job.get("status") != "done":
-                return {"ok": False, "error": "只有已完成的文本才能翻译"}
-            manifest = self.controller.queue.get_manifest(bare)
-            if not manifest or not (manifest.get("final_path") or manifest.get("raw_path")):
-                return {"ok": False, "error": "未找到可翻译的文本"}
-            settings = self.controller.settings
-            if not settings.get("agent_enabled"):
-                return {"ok": False, "error": "请先在设置 - 整理与转译中启用 Agent 转译"}
-            if settings.get("agent_billing_mode") == "hosted":
-                if not self.get_subscription_status().get("hosted_agent_ready"):
-                    return {"ok": False, "error": "请先检查托管模型服务与账户积分"}
-            elif not str(settings.get("agent_api_key") or "").strip():
-                return {"ok": False, "error": "请先在设置 - 整理与转译中配置 API Key"}
-            if self._translation.get("running"):
-                return {"ok": False, "error": "已有翻译进行中，请稍候"}
-            self._translation = {"running": True, "task_id": bare, "status": "running",
-                                 "error": "", "lang": ""}
-        threading.Thread(
-            target=self._translation_worker, args=(bare, direction), daemon=True,
-            name=f"translate-{bare}",
-        ).start()
-        return {"ok": True, "started": True}
 
-    def get_translation_status(self, task_id: str) -> dict:
-        with self._lock:
-            bare = task_id[4:] if isinstance(task_id, str) and task_id.startswith("job:") else task_id
-            state = dict(self._translation)
-            manifest = self.controller.queue.get_manifest(bare) if bare else None
-        if state.get("task_id") and bare and state["task_id"] != bare:
-            state = {"running": False, "task_id": bare, "status": "", "error": "", "lang": ""}
-        if manifest and manifest.get("translation_status") == "done":
-            state.update({
-                "status": "done",
-                "lang": str(manifest.get("translation_lang") or ""),
-                "direction": str(manifest.get("translation_direction") or ""),
-                "has_translation": True,
-            })
-        return state
 
-    def _translation_worker(self, job_id: str, direction: str) -> None:
-        from app.translation_service import settle_agent_stages, translate_article
 
-        settlements: list = []
-        settings = dict(self.controller.settings)
-        settings["_agent_operation_id"] = f"translate:{job_id}:{direction}"
-        settings["_agent_stage_settlements"] = settlements
-        if settings.get("agent_billing_mode") == "hosted":
-            from engine.device import device_id
-            settings["_agent_device_id"] = device_id(str(self.settings_store.base_dir))
-        try:
-            with self._lock:
-                manifest = self.controller.queue.get_manifest(job_id)
-            if not manifest:
-                raise RuntimeError("任务不存在")
-            updated = translate_article(manifest, settings, direction)
-            with self._lock:
-                self.controller.queue.replace_manifest(updated)
-            settle_agent_stages(settlements, success=True)
-            with self._lock:
-                self._translation = {"running": False, "task_id": job_id, "status": "done",
-                                     "error": "", "lang": str(updated.get("translation_lang") or "")}
-        except Exception as exc:  # 失败不落 manifest，保留上一次的可用译文
-            if settlements:
-                settle_agent_stages(settlements, success=False)
-            message = str(getattr(exc, "message", "") or exc)[:300]
-            with self._lock:
-                self._translation = {"running": False, "task_id": job_id, "status": "failed",
-                                     "error": message, "lang": ""}
 
-    # ------------------------------------------------------- 批量 Agent 整理
-    def batch_agent_translate(self, task_ids: list[str], editing_level: str = "", profile: str = "") -> dict:
-        """对选中的已完成任务批量生成文章；可指定整理力度/画像重跑（先生
-        2026-11-02：文本库中可重新选择模式再转写）。空串表示沿用当前设置。"""
-        if editing_level and editing_level not in ("auto", "light", "balanced", "structured", "rewrite"):
-            return {"ok": False, "error": "整理力度无效"}
-        valid_profiles = {"", "auto", "emotional_copy", "consulting", "knowledge"}
-        if profile and (profile not in valid_profiles and not profile.startswith("custom:")):
-            return {"ok": False, "error": "内容策略无效"}
-        with self._lock:
-            if error := self._processing_entry_error():
-                return error
-            if self._batch_agent.get("running"):
-                return {"ok": False, "error": "已有批量整理进行中，请稍候"}
-            jobs = _prefixed_ids(task_ids, "job:")
-            settings = dict(self.controller.settings)
-            if editing_level:
-                settings["agent_editing_level"] = editing_level
-            if profile:
-                settings["agent_profile"] = profile
-            if not settings.get("agent_enabled"):
-                return {"ok": False, "error": "请先在设置 - 整理与转译中启用 Agent 转译"}
-            if settings.get("agent_billing_mode") == "hosted":
-                if not self.get_subscription_status().get("hosted_agent_ready"):
-                    return {"ok": False, "error": "请先检查托管模型服务与账户积分"}
-            elif not str(settings.get("agent_api_key") or "").strip():
-                return {"ok": False, "error": "请先在设置 - 整理与转译中配置 API Key"}
-            if not jobs:
-                return {"ok": False, "error": "没有可整理的已完成任务"}
-            self._batch_agent = {
-                "running": True,
-                "done": 0,
-                "skipped": 0,
-                "failed": 0,
-                "errors": [],
-                "message": f"批量整理已开始，共 {len(jobs)} 项",
-            }
-        threading.Thread(
-            target=self._batch_agent_worker, args=(jobs, settings), daemon=True
-        ).start()
-        return {"ok": True, "started": True, "count": len(jobs)}
 
-    def get_batch_agent_status(self) -> dict:
-        with self._lock:
-            return dict(self._batch_agent)
 
-    def _batch_agent_worker(self, job_ids: list[str], settings: dict | None = None) -> None:
-        from app.agent_service import batch_apply_agent_translation
-
-        settings = settings if settings is not None else dict(self.controller.settings)
-        if settings.get("agent_billing_mode") == "hosted":
-            from engine.device import device_id
-            settings["_agent_device_id"] = device_id(str(self.settings_store.base_dir))
-        try:
-            result = batch_apply_agent_translation(
-                job_ids,
-                self.controller.queue,
-                settings,
-                delete_source=True,
-            )
-        except Exception as exc:  # 整批失败兜底，保证状态可读
-            result = {"done": 0, "skipped": 0, "failed": len(job_ids), "errors": [str(exc)]}
-        with self._lock:
-            self._batch_agent.update(
-                running=False,
-                done=int(result.get("done") or 0),
-                skipped=int(result.get("skipped") or 0),
-                failed=int(result.get("failed") or 0),
-                errors=list(result.get("errors") or [])[:10],
-                message=(
-                    f"批量整理完成：成功 {result.get('done', 0)}，"
-                    f"跳过 {result.get('skipped', 0)}，失败 {result.get('failed', 0)}"
-                ),
-            )
 
     def delete_tasks(self, task_ids: list[str]) -> dict:
         """彻底删除：记录 + 文本产物 + 视频文件一并移除。"""
@@ -2008,14 +1784,34 @@ class Bridge(AccountBridgeMixin):
     def delete_texts(self, task_ids: list[str]) -> dict:
         """只清理文本产物，保留任务、关联登记与视频文件。"""
         with self._lock:
-            if self._batch_agent.get("running"):
-                return {"ok": False, "error": "正在整理文本，请完成后再删除"}
             trans = _prefixed_ids(task_ids, "job:")
+            if error := self._library_deletion_busy(trans):
+                return error
             removed = self.controller.delete_texts(trans) if trans else []
-            if trans and len(removed) != len(set(trans)):
-                return {"ok": False, "removed": removed,
-                        "error": "部分文本未能删除，请确认任务已停止且文件可访问"}
-            return {"ok": True, "removed": removed}
+            return self._library_deletion_result(trans, removed)
+
+    def delete_library_items(self, task_ids: list[str], remove_records: bool) -> dict:
+        """清理文本库条目的应用产物和下载，可同时删除任务记录。"""
+        if not isinstance(remove_records, bool) or not isinstance(task_ids, list):
+            return {"ok": False, "error": "删除范围无效"}
+        jobs = list(dict.fromkeys(_prefixed_ids(task_ids, "job:")))
+        if not jobs or "" in jobs:
+            return {"ok": False, "error": "请选择要删除的文本"}
+        with self._lock:
+            if error := self._library_deletion_busy(jobs):
+                return error
+            removed = self.controller.delete_library_items(jobs, remove_records=remove_records)
+            return self._library_deletion_result(jobs, removed)
+
+
+    @staticmethod
+    def _library_deletion_result(job_ids: list[str], removed: list[str]) -> dict:
+        if set(job_ids) - set(removed):
+            return {
+                "ok": False, "removed": removed,
+                "error": "有文件未能删除。请确认任务已停止，关闭占用文件的播放器或编辑器后重试。",
+            }
+        return {"ok": True, "removed": removed}
 
     def delete_files(self, task_ids: list[str]) -> dict:
         """仅删除文件：文本产物与视频移除，保留数据库记录。"""
@@ -2196,6 +1992,7 @@ class Bridge(AccountBridgeMixin):
                 if filter_name == "仅转写" and has_final:
                     continue
                 manifest = self.controller.queue.get_manifest(task["task_id"]) or {}
+                source_path = task.get("source_path") or ""
                 docs.append({
                     "task_id": f"job:{task['task_id']}",
                     "title": title,
@@ -2204,9 +2001,11 @@ class Bridge(AccountBridgeMixin):
                     "updated_at": str(task.get("updated_at") or "").replace("T", " "),
                     "has_final": has_final,
                     "has_raw": has_raw,
-                    "has_translation": manifest.get("translation_status") == "done",
+                    "has_translation": self._translation_exists(manifest),
                     "translation_lang": str(manifest.get("translation_lang") or ""),
-                    "source_path": task.get("source_path") or "",
+                    "translation_source_tab": str(manifest.get("translation_source_tab") or ""),
+                    "source_path": source_path,
+                    "source_available": bool(source_path) and Path(source_path).expanduser().exists(),
                     "tags": tags,
                 })
             return docs
@@ -2251,20 +2050,33 @@ class Bridge(AccountBridgeMixin):
         article = Path(str(manifest.get("translation_path") or "")).expanduser()
         segments_file = Path(str(manifest.get("translation_segments_path") or "")).expanduser()
         out_root = Path(self.controller.settings.get("output_dir", "")).expanduser().resolve()
-        for candidate in (article, segments_file):
-            if not candidate.is_file() or not out_root.is_dir() or not self._path_within(candidate, out_root):
-                return {"ok": False, "error": "译文文件不可用", "task_id": task_id}
+
+        def is_translation_file(candidate: Path) -> bool:
+            in_current_root = out_root.is_dir() and self._path_within(candidate, out_root)
+            in_recorded_dir = AppController.is_recorded_job_output(task, candidate)
+            return candidate.is_file() and (in_current_root or in_recorded_dir)
+
+        if not is_translation_file(article):
+            return {"ok": False, "error": "译文文件不可用", "task_id": task_id}
         try:
             text = article.read_text(encoding="utf-8", errors="replace")
-            segments = json.loads(segments_file.read_text(encoding="utf-8"))
-            if not isinstance(segments, list):
-                segments = []
-        except (OSError, UnicodeError, json.JSONDecodeError):
+            size = article.stat().st_size
+        except OSError:
             return {"ok": False, "error": "译文读取失败", "task_id": task_id}
-        pairs = [
-            {"src": str(item.get("src") or ""), "dst": str(item.get("dst") or "")}
-            for item in segments if isinstance(item, dict)
-        ]
+        segments = []
+        if is_translation_file(segments_file):
+            try:
+                segments = json.loads(segments_file.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                segments = []
+        if not isinstance(segments, list) or not all(isinstance(item, dict) and all(
+            isinstance(item.get(key), str) and item[key].strip() for key in ("src", "dst")
+        ) for item in segments):
+            segments = []
+        if segments and "\n\n".join(item["dst"] for item in segments).replace("\r\n", "\n").replace("\r", "\n").strip() != text.strip():
+            # A stopped write may leave the article and paragraph pairs out of sync.
+            segments = []
+        pairs = [{"src": item["src"], "dst": item["dst"]} for item in segments]
         return {
             "ok": True,
             "task_id": task_id,
@@ -2274,8 +2086,9 @@ class Bridge(AccountBridgeMixin):
             "segments": pairs,
             "lang": str(manifest.get("translation_lang") or ""),
             "direction": str(manifest.get("translation_direction") or ""),
+            "source_tab": str(manifest.get("translation_source_tab") or ""),
             "path": str(article),
-            "size": article.stat().st_size,
+            "size": size,
             "truncated": False,
             "revision": None,
         }
@@ -2305,7 +2118,10 @@ class Bridge(AccountBridgeMixin):
             # 可能在任何位置，不在此限制内（source 页只返回路径元数据，不读正文）。
             if tab != "source":
                 out_root = Path(self.controller.settings.get("output_dir", "")).expanduser().resolve()
-                if not out_root.is_dir() or not self._path_within(path, out_root):
+                in_current_root = out_root.is_dir() and self._path_within(path, out_root)
+                in_recorded_dir = (path.suffix.lower() in {".md", ".txt"}
+                                   and AppController.is_recorded_job_output(task, path))
+                if not (in_current_root or in_recorded_dir):
                     return {"ok": False, "error": "文件不可用", "task_id": task_id}
             if tab == "source":
                 return {
@@ -2331,6 +2147,7 @@ class Bridge(AccountBridgeMixin):
                 "title": str(task.get("display_title") or path.stem),
                 "text": visible_text,
                 "path": str(path),
+                "has_subtitle_timeline": self._subtitle_segments_path(task) is not None,
                 "size": path.stat().st_size,
                 "tab": tab,
                 "truncated": truncated,
@@ -2350,6 +2167,17 @@ class Bridge(AccountBridgeMixin):
                     return {"ok": False, "code": "revision_conflict", "error": "文本已被更新，草稿已保留；请重新读取后合并修改"}
                 return {"ok": False, "error": str(exc)}
             return {"ok": True, **result}
+
+    @staticmethod
+    def _subtitle_segments_path(task: dict) -> Path | None:
+        raw_value = task.get("raw_path")
+        if not raw_value:
+            return None
+        raw_path = Path(raw_value).expanduser()
+        if not raw_path.name:
+            return None
+        segments_file = raw_path.with_name(raw_path.stem.removesuffix("_raw") + "_segments.json")
+        return segments_file if segments_file.is_file() else None
 
     def export_subtitles(self, task_id: str, fmt: str, dest_path: str) -> dict:
         """把任务的转写时间轴导出为 SRT/VTT 字幕文件。
@@ -2387,11 +2215,8 @@ class Bridge(AccountBridgeMixin):
                     "code": "no_segments",
                     "error": "该任务没有转写文本，无法导出字幕",
                 }
-            raw_path = Path(raw_value).expanduser()
-            segments_file = raw_path.with_name(
-                raw_path.name[:-len("_raw.md")] + "_segments.json"
-            )
-            if not segments_file.is_file():
+            segments_file = self._subtitle_segments_path(task)
+            if segments_file is None:
                 return {
                     "ok": False,
                     "code": "no_segments",
@@ -2442,8 +2267,10 @@ class Bridge(AccountBridgeMixin):
             path = Path(path_value).expanduser()
             if not path.is_file():
                 continue
-            # R10：预览同样只读 output_dir 内的转写产物
-            if not out_root.is_dir() or not self._path_within(path, out_root):
+            in_current_root = out_root.is_dir() and self._path_within(path, out_root)
+            in_recorded_dir = (path.suffix.lower() in {".md", ".txt"}
+                               and AppController.is_recorded_job_output(task, path))
+            if not (in_current_root or in_recorded_dir):
                 continue
             try:
                 with path.open(encoding="utf-8", errors="replace") as handle:
@@ -2459,7 +2286,7 @@ class Bridge(AccountBridgeMixin):
     # ------------------------------------------------------------ settings
     def _agent_editable_settings(self) -> set[str]:
         from engine.settings import SECRET_FIELDS
-        protected = {"schema_version", "database_path", "extension_origin", "js_runtime_path", "credit_balance", "license_expires_at",
+        protected = {"schema_version", "library_id", "database_path", "extension_origin", "js_runtime_path", "credit_balance", "license_expires_at",
                      "subscription_plan", "subscription_active", "subscription_expires_at", "subscription_last_order_id",
                      "terms_accepted_version", "terms_cross_border_accepted_version", "terms_accepted_service",
                      "plan_expiry_last_notice_day", "subscription_expiry_notice_history"}

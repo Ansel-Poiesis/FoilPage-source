@@ -1,29 +1,16 @@
 # Copyright (c) 2026 Ansel
 # SPDX-License-Identifier: MPL-2.0
-"""登录与账号域的 Bridge 混入（bridge.py 第一阶段拆分）。
-
-微信/谷歌/邮箱登录、设备管理与账号上下文相关的方法集中于此，通过
-AccountBridgeMixin 混入 Bridge，实例 API 面不变；模块级常量与公共
-辅助函数仍在 app/bridge.py 单处维护。
-"""
+"""登录、账户会话与签名许可证应用的 Bridge 混入。"""
 from __future__ import annotations
 
 import json
-from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 import re
-import sys
 import urllib.parse
 import urllib.request
-from pathlib import Path
-from typing import Any
 
+from engine import service_http
 from engine.service_http import payment_service_headers
-
-
-TERMINAL_STATUSES = {"done", "failed", "cancelled"}
-
-RELEASE_CHANNEL = "formal"
 
 
 def _subscription_session_rejected(value: object) -> bool:
@@ -45,233 +32,6 @@ def _subscription_session_rejected(value: object) -> bool:
         "设备已解绑，请重新登录", "请先完成设备管理并重新登录", "未登录，无法刷新许可证",
     }
 
-
-def _public_subscription_catalog(value: object) -> list[dict]:
-    """Accept bounded public prices, never provider IDs or arbitrary health fields."""
-    if not isinstance(value, list):
-        return []
-    catalog = []
-    seen = set()
-    labels = {"missing_plan": "暂未开放", "missing_price": "金额待配置",
-              "ambiguous_price": "方案待确认", "unsupported_period": "暂未开放", "missing_credits": "积分额度待确认",
-              "merchant_limit": "超过单笔支付限额"}
-    for item in value[:10]:
-        if not isinstance(item, dict) or item.get("id") not in ("standard", "advanced"):
-            continue
-        if item["id"] in seen:
-            continue
-        seen.add(item["id"])
-        offers = []
-        for offer in (item.get("offers") if isinstance(item.get("offers"), list) else [])[:12]:
-            if not isinstance(offer, dict):
-                continue
-            period, months = offer.get("period"), offer.get("months")
-            if isinstance(months, bool) or not isinstance(months, int) or not 1 <= months <= 120:
-                continue
-            if period not in ("month", "year", "months") or (period == "month" and months != 1) or (period == "year" and months != 12):
-                continue
-            state = str(offer.get("status") or "missing_price")
-            amount = None
-            ready = False
-            blocked_price = state == "merchant_limit" and offer.get("purchasable") is False
-            if (state == "ready" and offer.get("purchasable") is True or blocked_price) and period in ("month", "year") and offer.get("currency") == "CNY":
-                raw = offer.get("amount")
-                if isinstance(raw, str) and re.fullmatch(r"\d{1,12}(?:\.\d{1,2})?", raw):
-                    try:
-                        numeric = Decimal(raw)
-                        if numeric > 0 and (not blocked_price or numeric <= Decimal("100000000.00")):
-                            amount = format(numeric.quantize(Decimal("0.01")), "f")
-                            ready = not blocked_price
-                    except InvalidOperation:
-                        pass
-            credits = offer.get("credits")
-            credits = credits if isinstance(credits, int) and not isinstance(credits, bool) and 0 < credits <= 2**53-1 else None
-            if blocked_price and (amount is None or credits is None):
-                state = "missing_price" if amount is None else "missing_credits"
-                amount = None
-            if ready and credits is None:
-                ready = False
-                state = "missing_credits"
-            if not ready and state not in labels:
-                state = "missing_price"
-            suffix = "月" if period == "month" else "年" if period == "year" else f"{months}个月"
-            display_amount = amount.rstrip("0").rstrip(".") if amount and "." in amount else amount
-            offers.append({"period": period, "months": months, "amount": amount, "currency": "CNY", "credits": credits,
-                           "price": f"¥{display_amount}/{suffix}" if ready or state == "merchant_limit" and amount is not None else labels.get(state, "金额待配置"),
-                           "status": "ready" if ready else state, "purchasable": ready})
-        # Duplicate offers for a period make the advertised price ambiguous.
-        for period in ("month", "year"):
-            matching = [offer for offer in offers if offer["period"] == period]
-            if len(matching) > 1:
-                for offer in matching:
-                    offer.update(amount=None, price="金额待确认", status="ambiguous_price", purchasable=False)
-        month = next((offer for offer in offers if offer["period"] == "month"), None)
-        year = next((offer for offer in offers if offer["period"] == "year"), None)
-        purchasable = item.get("purchasable") is True and any(offer["purchasable"] for offer in offers)
-        catalog.append({"id": item["id"], "price": month["price"] if month else "月付暂未开放",
-                        "annual_price": year["price"] if year else "年付暂未开放",
-                        "offers": offers, "purchasable": purchasable,
-                        "status": "ready" if purchasable else "unavailable"})
-    return catalog
-
-
-def _public_manual_payment_request(value: object) -> dict | None:
-    """Only a bounded payment snapshot reaches the WebView, never account data."""
-    if not isinstance(value, dict):
-        return None
-    request_id, association = value.get("request_id"), value.get("association_code")
-    revision, state, quote = value.get("revision"), value.get("status"), value.get("snapshot")
-    if (not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{12,64}", request_id)
-            or not isinstance(association, str) or not re.fullmatch(r"[A-Za-z0-9_-]{4,64}", association)
-            or isinstance(revision, bool) or not isinstance(revision, int) or revision < 0
-            or state not in ("pending_payment", "pending_review", "credited", "cancelled", "rejected", "expired")
-            or not isinstance(quote, dict)):
-        return None
-    period, months, amount, credits = quote.get("period"), quote.get("months"), quote.get("amount"), quote.get("credits")
-    if (quote.get("plan_id") not in ("standard", "advanced") or period not in ("month", "year")
-            or isinstance(months, bool) or months != (1 if period == "month" else 12) or quote.get("currency") != "CNY"
-            or not isinstance(amount, str) or not re.fullmatch(r"\d{1,12}(?:\.\d{1,2})?", amount)
-            or Decimal(amount) <= 0 or isinstance(credits, bool) or not isinstance(credits, int) or not 0 < credits <= 2**53-1):
-        return None
-    result = {"request_id": request_id, "association_code": association, "status": state, "revision": revision,
-              "snapshot": {"plan_id": quote["plan_id"], "period": period, "months": months,
-                           "amount": amount, "credits": credits, "currency": "CNY"},
-              "created_at": str(value.get("created_at") or "")[:64], "expires_at": str(value.get("expires_at") or "")[:64]}
-    last = value.get("receipt_last4")
-    if isinstance(last, str) and re.fullmatch(r"[0-9]{4}", last):
-        result["receipt_last4"] = last
-    return result
-
-
-
-def _alipay_cashier_expiry(base: str, url: object, expires: object) -> float | None:
-    """Only a short capability at the configured HTTPS service can be opened."""
-    if (not isinstance(url, str) or len(url) > 2048 or re.search(r"[\x00-\x20\x7f\\]", url + base)
-            or not isinstance(expires, str) or len(expires) > 64):
-        return None
-    try:
-        source, target = urllib.parse.urlsplit(base), urllib.parse.urlsplit(url)
-        if (source.scheme != "https" or target.scheme != "https" or not source.hostname
-                or source.username or source.password or target.username or target.password
-                or source.hostname != target.hostname or source.port != target.port
-                or target.path != "/v1/alipay/cashier" or target.fragment
-                or not re.fullmatch(r"token=cap_alipay_[0-9a-f]{64}", target.query)):
-            return None
-        deadline = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-        if deadline.tzinfo is None:
-            return None
-        seconds = deadline.timestamp()
-        remaining = seconds - datetime.now(timezone.utc).timestamp()
-        return seconds if 0 < remaining <= 660 else None
-    except (ValueError, OverflowError):
-        return None
-
-
-def _safe_task_error_details(error: object) -> dict[str, Any] | None:
-    """Expose structured failure data to the UI without leaking signed media URLs."""
-    if not isinstance(error, dict):
-        return None
-
-    def clean(value: object, depth: int = 0) -> object:
-        if depth > 3:
-            return "…"
-        if isinstance(value, dict):
-            result = {}
-            for raw_key, child in list(value.items())[:32]:
-                key = str(raw_key)[:64]
-                if re.search(r"url|cookie|authorization|token|signature|header", key, re.IGNORECASE):
-                    continue
-                result[key] = clean(child, depth + 1)
-            return result
-        if isinstance(value, (list, tuple)):
-            return [clean(child, depth + 1) for child in value[:10]]
-        if isinstance(value, str):
-            text = re.sub(r"https?://[^\s<>\"']+", "[URL 已脱敏]", value, flags=re.IGNORECASE)
-            text = re.sub(
-                r"(?i)(cookie|authorization|token|signature|x-bogus|mstoken|verifyfp)\s*[:=]\s*[^\s,;&]+",
-                r"\1=[已脱敏]", text,
-            )
-            return text[:1000]
-        if value is None or isinstance(value, (bool, int, float)):
-            return value
-        return str(value)[:200]
-
-    result = {
-        "code": clean(error.get("code", "")),
-        "message": clean(error.get("message", "")),
-        "retryable": bool(error.get("retryable", False)),
-    }
-    diagnostic = error.get("diagnostic")
-    if isinstance(diagnostic, dict):
-        result["diagnostic"] = clean(diagnostic)
-    reports = error.get("incident_reports")
-    if isinstance(reports, list):
-        result["incident_reports"] = clean(reports)
-    return result
-
-
-_PASTED_URL_PATTERN = re.compile(
-    r"https?://[^\s<>\"'\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]+",
-    re.IGNORECASE,
-)
-
-
-def _task_progress_text(task: dict) -> str:
-    status = task.get("status", "")
-    if task.get("kind") == "download":
-        if status == "done":
-            return "已下载" if not (task.get("final_path") or task.get("raw_path")) else "已完成"
-        return {
-            "received": "等待浏览器提交", "resolving": "解析链接",
-            "awaiting_browser": "等待浏览器下载",
-            "downloading": f"正在下载 {_safe_progress(task.get('progress')):.0%}",
-            "imported": "正在入库", "queued": "等待转写",
-            "transcribing": f"正在转写 {_safe_progress(task.get('progress')):.0%}",
-            "running": f"正在转写 {_safe_progress(task.get('progress')):.0%}",
-            "failed": "失败", "retryable": "等待重试",
-            "cancelled": "已取消",
-        }.get(status, "处理中")
-    return {
-        "done": "已完成", "failed": "失败", "cancelled": "已取消",
-        "queued": "等待中", "retryable": "等待重试",
-        "transcribing": f"正在转写 {_safe_progress(task.get('progress')):.0%}",
-        "running": f"正在转写 {_safe_progress(task.get('progress')):.0%}",
-    }.get(status, "-")
-
-
-def _task_media_meta(task: dict) -> tuple[str, str]:
-    kind = task.get("kind")
-    if kind == "download":
-        return "↓", "浏览器下载"
-    return "▶", f"媒体（{task.get('device', '')}）"
-
-
-def _browser_extension_dir() -> Path:
-    """Bundled MV3 browser extension directory (dev source or frozen install)."""
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
-    else:
-        base = Path(__file__).resolve().parents[1]
-    return base / "browser-extension"
-
-
-
-def _safe_progress(value: object) -> float:
-    """Non-finite / non-numeric progress must never crash the bridge.
-
-    定义权随账号域迁到本模块；app/bridge.py 反向引用同一实现。
-    """
-    try:
-        num = float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    if num != num or num in (float("inf"), float("-inf")):  # NaN / inf
-        return 0.0
-    return round(max(0.0, min(1.0, num)), 4)
-
-
-# 版本与状态常量、公共视图辅助的唯一事实源在 app/bridge.py（release.ps1
-# 逐字校验 APP_VERSION），本文件不得复制这些定义。
 
 class AccountBridgeMixin:
     def wechat_login_start(self) -> dict:
@@ -752,25 +512,33 @@ class AccountBridgeMixin:
 
     @staticmethod
     def _account_request(base: str, path: str, payload: dict) -> dict:
-        import urllib.error
-        import urllib.request
         try:
             request = urllib.request.Request(base + path,
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                 headers=payment_service_headers(), method="POST")
-            with urllib.request.urlopen(request, timeout=12) as response:
-                result = json.loads(response.read().decode("utf-8"))
+            result = service_http.request_json(
+                request,
+                timeout=12,
+                service="account",
+                operation=path,
+                opener=urllib.request.urlopen,
+            )
             return result if isinstance(result, dict) else {"ok": False, "error": "服务端响应无效"}
-        except urllib.error.HTTPError as exc:
-            try:
-                result = json.loads(exc.read().decode("utf-8"))
-            except Exception:
-                result = {}
-            if not isinstance(result, dict):
-                result = {}
-            return {**result, "ok": False, "error": str(result.get("error") or "账户操作未完成"),
-                    **({"status": "invalid"} if exc.code in (401, 403) else {})}
-        except Exception:
+        except service_http.ServiceHttpError as exc:
+            result = dict(exc.payload or {})
+            raw_error = result.get("error")
+            if isinstance(raw_error, dict):
+                message = str(raw_error.get("message") or "")
+                code = str(raw_error.get("code") or "")
+            else:
+                message, code = str(raw_error or ""), ""
+            result.update(ok=False, error=message[:500] or "账户操作未完成")
+            if code and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code):
+                result["code"] = code
+            if exc.status == 401 or _subscription_session_rejected(result):
+                result["status"] = "invalid"
+            return result
+        except (TypeError, ValueError):
             return {"ok": False, "error": "暂时无法连接账户服务，请稍后重试"}
 
     def _account_context_current(self, base: str, token: str, management: dict | None) -> bool:
@@ -1007,3 +775,118 @@ class AccountBridgeMixin:
         return self._account_request(attempt["base"], "/v1/account/buyer/cancel",
             {"session_id": nonce, "login_token": attempt["session"],
              "device_id": device_id(str(getattr(self.settings_store, "base_dir", "") or "."))})
+
+    def _apply_remote_account(self, result: dict, *, order_no: str = "",
+                              expected_session: str | None = None, expected_pending: str | None = None,
+                              expected_base: str | None = None, expected_revision: int | None = None,
+                              expected_profile_revision: int | None = None, expected_user_id: str | None = None,
+                              expected_beta_status: str | None = None) -> dict:
+        """Verify the signed license before updating account or balance locally."""
+        from engine.device import device_id
+        from engine.license import LicenseError, verify_license, signed_beta_access
+        settings = self.controller.settings
+        public_key = str(settings.get("subscription_license_public_key") or "").strip()
+        key = public_key or str(settings.get("subscription_verify_key") or "").strip()
+        if not key:
+            return {"ok": False, "error": "尚未配置许可证公钥"}
+        token = str(result.get("license_token") or "")
+        try:
+            payload = verify_license(token, signing_key=key,
+                expected_alg="EdDSA" if public_key else "HS256",
+                device_id=device_id(str(getattr(self.settings_store, "base_dir", "") or ".")))
+            account = result.get("account") or result.get("status") or {}
+            if not isinstance(account, dict):
+                raise ValueError("账户格式无效")
+            if account.get("user_id") and str(account["user_id"]) != payload["sub"]:
+                raise ValueError("账户与许可证不一致")
+            if expected_user_id is not None and payload["sub"] != expected_user_id:
+                raise ValueError("许可证与当前登录账户不一致")
+            if expected_beta_status is not None:
+                beta = signed_beta_access(payload)
+                if (expected_beta_status == "active" and beta["active"] is not True
+                        or expected_beta_status == "revoked" and beta["revoked"] is not True
+                        or expected_beta_status == "expired" and (beta["active"] or not beta["expires_at"]
+                            or datetime.fromisoformat(beta["expires_at"]) > datetime.now(timezone.utc))):
+                    raise ValueError("内测资格与签名许可证不一致")
+            balance = payload.get("credit_balance", 0)
+            if type(balance) is not int or balance < 0:
+                raise ValueError("积分余额无效")
+        except (LicenseError, TypeError, ValueError):
+            return {"ok": False, "error": "许可证校验失败，请检查服务配置"}
+        changes = {
+            "license_token": token, "license_expires_at": payload.get("exp"),
+            "subscription_plan": payload.get("plan_id") or "free",
+            "subscription_active": bool(account.get("active")),
+            "subscription_expires_at": account.get("expires_at"), "credit_balance": balance,
+        }
+        if result.get('account_access_token'):
+            from engine.account_access import account_access
+            access_settings = {**settings, **changes, 'account_user_id':payload['sub'],
+                'account_login_token':result.get('login_token') or settings.get('account_login_token') or '',
+                'account_access_token':result['account_access_token']}
+            if not account_access(access_settings, device_id=device_id(str(self.settings_store.base_dir)))['allowed']:
+                return {'ok':False,'error':'登录凭证校验失败，请重试'}
+            changes['account_access_token'] = result['account_access_token']
+        elif result.get('login_token') and result['login_token'] != settings.get('account_login_token'):
+            changes['account_access_token'] = ''
+        if result.get("login_token"):
+            changes["account_login_token"] = str(result["login_token"])
+            if expected_pending is not None or result['login_token'] != settings.get('account_login_token'):
+                changes["account_pending_login_token"] = ""
+        if account.get("user_id"):
+            changes["account_user_id"] = str(account["user_id"])
+            changes["account_display_name"] = str(account.get("display_name") or "爱发电账户")
+            from engine.account_profile import validate_avatar
+            try:
+                changes["account_avatar"] = validate_avatar(account.get("avatar") or "") or ""
+            except ValueError:
+                # A malformed image cannot turn a verified login into a failure.
+                changes["account_avatar"] = ""
+        if order_no:
+            changes["subscription_last_order_id"] = order_no
+        with self._lock:
+            current = self.controller.settings
+            if expected_revision is not None and self._account_revision != expected_revision:
+                return {"ok": False, "error": "登录请求已变更，已忽略旧响应"}
+            if expected_session is not None and str(current.get("account_login_token") or "") != expected_session:
+                return {"ok": False, "error": "账户已变更，已忽略旧响应"}
+            if expected_user_id is not None and str(current.get("account_user_id") or "").strip() != expected_user_id:
+                return {"ok": False, "error": "账户已变更，已忽略旧响应"}
+            if expected_pending is not None and str(current.get("account_pending_login_token") or "") != expected_pending:
+                return {"ok": False, "error": "登录请求已变更，已忽略旧响应"}
+            if expected_base is not None and str(current.get("subscription_server_url") or "").strip().rstrip("/") != expected_base:
+                return {"ok": False, "error": "服务配置已变更，已忽略旧响应"}
+            current_key = str(current.get("subscription_license_public_key") or "").strip() or str(current.get("subscription_verify_key") or "").strip()
+            if current_key != key:
+                return {"ok": False, "error": "许可证配置已变更，已忽略旧响应"}
+            if (expected_profile_revision is not None and self._profile_revision != expected_profile_revision
+                    and str(current.get("account_user_id") or "") == payload["sub"]):
+                # A request issued before a successful profile edit may still
+                # carry an older account view. Apply its verified entitlement,
+                # while retaining the more recently saved name and avatar.
+                changes.pop("account_display_name", None)
+                changes.pop("account_avatar", None)
+            history = current.get("subscription_expiry_notice_history")
+            service = str(current.get("subscription_server_url") or "").rstrip("/")
+            if not isinstance(history, dict) or history.get("account") != payload["sub"] or history.get("service") != service:
+                history = None
+            observed_expiry = account.get("expires_at") if account.get("active") and payload.get("plan_id") in {"standard", "advanced"} else None
+            if not observed_expiry and current.get("account_user_id") == payload["sub"] and current.get("subscription_plan") in {"standard", "advanced"}:
+                observed_expiry = current.get("subscription_expires_at")
+            if observed_expiry:
+                history = {"account": payload["sub"], "service": service, "expires_at": observed_expiry}
+            changes["subscription_expiry_notice_history"] = history
+            self.controller.save_settings(changes)
+            if "account_login_token" in changes:
+                attempt = getattr(self, "_google_login_pending", None)
+                if attempt and expected_pending == attempt["session_id"]:
+                    # This session was successfully consumed. A later cleanup
+                    # must never revoke the newly installed full login.
+                    self._google_login_pending = None
+                self._account_management = None
+                self._account_revision += 1
+                web_attempt = getattr(self,'_web_login_pending',None)
+                if web_attempt and self.controller.settings.get('account_pending_login_token') == web_attempt['session_id']:
+                    web_attempt['revision'] = self._account_revision
+                self._buyer_verification = None
+        return {"ok": True}

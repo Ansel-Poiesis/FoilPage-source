@@ -3,9 +3,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { browserFallbackMediaUrls } from '../browser-extension/fallback-policy.js';
 import { pickDouyinResolveCookies } from '../browser-extension/douyin-cookies.js';
+
+const sha256Hex = value => createHash('sha256').update(String(value)).digest('hex');
+const contractSource = await readFile(new URL('../browser-extension/ui-contract.js', import.meta.url), 'utf8');
 
 async function harness(initial) {
   const saved = {}; const sent = []; const calls = []; let job = initial;
@@ -20,6 +24,8 @@ async function harness(initial) {
     alarms:{create(){},onAlarm:{addListener(){}}},
   };
   const context = {chrome,console,URL,AbortController,Date,Math,Promise,Set,Map,navigator:{userAgent:'fixture'},
+    crypto:{subtle:{digest:async(_algo,data)=>createHash('sha256').update(Buffer.from(data)).digest()}},
+    TextEncoder,
     getToken:async()=>'',pickDouyinResolveCookies,browserFallbackMediaUrls,
     browserFallbackMediaUrl:args=>browserFallbackMediaUrls(args)[0]||'',REJECTED_REPLAY_SKIP_CODES:new Set(),
     fetch:async()=>({json:async()=>({ok:true})}),
@@ -28,6 +34,7 @@ async function harness(initial) {
       if(path.endsWith('/fallback')) { job={...job,status:'awaiting_browser',error:null};return{job:{...job,browser_download:{download_url:'https://v26-web.douyinvod.com/video/tos/fresh.mp4',filename:'fixture.mp4'}}}; }
       return {job};},
   };
+  vm.runInNewContext(contractSource,context);
   vm.runInNewContext(source+'\nglobalThis.fixture={watchLocalTask,pollLocalTask,restoreWatchedTasks,rememberBrowserDownload,takeBrowserDownload};',context);
   await new Promise(resolve=>setImmediate(resolve));
   return {saved,sent,calls,setJob(value){job=value;},...context.fixture};
@@ -99,4 +106,20 @@ test('Douyin only reports submission and matching-video download success across 
   await fixture.pollLocalTask(job.id);
   assert.deepEqual(fixture.sent.map(item=>item.message),['下载成功']);
   assert.ok(fixture.sent.every(item=>item.taskUrl===job.url && item.taskId===job.id && item.stage==='download'));
+});
+
+// 先生 2026-11-18 风控波：桌面已拒（rejected_media）/已试（browser_attempted）
+// 的地址哈希不再占用回退候选名额——8 条预算全部留给未参与过被拒请求的
+// 新签名。
+test('browser handoff drops desktop-rejected candidates from the fallback payload',async()=>{
+  const freshUrl='https://v26-web.douyinvod.com/video/tos/fresh.mp4';
+  const job={id:'abc123def456',url:'https://www.douyin.com/video/1234567890123456',status:'awaiting_browser',
+    error:{code:'media_forbidden',diagnostic:{fallback_pending:'browser'}},
+    options:{transcribe_after_download:false,rejected_media:[sha256Hex(freshUrl)]}};
+  const fixture=await harness(job);fixture.watchLocalTask(job);
+  await new Promise(resolve=>setImmediate(resolve));
+  const handoff=fixture.calls.find(call=>call.path.endsWith('/fallback'));
+  assert.ok(handoff,'fallback 握手必须发生');
+  assert.ok(!handoff.body.media_candidates.includes(freshUrl),'已拒地址不得重放');
+  assert.deepEqual(handoff.body.media_candidates,['https://www.douyin.com/aweme/v1/play/?video_id=m1']);
 });

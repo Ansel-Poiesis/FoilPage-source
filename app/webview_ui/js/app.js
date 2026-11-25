@@ -3,7 +3,7 @@
 /* FoilPage 应用壳：导航、路由、状态流、Toast、Modal、删除确认、顶栏操作 */
 'use strict';
 
-window.APP_VERSION = "0.1.5";
+window.APP_VERSION = "0.1.6";
 window.BASE_FONT_SIZE = 15;
 
 window.AppState = {
@@ -158,15 +158,17 @@ window.ConfirmDiscard = {
 window.ConfirmDelete = {
   run(opts) {
     const s = AppState.settings || {};
-    if (s.confirm_delete === false) {
+    if (s[opts.settingKey || "confirm_delete"] === false) {
       opts.onConfirm();
       return;
     }
+    const optOut = opts.settingKey ? "" :
+      '<label class="dlg-check"><input type="checkbox" id="dlgNoAsk"><span>不再提醒，下次直接删除</span></label>';
     const mask = openModal(
       "确认删除",
       `<div class="dlg-delete">
          <div class="dlg-text" id="dlgText"></div>
-         <label class="dlg-check"><input type="checkbox" id="dlgNoAsk"><span>不再提醒，下次直接删除</span></label>
+         ${optOut}
        </div>`,
       `<button class="btn ghost" id="dlgCancel">取消</button>
        <button class="btn danger" id="dlgOk">删除</button>`
@@ -175,7 +177,7 @@ window.ConfirmDelete = {
       opts.message || "确定要删除选中的内容吗？相关文件将一并移除，删除后不可恢复。";
     mask.querySelector("#dlgCancel").onclick = closeModal;
     mask.querySelector("#dlgOk").onclick = () => {
-      const noAsk = mask.querySelector("#dlgNoAsk").checked;
+      const noAsk = mask.querySelector("#dlgNoAsk")?.checked;
       if (noAsk) {
         AppApi.saveSettings({ confirm_delete: false }).then((settings) => {
           if (!settings || settings.ok === false || typeof settings.confirm_delete !== 'boolean') throw new Error('settings not saved');
@@ -247,7 +249,7 @@ function buildNav() {
   });
 }
 
-function switchView(key) {
+function switchView(key, navigation = null) {
   document.body.dataset.keyboardNavigation = 'false';
   if (!window.AccountAccess.allowed() && !['setup','subscription','settings','faq'].includes(key)) {
     key = 'setup';
@@ -256,14 +258,15 @@ function switchView(key) {
   if (key === 'guide') { if (window.Onboarding) window.Onboarding.show(); return; }
   const page = PAGES.concat(BOTTOM_PAGES).find((p) => p.key === key);
   if (!page) return;
-  if (AppState.currentView === 'library' && key === 'library') { window.Library.refreshLight(); return; }
+  if (AppState.currentView === 'library' && key === 'library' && !navigation) { window.Library.refreshLight(); return; }
   // Account revocation hides the reader immediately. Its existing editor DOM
   // remains intact and Library.render restores it after successful login.
   if (!AccountAccess.allowed() && AppState.currentView === 'library' && document.getElementById('discardChanges')) closeModal();
   if (AccountAccess.allowed() && AppState.currentView === 'library' && window.Library?.canLeave
-      && !window.Library.canLeave(() => switchView(key))) return;
+      && !window.Library.canLeave(() => switchView(key, navigation))) return;
   if (AppState.currentView === "subscription" && key !== "subscription") window.Subscription.leave();
   if (AppState.currentView === "setup" && key !== "setup") window.Setup.leave();
+  window.MaterialNavigation.entered(key, navigation);
   AppState.currentView = key;
   document.querySelectorAll(".page").forEach((el) => el.classList.remove("active"));
   const target = document.getElementById("page-" + key);
@@ -273,9 +276,9 @@ function switchView(key) {
     el.classList.toggle("active", el.dataset.page === key);
     if (el.dataset.page === key) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
   });
-  if (key === "workbench") window.Workbench.render();
-  else if (key === "videos") window.Videos.render();
-  else if (key === "library") window.Library.render();
+  if (key === "workbench") window.Workbench.enter(navigation?.target);
+  else if (key === "videos") window.Videos.render(navigation?.target);
+  else if (key === "library") window.Library.render(navigation?.target);
   else if (key === "settings") window.Settings.render();
   else if (key === "subscription") window.Subscription.render();
   else if (key === "faq") window.FaqPage.render();

@@ -80,7 +80,7 @@ def test_documents_are_registered_data_with_scoped_revisions(local):
     assert "path" not in final_doc
     assert final_doc["size"] == len(final.read_bytes())
     assert control.call("documents.list", {})["items"][0]["task_id"] == task_id
-    assert control.call("documents.list", {"query": "不会匹配"}) == {"items": [], "total": 0}
+    assert control.call("documents.list", {"query": "不会匹配"}) == {"items": [], "total": 0, "next_cursor": None}
 
 
 def test_agent_and_desktop_share_the_same_cas_lock(local):

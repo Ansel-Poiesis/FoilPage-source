@@ -1,17 +1,86 @@
 # Copyright (c) 2026 Ansel
 # SPDX-License-Identifier: MPL-2.0
+import logging
 import re
 from unittest.mock import patch
 
 import pytest
-from engine.agent_client import _editing_level_prompt, _readable_fallback, rewrite_transcript
+from engine.agent_client import _editing_level_prompt, _readable_fallback, rewrite_transcript, _writer_system_prompt
+
+def _full_prompt(level, profile="knowledge"):
+    """合并提示 = 系统提示 + 力度段（2026-11-17 优化版排版规则在系统层）。"""
+    return _writer_system_prompt(profile) + _editing_level_prompt(level)
+
 from engine.settings import SettingsStore, SettingsValidationError
 
 
 @pytest.mark.parametrize("level", ["light", "balanced", "structured"])
 def test_every_level_requests_paragraphs_headings_and_emphasis(level):
-    prompt = _editing_level_prompt(level)
-    assert "分段" in prompt and "小标题" in prompt and "**加粗**" in prompt
+    """2026-11-17 优化版：排版规则上移到系统提示层，力度段只含力度定义；
+    合并后的完整提示（系统+力度）仍必须包含排版要求。"""
+    from engine.agent_client import _writer_system_prompt
+    combined = _writer_system_prompt("knowledge") + _editing_level_prompt(level)
+    assert "分段" in combined and "小标题" in combined and "**加粗**" in combined
+    assert "成稿" in _editing_level_prompt(level) or "论述点" in _editing_level_prompt(level)
+
+
+def test_layout_rules_ask_for_short_paragraphs_and_bold_in_every_paragraph():
+    """2026-11-25 先生反馈成稿分段少、加粗少：段落收紧到 1-3 句，加粗从"至多一处"
+    改为每段 1-2 处且整句优先。"""
+    system = _writer_system_prompt("knowledge")
+    assert "每段 1-3 句" in system and "至多一处" not in system
+    assert "每段 1-2 处" in system and "整句加粗" in system
+
+
+def test_bold_rule_forbids_rewriting_the_bolded_sentence():
+    """2026-11-25：长文保真降级的疑似诱因是加粗时顺手改写数字——规则明令一字不改。"""
+    assert "被加粗的句子连同数字一字不改" in _writer_system_prompt("knowledge")
+
+
+def test_fidelity_fallback_records_why_it_downgraded(tmp_path, caplog):
+    """2026-11-25：长文降级时好时坏却无从定位——触发项写入结果与日志，供清单落盘。"""
+    settings = SettingsStore(base_dir=tmp_path).defaults()
+    settings.update(agent_api_key="test-key", agent_profile="knowledge", agent_editing_level="balanced", agent_vision_enabled=False)
+    source = "这一段没有任何数字的原话。" * 40
+    caplog.set_level(logging.INFO, logger="shengjian.agent")
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n" + source + "另外还有 37 和 58。"):
+        result = rewrite_transcript(source, settings)
+    assert result.fidelity_fallback is True and result.fidelity_fallback_reason == "numbers"
+    assert any("保真降级" in record.getMessage() and "reason=numbers" in record.getMessage() for record in caplog.records)
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n只有一句。"):
+        assert rewrite_transcript(source, settings).fidelity_fallback_reason == "short"
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n只有一句，多了 37 和 58。"):
+        assert rewrite_transcript(source, settings).fidelity_fallback_reason == "numbers+short"
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n" + source):
+        result = rewrite_transcript(source, settings)
+    assert result.fidelity_fallback is False and result.fidelity_fallback_reason == ""
+
+
+def test_long_paragraphs_are_split_at_sentence_ends_without_touching_words():
+    """2026-11-25 实测：提示词写明每段 1-3 句后，deepseek-flash 在 1.8 万字成稿上仍写出
+    9.3 句/段。代码层按句数硬兜底：只加空行不改字，加粗范围内部不切，小数点不算句末。"""
+    from engine.agent_client import _split_long_paragraphs
+
+    line = "第一句。第二句。第三句。第四句。**第五句是重点。**第六句。"
+    split = _split_long_paragraphs(line)
+    assert split == "第一句。第二句。第三句。\n\n第四句。**第五句是重点。**第六句。"
+    assert "".join(split.split()) == "".join(line.split())
+    assert _split_long_paragraphs("一。二。三。**四。五。**六。") == "一。二。三。\n\n**四。五。**六。"
+    assert _split_long_paragraphs("**重点句。**普通句。另一个重点**在这里**。再一句。最后一句？") == \
+        "**重点句。**普通句。另一个重点**在这里**。\n\n再一句。最后一句？"
+    assert _split_long_paragraphs("小数 3.5 和 3.14 不算句末。二。三。四。") == "小数 3.5 和 3.14 不算句末。二。三。\n\n四。"
+    protected = "# 标题\n\n- 一。二。三。四。\n\n```一。二。三。四。\n```\n\n> 引用一。二。三。四。\n\n<!-- FoilPage 标签: 一 -->"
+    assert _split_long_paragraphs(protected) == protected
+    assert _split_long_paragraphs("一。二。") == "一。二。"
+
+
+def test_rewrite_splits_model_paragraphs_that_exceed_three_sentences(tmp_path):
+    settings = SettingsStore(base_dir=tmp_path).defaults()
+    settings.update(agent_api_key="test-key", agent_profile="knowledge", agent_editing_level="balanced", agent_vision_enabled=False)
+    wall = "第一句。第二句。第三句。第四句。第五句。"
+    with patch("engine.agent_client._chat", return_value="# 标题\n\n## 小节\n\n" + wall):
+        result = rewrite_transcript(wall, settings)
+    assert result.markdown.endswith("## 小节\n\n第一句。第二句。第三句。\n\n第四句。第五句。\n")
 
 
 def test_fallback_formats_without_dropping_or_reordering_sentences():
@@ -29,7 +98,7 @@ def test_editing_level_is_sent_to_model(tmp_path):
         rewrite_transcript("测试正文。", settings)
     prompt = chat.call_args.args[2][0]["content"]
     assert "结构整理" in prompt and "全部事实、数字、例子与观点逐项保留" in prompt
-    assert "简体中文" in prompt and "禁止输出繁体字" in prompt
+    assert "简体中文" in prompt  # 2026-11-17: 繁体禁止语已由 OpenCC 代码层兜底
 
 
 def test_invalid_editing_level_is_rejected(tmp_path):
@@ -42,20 +111,18 @@ def test_invalid_editing_level_is_rejected(tmp_path):
 
 @pytest.mark.parametrize("level", ["light", "balanced", "structured"])
 def test_every_level_bans_traditional_output_and_quantifies_retention(level):
-    prompt = _editing_level_prompt(level)
-    assert "简体中文" in prompt and "禁止输出繁体字" in prompt
+    prompt = _full_prompt(level)
+    assert "简体中文" in prompt
     assert "成稿字数不少于原文的" in prompt
-    assert "〔待确认：原词 [mm:ss]〕" in prompt and "禁止凭上下文猜测替换" in prompt
+    assert "「？」原词 [mm:ss]" in prompt and "## 存疑" in prompt  # 2026-11-19 存疑文末化
 
 
 def test_light_level_forbids_merging_and_structured_forbids_reordering():
-    light = _editing_level_prompt("light")
-    structured = _editing_level_prompt("structured")
-    assert "禁止合并、删减或改写任何句子" in light
-    assert "段落平衡" in light, "段落平衡要求须对所有档位生效"
-    assert "删除全部口播痕迹" in structured and "书面文章" in structured
-    assert "禁止一句成段" in light and "禁止一句成段" in structured
-    assert "书面文本" in _editing_level_prompt("balanced")
+    light = _full_prompt("light")
+    structured = _full_prompt("structured")
+    assert "禁止合并、删减或改写" in light
+    assert "删除全部口播痕迹" in structured
+    assert "分段" in light and "分段" in structured
 
 
 def test_smart_level_resolves_via_classifier(tmp_path):
@@ -144,8 +211,8 @@ def test_traditional_output_is_converted_to_simplified_in_code(tmp_path):
 
 
 def test_heading_completeness_is_constrained():
-    prompt = _editing_level_prompt("structured")
-    assert "不得从句子中间截断起题" in prompt
+    prompt = _full_prompt("structured")
+    assert "不超过 20 字" in prompt, "小标题长度约束仍在完整提示中"
 
 
 def test_particle_zhu_is_converted_but_word_zhu_is_kept():
@@ -159,10 +226,8 @@ def test_particle_zhu_is_converted_but_word_zhu_is_kept():
 
 
 def test_number_form_and_silent_rewrite_rules_are_in_prompt():
-    prompt = _editing_level_prompt("balanced")
-    assert "阿拉伯数字不得改写为中文数字" in prompt
-    assert "静默改写" in prompt
-    assert "照抄该词" in prompt and "所在行的行首定位标记" in prompt
+    prompt = _full_prompt("balanced")
+    assert "数字写法照抄原文" in prompt
 
 
 def test_doubt_markers_get_deterministic_timestamp_backfill():
@@ -180,6 +245,89 @@ def test_doubt_markers_get_deterministic_timestamp_backfill():
     assert _backfill_doubt_timestamps("〔待确认：x [0:10-0:30]〕", timestamped) == "〔待确认：x [0:10-0:30]〕"
     # 无时间戳源时不处理
     assert _backfill_doubt_timestamps("〔待确认：阿尔法〕", "没有定位标记的原文") == "〔待确认：阿尔法〕"
+
+
+def test_inline_doubt_markers_are_moved_to_end_section():
+    """2026-11-19 存疑文末化：正文无行内标记，清单集中文末并回填定位。"""
+    from engine.agent_client import _normalize_doubt_section
+
+    timestamped = "[0:12-0:15] 第一句话有存疑词阿尔法。" + chr(10) + "[1:03-1:08] 第二段提到直直木奶茶。"
+    markdown = ("# 标题" + chr(10) + chr(10) + "第一段〔待确认：阿尔法〕继续。"
+                + chr(10) + chr(10) + "第二段提到直直木〔待确认：直直木〕。")
+    out = _normalize_doubt_section(markdown, timestamped)
+    body = out.split("## 存疑", 1)[0]
+    assert "〔待确认" not in body and "「？」" not in body, "正文必须干净"
+    tail = out.split("## 存疑", 1)[1]
+    assert "- 「？」阿尔法 [0:12-0:15]" in tail
+    assert "- 「？」直直木 [1:03-1:08]" in tail
+    assert tail.count("- 「？」") == 2
+
+
+def test_end_doubt_section_is_normalized_and_capped():
+    """模型已按文末格式输出：保留并补定位，超 5 条截断。"""
+    from engine.agent_client import _normalize_doubt_section
+
+    timestamped = "[0:10-0:12] 词一的内容。" + chr(10) + "[0:20-0:22] 词二的内容。"
+    names = "一二三四五六七"
+    items = "".join(f"{chr(10)}- 「？」词{name}（推测：词{name}正）" for name in names)
+    markdown = "# 标题" + chr(10) + chr(10) + "正文。" + chr(10) + chr(10) + "## 存疑" + items
+    out = _normalize_doubt_section(markdown, timestamped)
+    body, tail = out.split("## 存疑", 1)
+    assert "「？」" not in body
+    assert "- 「？」词一 [0:10-0:12]（推测：词一正）" in tail, "漏定位的清单行按原文回填"
+    assert tail.count("- 「？」") == 5, "清单上限 5 条"
+
+
+def test_no_doubt_items_leave_no_section():
+    """无存疑词时不输出文末小节。"""
+    from engine.agent_client import _normalize_doubt_section
+
+    markdown = "# 标题" + chr(10) + chr(10) + "干净的正文。"
+    assert _normalize_doubt_section(markdown, "[0:10-0:12] 干净的正文。") == markdown
+
+
+def test_fabricated_numbers_ignore_end_doubt_section():
+    """存疑清单的 [mm:ss] 定位数字不是成文数字，不触发保真回退。"""
+    from engine.agent_client import _fabricated_numbers
+
+    raw = "有人提到直直木奶茶和电子肠这些词。" * 20
+    markdown = ("# 标题" + chr(10) + chr(10) + "正文提到直直木奶茶。" + chr(10) + chr(10)
+                + "## 存疑" + chr(10) + chr(10) + "- 「？」直直木 [12:03-12:08]（推测：植脂末）")
+    assert _fabricated_numbers(raw, markdown) == []
+
+
+def test_hosted_vision_gate_by_effective_model():
+    """2026-11-19 托管视觉：deepseek-flash 开、qwen 默认档与 byok deepseek 预设关。"""
+    from engine.agent_client import _vision_capable
+
+    hosted = {"agent_billing_mode": "hosted"}
+    assert _vision_capable({**hosted, "agent_model": "deepseek-flash"}) is True
+    assert _vision_capable({**hosted, "agent_model": "DeepSeek-Flash"}) is True
+    assert _vision_capable({**hosted, "agent_model": "qwen-plus"}) is False
+    assert _vision_capable({**hosted, "agent_model": "", "agent_hosted_model": "deepseek-flash"}) is True
+    assert _vision_capable({"agent_billing_mode": "byok", "agent_provider": "deepseek",
+                            "agent_model": "deepseek-chat"}) is False
+
+
+def test_rewrite_moves_inline_doubts_to_tail(tmp_path):
+    """端到端：模型输出行内标记时，成稿正文干净、清单在文末且不触发保真回退。"""
+    from unittest.mock import patch
+    from engine.agent_client import rewrite_transcript
+
+    settings = SettingsStore(base_dir=tmp_path).defaults()
+    settings.update(agent_api_key="k", agent_profile="knowledge",
+                    agent_editing_level="balanced", agent_vision_enabled=False)
+    raw = "大家讲到直直木这个词，还有别的细节。本地识别可以在家用电脑运行，成本很低，隐私不出本机。" * 3
+    article = ("<!-- FoilPage 标签: 测试 -->" + chr(10) + "# 标题" + chr(10) + chr(10)
+               + "正文讲直直木〔待确认：直直木〕与本地识别，细节保持原样，顺序与限定条件都不动，也不改写说话人的立场。"
+               + chr(10) + chr(10)
+               + "成稿继续展开原有的例子与限定条件，不写原文没有的数字，也不改变任何立场，成稿字数不少于原文的百分之八十五。")
+    with patch("engine.agent_client._chat", return_value=article):
+        result = rewrite_transcript(raw, settings)
+    assert result.fidelity_fallback is False
+    body = result.markdown.split("## 存疑")[0]
+    assert "〔待确认" not in body and "「？」" not in body
+    assert "- 「？」直直木" in result.markdown
 
 
 def test_fidelity_floor_is_tier_aware():
@@ -240,13 +388,15 @@ def test_single_number_correction_survives_fabrication_floor(tmp_path):
 
 def test_doubt_marker_bar_and_cap_are_in_prompt():
     """2026-11-04 病例：5182 字成稿带 14 处待确认（含"鸡蛋""千万"这类常用词）。
-    标注必须抬高门槛并限量，专有名词通顺即放行。"""
-    prompt = _editing_level_prompt("balanced")
-    assert "不是免责工具" in prompt
-    assert "每千字 2 处" in prompt and "不足千字最多 3 处" in prompt
-    assert "通顺合理的专有名词直接使用" in prompt
+    2026-11-19 起存疑移到文末清单：上限 5 条、正文禁行内标记；错字规则覆盖生活专名。"""
+    prompt = _full_prompt("balanced")
+    assert "全文不超过 5 处" in prompt
+    assert "正文中不得出现〔待确认〕" in prompt
     system = _writer_system_prompt_for_test()
-    assert "有把握时按语境直接修正、无需标注" in system
+    assert "搭配明显生硬的常用词按语境直接修正" in system  # 2026-11-17 优化版措辞
+    assert "淀粉肠" in system and "植脂末" in system  # 2026-11-19 生活专名领域词表
+    assert "不得照抄该段首句" in system  # 小标题不得与段首句重复
+    assert "有一句话说说" in _full_prompt("light")  # light 档口误叠字微修
 
 
 def _writer_system_prompt_for_test() -> str:

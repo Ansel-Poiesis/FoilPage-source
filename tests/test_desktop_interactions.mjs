@@ -268,7 +268,9 @@ test('hosted AI enabling follows real capability changes and disabling stays ava
     await page.getByText('托管模型尚未配置',{exact:true}).waitFor();
     const body=page.getByRole('switch',{name:'AI 整理正文',exact:true}),title=page.getByRole('switch',{name:'AI 优化标题',exact:true});
     assert(await body.isDisabled());assert.equal(await title.isDisabled(),false);
-    for(const label of ['服务商','接口地址','模型','API Key','标题模型','启用字幕视觉校对']) assert(await page.getByLabel(label,{exact:true}).isDisabled(),label+' is BYOK-only');
+    for(const label of ['服务商','接口地址','模型','API Key','标题模型']) assert(await page.getByLabel(label,{exact:true}).isDisabled(),label+' is BYOK-only');
+    assert.equal(await page.getByLabel('启用字幕视觉校对',{exact:true}).isDisabled(),false);
+    assert(await page.getByText('deepseek-flash 托管档支持画面核对；默认档为纯文本，此开关不生效',{exact:true}).isVisible());
     await page.getByRole('button',{name:'＋ 添加自定义 Agent',exact:true}).click();
     assert(await page.getByLabel('自定义 Agent 模型',{exact:true}).isDisabled());assert.equal(await page.getByLabel('自定义 Agent 创造性',{exact:true}).isDisabled(),false);
     const prompt=page.getByLabel('自定义 Agent 系统提示词',{exact:true});assert.equal(await prompt.isEnabled(),true);
@@ -338,4 +340,174 @@ test('gallery task shows the badge and a lazy inspector grid',async()=>{
     assert.ok(cells.every(url=>url.includes('taskcover/fixture.jpg')));
     assert.deepEqual(page.errors,[]);
   }finally{await page.close();}
+});
+
+test('pointer selections use a raised surface without an inset edge while keyboard and high-contrast focus stay visible', async () => {
+  const page = await open();
+  try {
+    await page.locator('.job-open').first().click();
+    const themes = ['dark', 'paper', 'dracula', 'tokyo-night', 'nord', 'mocha', 'gruvbox', 'rose-pine', 'latte', 'nord-light'];
+    for (const theme of themes) {
+      await page.evaluate(theme => {
+        AppState.settings.theme = theme;
+        applyTheme();
+      }, theme);
+      await page.waitForFunction(() => ['.nav-row.active', '.job.selected'].every(selector => {
+        return getComputedStyle(document.querySelector(selector)).backgroundColor !== 'rgba(0, 0, 0, 0)';
+      }));
+      const selection = await page.evaluate(() => {
+        return ['.nav-row.active', '.job.selected'].map(selector => {
+          const style = getComputedStyle(document.querySelector(selector));
+          return {shadow: style.boxShadow, background: style.backgroundColor};
+        });
+      });
+      assert(selection.every(style => style.shadow !== 'none' && !style.shadow.includes('inset')), `${theme} selection uses surface depth without an inset edge`);
+      assert(selection.every(style => style.background !== 'rgba(0, 0, 0, 0)'), `${theme} selection needs a visible fill`);
+    }
+    await page.locator('[data-page=workbench]').focus();
+    await page.keyboard.press('Tab');
+    assert(await page.evaluate(() => {
+      const style = getComputedStyle(document.activeElement);
+      return style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) >= 2;
+    }));
+    await page.emulateMedia({forcedColors: 'active'});
+    assert(await page.locator('.job.selected').evaluate(row => getComputedStyle(row).outlineStyle !== 'none'));
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.close();
+  }
+});
+
+test('desktop task controls preserve every action and separate reading from media, files and management', async () => {
+  const page = await open();
+  try {
+    await page.evaluate(() => {
+      window.__detailCalls = [];
+      __MOCK__.play_media = task => { __detailCalls.push(['play', task.task_id]); return {ok: true}; };
+      __MOCK__.open_path = value => { __detailCalls.push(['open', value]); return {ok: true}; };
+      __MOCK__.retranscribe_tasks = ids => { __detailCalls.push(['retry', ids]); return {created: ['new-job']}; };
+      __MOCK__.delete_tasks = ids => { __detailCalls.push(['delete', ids]); return {removed: ids}; };
+    });
+    await page.locator('.job-open').first().click();
+    const actions = page.locator('#inspector .actions');
+    const labels = await actions.locator('button:visible').allTextContents();
+    assert.deepEqual(labels, ['在文本库阅读', '播放', '在视频库定位', '定位媒体文件', '定位文稿文件', '重新转写', '删除']);
+    assert.equal(await page.locator('#inspector .task-result-status').textContent(), '转写完成');
+    assert.equal(await page.locator('#inspector .ml-status').count(), 0);
+    const primary = await actions.getByRole('button', {name: '在文本库阅读', exact: true}).boundingBox();
+    const media = await actions.getByRole('button', {name: '播放', exact: true}).boundingBox();
+    const files = await actions.getByRole('button', {name: '定位媒体文件', exact: true}).boundingBox();
+    const management = await actions.getByRole('button', {name: '重新转写', exact: true}).boundingBox();
+    assert(primary.width >= (await actions.boundingBox()).width - 1);
+    assert(media.y >= primary.y + primary.height + 12);
+    assert(files.y >= media.y + media.height + 12);
+    assert(management.y >= files.y + files.height + 20);
+    await actions.getByRole('button', {name: '播放', exact: true}).click();
+    await actions.getByRole('button', {name: '定位媒体文件', exact: true}).click();
+    await actions.getByRole('button', {name: '定位文稿文件', exact: true}).click();
+    await actions.getByRole('button', {name: '重新转写', exact: true}).click();
+    await page.waitForFunction(() => __detailCalls.some(call => call[0] === 'retry'));
+    assert.deepEqual(await page.evaluate(() => __detailCalls), [
+      ['play', 'job:0'], ['open', 'demo.mp4'], ['open', 'final.md'], ['retry', ['job:0']],
+    ]);
+    await actions.getByRole('button', {name: '删除', exact: true}).click();
+    await page.locator('#dlgCancel').click();
+    assert.equal(await page.evaluate(() => __detailCalls.filter(call => call[0] === 'delete').length), 0);
+    await actions.getByRole('button', {name: '删除', exact: true}).click();
+    await page.locator('#dlgOk').click();
+    await page.waitForFunction(() => __detailCalls.some(call => call[0] === 'delete'));
+    assert.deepEqual(await page.evaluate(() => __detailCalls.at(-1)), ['delete', ['job:0']]);
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.close();
+  }
+});
+
+test('task file actions report moved files in the inspector and allow retry on the same task', async () => {
+  const page = await open();
+  try {
+    await page.evaluate(() => {
+      __MOCK__.open_path = () => ({ok: false, error: '文件不存在'});
+      __MOCK__.play_media = () => ({ok: false, error: '媒体文件尚未生成或已移除'});
+    });
+    await page.locator('.job-open').first().click();
+    const inspector = page.locator('#inspector');
+    const feedback = inspector.locator('.task-action-feedback');
+    for (const [label, reason] of [
+      ['定位文稿文件', '文件不存在'], ['定位媒体文件', '文件不存在'], ['播放', '媒体文件尚未生成或已移除'],
+    ]) {
+      const action = inspector.getByRole('button', {name: label, exact: true});
+      await action.focus();
+      await page.keyboard.press('Enter');
+      await feedback.getByText(`${label} · ${reason}`, {exact: true}).waitFor();
+      assert.deepEqual(await page.evaluate(() => [...AppState.selected]), ['job:0']);
+      assert(await action.evaluate(button => button === document.activeElement));
+    }
+    await page.evaluate(() => { __MOCK__.play_media = () => ({ok: true}); });
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.querySelector('.task-action-feedback').textContent === '');
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});
+
+test('the author credit aligns its wordmark and website and opens through the native bridge by keyboard', async () => {
+  const page = await open();
+  try {
+    const credit = page.locator('#authorCredit');
+    assert.equal(await credit.getAttribute('href'), 'https://keeppoiesis.com/');
+    assert.equal(await credit.locator('.author-credit-name').textContent(), 'Ansel');
+    assert(await credit.evaluate(link => {
+      const copy = link.querySelector('.author-credit-copy').getBoundingClientRect();
+      const icon = link.querySelector('.author-credit-icon').getBoundingClientRect();
+      return icon.left > copy.right && Math.abs(icon.y + icon.height / 2 - copy.y - copy.height / 2) < 2;
+    }));
+    await page.evaluate(() => {
+      window.__websiteOpened = 0;
+      __MOCK__.open_author_website = () => { window.__websiteOpened++; return {ok: true}; };
+      window.pywebview = {api: __MOCK__};
+    });
+    await credit.focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await page.evaluate(() => __websiteOpened), 1);
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.close();
+  }
+});
+
+test('task action groups keep download recovery, transcription and cancellation on their original routes', async () => {
+  const page = await open();
+  try {
+    await page.evaluate(() => {
+      window.__designTasks = [];
+      window.__designCalls = [];
+      __MOCK__.get_tasks = () => __designTasks;
+      __MOCK__.transcribe_download = id => { __designCalls.push(['transcribe', id]); return {ok: true}; };
+      __MOCK__.retry_downloads = ids => { __designCalls.push(['download-retry', ids]); return {retried: ids}; };
+      __MOCK__.open_video_page = id => { __designCalls.push(['browser', id]); return {ok: true}; };
+      __MOCK__.cancel_tasks = ids => { __designCalls.push(['cancel', ids]); return {ok: true}; };
+    });
+    const scenarios = [
+      {id: 'dl:ready', kind: 'download', status: 'done', platform: 'bilibili', label: '转写'},
+      {id: 'dl:retry', kind: 'download', status: 'failed', platform: 'bilibili', label: '重试下载'},
+      {id: 'dl:expired', kind: 'download', status: 'failed', platform: 'douyin', label: '回视频页重下'},
+      {id: 'job:running', kind: 'transcription', status: 'running', platform: '', label: '取消'},
+    ];
+    for (const scenario of scenarios) {
+      await page.evaluate(scenario => {
+        __designTasks = [{task_id: scenario.id, kind: scenario.kind, status: scenario.status,
+          platform: scenario.platform, source_path: 'demo.mp4', display_title: '合成任务', progress: 0}];
+        AppState.tasks = __designTasks;
+        AppState.selected = new Set([scenario.id]);
+        Workbench.render(true);
+      }, scenario);
+      await page.locator('#inspector').getByRole('button', {name: scenario.label, exact: true}).click();
+    }
+    assert.deepEqual(await page.evaluate(() => __designCalls), [
+      ['transcribe', 'dl:ready'], ['download-retry', ['dl:retry']], ['browser', 'dl:expired'], ['cancel', ['job:running']],
+    ]);
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.close();
+  }
 });

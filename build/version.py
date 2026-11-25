@@ -27,6 +27,11 @@ def synchronize(root: Path, version: str | None = None, channel: str | None = No
     dotted = version + ".0"
     native = ", ".join(version.split(".")) + ", 0"
     rules = {
+        "README.md": [(r'源码版本 \*\*[^*]+\*\*', f'源码版本 **{version}**'),
+                      (r'^git checkout v\d+\.\d+\.\d+$', f'git checkout v{version}')],
+        "package.json": [(r'^  "version": "[^"]+"', f'  "version": "{version}"')],
+        "package-lock.json": [(r'^  "version": "[^"]+"', f'  "version": "{version}"'),
+                              (r'("": \{[\s\S]*?"version": ")[^"]+("[\s,])', rf'\g<1>{version}\g<2>')],
         "app/bridge.py": [(r'^APP_VERSION = "[^"]+"$', f'APP_VERSION = "{version}"'),
                           (r'^RELEASE_CHANNEL = "[^"]+"$', f'RELEASE_CHANNEL = "{channel}"')],
         "app/webview_ui/js/app.js": [(r'window.APP_VERSION = "[^"]+";', f'window.APP_VERSION = "{version}";')],

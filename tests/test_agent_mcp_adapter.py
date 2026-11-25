@@ -67,9 +67,25 @@ def test_mcp_edit_forwards_specific_revision_and_returns_structured_output():
     assert len(backend.calls) == 1
 
 
+@pytest.mark.parametrize("tool,method", [("list_tasks", "tasks.list"), ("list_documents", "documents.list")])
+def test_mcp_listing_exposes_and_forwards_optional_cursor(tool, method):
+    backend = RecordingClient()
+    async def check():
+        async with Client(build_server(backend, read_only=True)) as client:
+            schemas = {item.name: item.input_schema for item in (await client.list_tools()).tools}
+            assert schemas[tool]["properties"]["cursor"]["type"] == "string"
+            result = await client.call_tool(tool, {"query": "同名资料", "limit": 200, "cursor": "previous_page"})
+            assert result.is_error is False
+            assert result.structured_content["params"]["cursor"] == "previous_page"
+    asyncio.run(check())
+    assert backend.calls[0][0] == method
+
+
 @pytest.mark.parametrize("name,arguments", [
     ("list_documents", {"limit": True}),
     ("list_tasks", {"limit": "50"}),
+    ("list_tasks", {"cursor": "not valid!"}),
+    ("list_documents", {"cursor": "a" * 1025}),
     ("read_document", {"task_id": "../settings.json"}),
     ("update_document", {"task_id": TASK, "text": "修改", "expected_revision": "stale"}),
     ("update_document_metadata", {"task_id": TASK, "expected_revision": REVISION}),

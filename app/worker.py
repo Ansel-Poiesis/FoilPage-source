@@ -20,10 +20,13 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
+import os
 import signal
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Mapping
 
@@ -39,10 +42,14 @@ try:
 except Exception:
     pass
 
-from engine import queue_store
+from engine import queue_store, service_http
 from engine.power import keep_awake
 from engine.contracts import EngineError, Job
 from engine.settings import SettingsError, SettingsStore
+from engine.library_location import LibraryLocationError, preflight_library, validate_storage_path
+from app.backup_restore import (
+    BackupRestoreError, RECOVERY_DIRECTORY,
+)
 
 # 可瞬时重试的 EngineError code（环境抖动/资源暂不可用）。
 # 其余 EngineError 视为终态失败。团队可按真实错误码扩展本集合。
@@ -52,6 +59,20 @@ _RETRYABLE_CODES: frozenset[str] = frozenset({"model_load_failed", "llm_failed",
 def classify_error(code: str) -> str:
     """把 EngineError code 映射到终态：retryable / failed。"""
     return "retryable" if code in _RETRYABLE_CODES else "failed"
+
+
+def _require_restore_ready(database, settings_store=None) -> None:
+    if settings_store is not None:
+        directory = settings_store.base_dir / RECOVERY_DIRECTORY
+    else:
+        value = str(database)
+        if value == ":memory:" or value.startswith("file:"):
+            return
+        # This only identifies a log beside the explicitly selected DB. A
+        # custom database path cannot establish some other settings root.
+        directory = Path(value).expanduser().resolve().parent / RECOVERY_DIRECTORY
+    if directory.exists() or directory.is_symlink():
+        raise BackupRestoreError("备份导入待恢复，Worker已停止；请关闭当前实例并重启FoilPage完成恢复后再启动Worker（原设置根由 --settings-dir 指定）")
 
 
 class Worker:
@@ -70,6 +91,7 @@ class Worker:
         agent_settings: Mapping[str, object] | None = None,
         settings_store: SettingsStore | None = None,
         concurrency: int = 1,
+        network_policy: service_http.NetworkPolicy | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -82,6 +104,9 @@ class Worker:
         self.lease_timeout = lease_timeout
         self.agent_settings = dict(agent_settings or {})
         self.settings_store = settings_store
+        self.network_policy = network_policy
+        if settings_store is not None:
+            _require_restore_ready("", settings_store)
         # 并发档位（免费 1 / 标准 2 / 高级 4）：>1 时用线程池同时处理
         # 多条作业；claim_next 的原子抢占保证不会重复领取。
         self.concurrency = max(1, int(concurrency))
@@ -89,6 +114,7 @@ class Worker:
         self.account_waiting = False
 
     def _account_ready(self) -> bool:
+        _require_restore_ready(self.store.db_path, self.settings_store)
         from engine.account_access import verified_account_access
         try:
             if self.settings_store:
@@ -110,6 +136,7 @@ class Worker:
         return ready
 
     def _run_job(self, job: Job) -> None:
+        _require_restore_ready(self.store.db_path, self.settings_store)
         # 延迟 import，避免 worker 仅做 --help / 单元测试时也拉起重型引擎依赖。
         from run_engine import run as run_engine_run
 
@@ -123,7 +150,11 @@ class Worker:
         heartbeat.start()
         last_progress = 0.0
         agent_settings = copy.deepcopy(self.settings_store.load() if self.settings_store else self.agent_settings)
-        agent_settings["_agent_operation_id"] = f"{job['id']}:{job.get('attempts', 1)}"
+        if self.network_policy is not None:
+            agent_settings["_proxy_route"] = self.network_policy.proxy_route
+        # A resumed run needs a fresh hosted operation even when its retry
+        # allowance was restored after a graceful shutdown.
+        agent_settings["_agent_operation_id"] = uuid.uuid4().hex
         # TASK-8.24：重新转写可按单任务覆盖 Agent 整理开关（None=沿用全局）。
         body_override = job.get("body_enabled_override")
         if isinstance(body_override, bool):
@@ -278,7 +309,7 @@ class Worker:
                 e.code == "cancelled"
                 and self._stop
                 and not self.store.is_cancel_requested(job["id"])
-                and self.store.requeue_interrupted(job["id"])
+                and self.store.requeue_interrupted(job["id"], worker_id=self.worker_id)
             ):
                 print(f"[worker] 退出中断，任务返回队列 {job['id']}", flush=True)
                 return
@@ -377,6 +408,7 @@ class Worker:
             return
     def step(self) -> bool:
         """领取并处理一条作业；队列空返回 False。"""
+        _require_restore_ready(self.store.db_path, self.settings_store)
         self.store.recover_stale_jobs(self.lease_timeout)
         if not self._account_ready():
             return False
@@ -433,6 +465,7 @@ class Worker:
             while not self._stop:
                 if not semaphore.acquire(timeout=0.2):
                     continue
+                _require_restore_ready(self.store.db_path, self.settings_store)
                 self.store.recover_stale_jobs(self.lease_timeout)
                 if not self._account_ready():
                     release()
@@ -458,9 +491,21 @@ class Worker:
             signal.signal(stop_signal, lambda *_: self._request_stop())
 
 
+def _route_agent_logs_to_stdout() -> None:
+    """Worker 进程不配置全局日志；保真降级等 agent 诊断行经 stdout 进入桌面端日志。"""
+    target = logging.getLogger("shengjian.agent")
+    if any(getattr(handler, "_worker_stdout", False) for handler in target.handlers):
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler._worker_stdout = True
+    target.addHandler(handler)
+    target.setLevel(logging.INFO)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="FoilPage 队列 worker")
-    parser.add_argument("--db", default="queue.db", help="SQLite 数据库路径")
+    parser.add_argument("--db", default=None, help="已存在的 SQLite 数据库；默认沿用应用资料库")
     parser.add_argument("--model", default=None, help="显式覆盖作业 whisper 模型")
     parser.add_argument("--device", default=None, choices=["cpu", "cuda"], help="显式覆盖作业设备")
     parser.add_argument("--language", default=None, help="显式覆盖作业语言")
@@ -474,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrency", type=int, default=1, help="并发处理作业数（订阅档位：免费1/标准2/高级4）")
     parser.add_argument("--probe-gpu", action="store_true", help="输出 CUDA 能力报告后退出")
     args = parser.parse_args(argv)
+    _route_agent_logs_to_stdout()
 
     if args.probe_gpu:
         from engine.asr import probe_cuda
@@ -481,22 +527,50 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(probe_cuda(), ensure_ascii=False), flush=True)
         return 0
 
-    store = queue_store.QueueStore(args.db)
-    settings_store = SettingsStore(base_dir=args.settings_dir) if args.settings_dir else None
-    w = Worker(
-        store,
-        model=args.model,
-        device=args.device,
-        language=args.language,
-        model_dir=args.model_dir,
-        worker_id=args.worker_id,
-        poll=args.poll,
-        heartbeat_interval=args.heartbeat,
-        lease_timeout=args.lease_timeout,
-        settings_store=settings_store,
-        concurrency=args.concurrency,
-    )
+    settings_store = None
+    settings: dict[str, object] = {}
     try:
+        if args.settings_dir or not args.db:
+            settings_store = SettingsStore(base_dir=args.settings_dir) if args.settings_dir else SettingsStore()
+        if settings_store is not None:
+            # Another process may still be publishing this set. Only the
+            # application's exclusive startup can decide to roll it back.
+            _require_restore_ready("", settings_store)
+            settings = settings_store.load()
+            preflight_library(settings_store, settings)
+            selected = validate_storage_path(settings["database_path"])
+            if args.db and validate_storage_path(Path(args.db).expanduser().resolve()) != selected:
+                raise LibraryLocationError("Worker 数据库与应用记录的资料库位置不同，已停止启动")
+            args.db = str(selected)
+        else:
+            _require_restore_ready(args.db)
+        try:
+            network_policy = service_http.worker_network_policy(os.environ)
+        except ValueError as exc:
+            raise SettingsError(str(exc)) from None
+        database = validate_storage_path(Path(args.db).expanduser().resolve())
+        if not database.is_file():
+            raise LibraryLocationError("原资料库暂不可用，Worker 不会创建空库；请先启动 FoilPage")
+        args.db = str(database)
+    except (BackupRestoreError, LibraryLocationError, SettingsError, OSError) as exc:
+        print(f"[worker] 无法启动: {exc}", file=sys.stderr, flush=True)
+        return 2
+    store = queue_store.QueueStore(args.db)
+    try:
+        w = Worker(
+            store,
+            model=args.model,
+            device=args.device,
+            language=args.language,
+            model_dir=args.model_dir,
+            worker_id=args.worker_id,
+            poll=args.poll,
+            heartbeat_interval=args.heartbeat,
+            lease_timeout=args.lease_timeout,
+            settings_store=settings_store,
+            concurrency=args.concurrency,
+            network_policy=network_policy,
+        )
         if args.oneshot:
             w.step()
             return 0

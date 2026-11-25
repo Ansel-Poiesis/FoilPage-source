@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import threading
-import json
 import logging
+import stat
 import uuid
 import re
+import sqlite3
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -16,10 +17,13 @@ from datetime import datetime
 from pathlib import Path
 import shutil
 
-from engine.media_store import ImportSummary, MediaStore
-from engine.download_store import DownloadStore
-from engine.queue_store import QueueStateError, QueueStore, QueueStoreError
-from engine.settings import SettingsStore
+from engine.media_store import ImportSummary, MediaStore, MediaStoreError, SCHEMA_VERSION as MEDIA_SCHEMA_VERSION
+from engine.download_store import DownloadStore, DownloadStoreError, SCHEMA_VERSION as DOWNLOAD_SCHEMA_VERSION
+from engine.queue_store import (
+    QueueStateError, QueueStore, QueueStoreError, _source_paths_equivalent,
+    SCHEMA_VERSION as QUEUE_SCHEMA_VERSION,
+)
+from engine.settings import SettingsStore, SettingsValidationError
 from engine.agent_protocol import (
     AGENT_MAX_TEXT_BYTES, DocumentRevisionConflict, DocumentTooLargeError, DocumentUnavailableError,
     document_metadata, document_revision,
@@ -39,17 +43,37 @@ class AppController:
         self._settings_lock = threading.RLock()
         self.media_action_lock = threading.RLock()
         self.settings_store = settings_store or SettingsStore()
-        from engine.agent_activity import AgentActivity
-        self.agent_activity = AgentActivity(self.settings_store.base_dir / "agent-activity.json")
-        from engine.product_events import ProductEvents
-        self.product_events = ProductEvents(self.settings_store.base_dir / "product-notifications.json")
+        from app.backup_restore import recover_interrupted_import
+        recover_interrupted_import(self.settings_store)
         self.settings = self.settings_store.load()
+        self._check_database_versions(self.settings["database_path"])
+        from engine.library_location import (
+            bind_library_identity, mark_library_initialized, preflight_library,
+        )
+        preflight_library(self.settings_store, self.settings)
         if not self.settings.get("local_api_token"):
             self.settings["local_api_token"] = self.settings_store.ensure_local_api_token()
         self.settings_store.ensure_runtime_directories()
         self.media = MediaStore(self.settings["database_path"])
         self.queue = QueueStore(self.settings["database_path"])
         self.downloads = DownloadStore(self.settings["database_path"])
+        try:
+            library_id = bind_library_identity(
+                self.settings["database_path"], self.settings.get("library_id", ""),
+            )
+            if self.settings.get("library_id") != library_id:
+                self.settings["library_id"] = library_id
+                self.settings = self.settings_store.save(self.settings)
+            mark_library_initialized(self.settings_store)
+        except Exception:
+            self.downloads.close()
+            self.queue.close()
+            self.media.close()
+            raise
+        from engine.agent_activity import AgentActivity
+        self.agent_activity = AgentActivity(self.settings_store.base_dir / "agent-activity.json")
+        from engine.product_events import ProductEvents
+        self.product_events = ProductEvents(self.settings_store.base_dir / "product-notifications.json")
         from engine.video_catalog import VideoCatalog
         from engine.retention import FailedTaskRetention
         self.video_catalog = VideoCatalog(self.media)
@@ -57,8 +81,49 @@ class AppController:
         self._backfill_download_titles()
         self._recover_browser_downloads()
 
+    def _require_writable(self) -> None:
+        if getattr(self, "_backup_restore_blocked", False):
+            raise QueueStateError("备份恢复尚未完成，暂时不能修改资料；请重启应用完成恢复后再操作")
+
+    @contextmanager
+    def _writable_action(self):
+        with self.media_action_lock:
+            self._require_writable()
+            yield
+
+    @staticmethod
+    def _check_database_versions(db_path: str) -> None:
+        """Refuse any known future component before opening stores that can migrate it."""
+        path = Path(db_path).expanduser().resolve()
+        if not path.is_file():
+            return
+        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        try:
+            queue_version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if queue_version > QUEUE_SCHEMA_VERSION:
+                raise QueueStoreError(
+                    f"资料数据库版本 {queue_version} 高于当前支持版本 {QUEUE_SCHEMA_VERSION}，请更新 FoilPage 后再打开"
+                )
+            registered = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_schema'"
+            ).fetchone()
+            if not registered:
+                return
+            versions = dict(connection.execute("SELECT component, version FROM app_schema"))
+            for component, supported, error_type in (
+                ("media", MEDIA_SCHEMA_VERSION, MediaStoreError),
+                ("downloads", DOWNLOAD_SCHEMA_VERSION, DownloadStoreError),
+            ):
+                version = versions.get(component, 0)
+                if version > supported:
+                    raise error_type(
+                        f"{component} 资料库版本 {version} 高于当前支持版本 {supported}，请更新 FoilPage 后再打开"
+                    )
+        finally:
+            connection.close()
+
     def _backfill_download_titles(self) -> None:
-        for item in self.downloads.list(limit=500):
+        for item in self.downloads.list(limit=None):
             job_id = item.get("job_id")
             title = item.get("title", "")
             if not job_id or not title:
@@ -69,7 +134,7 @@ class AppController:
 
     def _recover_browser_downloads(self) -> None:
         """Re-link completed browser downloads whose media or ASR rows were lost."""
-        for item in self.downloads.list(limit=500):
+        for item in self.downloads.recovery_candidates():
             try:
                 self._recover_one_download(item)
             except Exception:
@@ -127,7 +192,7 @@ class AppController:
         return None
 
     def import_files(self, paths: list[str], *, display_names: list[str] | None = None):
-        with self.media_action_lock:
+        with self._writable_action():
             labels = display_names or []
             return [
                 self.media.import_file(path, display_name=labels[index] if index < len(labels) else "")
@@ -135,12 +200,14 @@ class AppController:
             ]
 
     def import_folder(self, path: str, *, recursive: bool = True) -> ImportSummary:
-        return self.media.import_directory(path, recursive=recursive)
+        with self._writable_action():
+            return self.media.import_directory(path, recursive=recursive)
 
     def import_paths(self, paths, *, progress=None, cancel_event=None) -> ImportSummary:
-        return self.media.import_paths(
-            paths, progress=progress, cancel_event=cancel_event
-        )
+        with self._writable_action():
+            return self.media.import_paths(
+                paths, progress=progress, cancel_event=cancel_event
+            )
 
     def media_rows(self, *, query: str = "", media_type=None) -> list[dict]:
         latest: dict[str, dict] = {}
@@ -157,7 +224,8 @@ class AppController:
 
     def clear_media_library(self) -> int:
         """Clear imported-media records without touching source files or jobs."""
-        return self.media.clear_media()
+        with self._writable_action():
+            return self.media.clear_media()
 
     def job_rows(self, include_archived: bool = False) -> list[dict]:
         """Return jobs with a stable human title, including pre-migration jobs.
@@ -171,7 +239,7 @@ class AppController:
         }
         download_names = {
             item["job_id"]: item["title"]
-            for item in self.downloads.list(limit=500)
+            for item in self.downloads.list(limit=None)
             if item.get("job_id") and item.get("title")
         }
         rows = []
@@ -200,7 +268,7 @@ class AppController:
             linked_jobs.add(job["id"])
         # TASK-8.17：转写行从关联下载行继承封面（下载行被并入隐藏后，封面
         # 仍要在同一张任务卡上展示）。
-        download_rows = self.downloads.list(limit=500)
+        download_rows = self.downloads.list(limit=None)
         linked_covers = {
             item["job_id"]: item.get("cover_path")
             for item in download_rows
@@ -220,6 +288,12 @@ class AppController:
         for download in download_rows:
             if download.get("job_id") in linked_jobs:
                 continue
+            error = download.get("error") or {}
+            retry_in_progress = (
+                download["status"] in {"received", "resolving", "downloading"}
+                or (download["status"] == "awaiting_browser"
+                    and (error.get("diagnostic") or {}).get("fallback_pending"))
+            )
             row = dict(download)
             row.update({
                 "kind": "download",
@@ -227,9 +301,7 @@ class AppController:
                 "source": "浏览器下载",
                 "display_title": download.get("title") or download["url"],
                 "result_category": "浏览器下载",
-                # Historical completed retries may retain a transient error.
-                # Preserve the stored evidence without presenting it as failure.
-                "error": None if download["status"] == "done" else download.get("error"),
+                "error": None if retry_in_progress or download["status"] == "done" else download.get("error"),
                 "final_path": None,
                 "raw_path": None,
             })
@@ -242,16 +314,17 @@ class AppController:
         Only the queue record is flagged; text artifacts and source videos are
         left untouched, so library results and future re-transcription survive.
         """
-        cleared = 0
-        for job in self.queue.list_jobs():
-            if job.get("status") == "done" and not job.get("archived"):
-                self.queue.set_archived(job["id"], True)
-                cleared += 1
-        return cleared
+        with self._writable_action():
+            cleared = 0
+            for job in self.queue.list_jobs():
+                if job.get("status") == "done" and not job.get("archived"):
+                    self.queue.set_archived(job["id"], True)
+                    cleared += 1
+            return cleared
 
     def set_result_categories(self, job_ids: list[str], category: str) -> list[str]:
         updated: list[str] = []
-        with self.media_action_lock:
+        with self._writable_action():
             for job_id in job_ids:
                 try:
                     self.queue.set_result_category(job_id, category)
@@ -262,7 +335,7 @@ class AppController:
 
     def set_job_tags(self, job_id: str, tags: list[str]) -> list[str]:
         """Set the tag list for a single completed job; returns normalized tags."""
-        with self.media_action_lock:
+        with self._writable_action():
             return self.queue.set_tags(job_id, tags)
 
     def _document_path(self, job_id: str, tab: str) -> Path:
@@ -275,10 +348,8 @@ class AppController:
         if not value or not self.settings.get("output_dir"):
             raise DocumentUnavailableError("文本文件不可用")
         path = Path(str(value)).expanduser()
-        output_root = Path(self.settings["output_dir"]).expanduser()
         if (path.suffix.lower() not in {".md", ".txt"}
-                or not output_root.is_dir() or not self._is_within(path, output_root)
-                or not path.is_file()):
+                or not self.is_available_job_output(job, path, self.settings["output_dir"])):
             raise DocumentUnavailableError("文本文件不可用")
         return path
 
@@ -305,7 +376,7 @@ class AppController:
         self, job_id: str, *, expected_revision: str,
         title: str | None = None, tags: list[str] | None = None, category: str | None = None,
     ) -> dict:
-        with self.media_action_lock:
+        with self._writable_action():
             return self.queue.update_document_metadata(
                 job_id, expected_revision=expected_revision, title=title, tags=tags, category=category,
             )
@@ -325,7 +396,7 @@ class AppController:
             not isinstance(expected_revision, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_revision)
         ):
             raise ValueError("文稿版本无效")
-        with self.media_action_lock:
+        with self._writable_action():
             path = self._document_path(job_id, tab)
             if expected_revision is not None:
                 current = self.read_document_text(job_id, tab)
@@ -400,34 +471,16 @@ class AppController:
         self._safe_remove_downloaded_source(job.get("source_path"))
 
     def purge_orphan_output(self, path_value: object) -> bool:
-        """清理输出根内的孤儿产物目录（数据自检用，路径必须位于 output_dir 内）。"""
-        if not path_value:
-            return False
-        try:
-            target = Path(str(path_value)).expanduser().resolve()
-            out_root = Path(self.settings["output_dir"]).expanduser().resolve()
-            if target == out_root or not self._is_within(target, out_root):
-                return False
-            if not target.is_dir():
-                return False
-            shutil.rmtree(target, ignore_errors=True)
-            return True
-        except OSError:
-            return False
+        with self._writable_action():
+            from app.data_health import purge_orphan
+
+            return purge_orphan(self, path_value, output=True)
 
     def purge_orphan_download(self, path_value: object) -> bool:
-        """删除下载根内的孤儿源文件（路径必须位于 download_dir 内）。"""
-        if not path_value:
-            return False
-        try:
-            target = Path(str(path_value)).expanduser().resolve()
-            root = Path(self.settings["download_dir"]).expanduser().resolve()
-            if not self._is_within(target, root) or not target.is_file():
-                return False
-            target.unlink(missing_ok=True)
-            return True
-        except OSError:
-            return False
+        with self._writable_action():
+            from app.data_health import purge_orphan
+
+            return purge_orphan(self, path_value, output=False)
 
     # ------------------------------------------------------------ 缓存清理
     @staticmethod
@@ -488,33 +541,34 @@ class AppController:
 
     def cleanup_cache(self) -> dict:
         """清理可再生的缓存（临时残留与日志备份）；绝不触碰用户数据。"""
-        freed = 0
-        removed: list[str] = []
-        for item in self._cache_candidates():
-            try:
-                if item.is_dir():
-                    size = self._dir_size(item)
-                    shutil.rmtree(item, ignore_errors=True)
-                elif item.is_file():
-                    size = item.stat().st_size
-                    item.unlink(missing_ok=True)
-                else:
+        with self._writable_action():
+            freed = 0
+            removed: list[str] = []
+            for item in self._cache_candidates():
+                try:
+                    if item.is_dir():
+                        size = self._dir_size(item)
+                        shutil.rmtree(item, ignore_errors=True)
+                    elif item.is_file():
+                        size = item.stat().st_size
+                        item.unlink(missing_ok=True)
+                    else:
+                        continue
+                    if not item.exists():
+                        freed += size
+                        removed.append(str(item))
+                except OSError:
                     continue
-                if not item.exists():
-                    freed += size
-                    removed.append(str(item))
-            except OSError:
-                continue
-        return {"ok": True, "freed_bytes": freed, "removed": removed}
+            return {"ok": True, "freed_bytes": freed, "removed": removed}
 
     def delete_texts(self, job_ids: list[str], *, force: bool = True) -> list[str]:
-        """仅删除文本产物，保留任务、manifest、媒体及下载登记。
+        """删除文本和过程文件，保留任务、数据库 manifest、媒体及下载登记。
 
         ``force`` remains accepted for existing callers, but never bypasses
         the active-worker guard for text-only deletion.
         """
         deleted: list[str] = []
-        with self.media_action_lock:
+        with self._writable_action():
             for job_id in dict.fromkeys(job_ids):
                 try:
                     if self.queue.clear_text_outputs(job_id, remove_files=self._remove_job_text_outputs):
@@ -523,19 +577,43 @@ class AppController:
                     continue
         return deleted
 
-    @contextmanager
-    def _remove_job_text_outputs(self, job: dict, manifest: dict | None):
-        """Stage exact text assets; restore them if preparation or SQL fails."""
-        output_root = Path(self.settings["output_dir"]).expanduser().resolve()
-        recorded_root = Path(job["output_dir"]).expanduser().resolve()
-        job_id = job["id"]
-        if recorded_root != output_root or Path(job_id).name != job_id or job_id in (".", ".."):
+    @staticmethod
+    def _job_output_directory(job: dict) -> Path:
+        recorded_root = Path(job.get("output_dir") or "").expanduser()
+        job_id = job.get("id") or ""
+        if not recorded_root.is_absolute() or not re.fullmatch(r"[a-f0-9]{12}", job_id):
             raise ValueError("文本产物目录不可用")
-        job_dir = (recorded_root / job_id).resolve()
-        if job_dir != recorded_root / job_id or job_dir.parent != output_root:
+        job_dir = recorded_root.resolve() / job_id
+        if job_dir.is_symlink() or job_dir.resolve() != job_dir or job_dir.exists() and not job_dir.is_dir():
             raise ValueError("文本产物目录不可用")
-        if job_dir.exists() and not job_dir.is_dir():
-            raise ValueError("文本产物目录不可用")
+        return job_dir
+
+    @staticmethod
+    def is_available_job_output(job: dict, path: Path, output_root: str | Path) -> bool:
+        """Resolve current and recorded output locations consistently for every reader."""
+        try:
+            if not path.is_file():
+                return False
+            root = Path(output_root).expanduser() if output_root else None
+            in_current_root = (root is not None and root.is_dir()
+                               and path.resolve().is_relative_to(root.resolve()))
+            return in_current_root or AppController.is_recorded_job_output(job, path)
+        except (OSError, ValueError, RuntimeError):
+            return False
+
+    @staticmethod
+    def is_recorded_job_output(job: dict, path: Path) -> bool:
+        """Allow registered artifacts in an exact job folder after the output setting changes."""
+        try:
+            return not path.is_symlink() and path.resolve().parent == AppController._job_output_directory(job)
+        except (OSError, ValueError, RuntimeError):
+            return False
+
+    @staticmethod
+    def _job_text_paths(job: dict, manifest: dict | None, job_dir: Path) -> set[Path]:
+        from app.translation_service import translation_paths
+
+        source = Path(job["source_path"]).expanduser().resolve()
 
         def owned_file(value: str, extensions: set[str]) -> Path:
             candidate = Path(value).expanduser()
@@ -546,7 +624,7 @@ class AppController:
                 raise ValueError("文本产物路径不可用")
             if path.exists() and not path.is_file():
                 raise ValueError("文本产物路径不可用")
-            if path == Path(job["source_path"]).expanduser().resolve():
+            if path == source:
                 raise ValueError("文本产物路径不可用")
             return path
 
@@ -557,13 +635,17 @@ class AppController:
             return path
 
         assets: set[Path] = set()
-        stems: set[str] = set()
+        raw_stems: set[str] = set()
+        final_stems: set[str] = set()
         for record in (job, manifest or {}):
             for key in ("raw_path", "final_path"):
                 if record.get(key):
                     path = owned_file(record[key], {".md", ".txt"})
                     assets.add(path)
-                    stems.add(path.stem.removesuffix("_raw") if key == "raw_path" else path.stem)
+                    if key == "raw_path":
+                        raw_stems.add(path.stem.removesuffix("_raw"))
+                    else:
+                        final_stems.add(path.stem)
                     # Agent replaces final_path with a classified article, but
                     # the engine's initial final copy is still a text artifact.
                     if key == "raw_path" and path.stem.endswith("_raw"):
@@ -572,40 +654,51 @@ class AppController:
                             assets.add(owned_file(str(job_dir / (base + suffix)), {suffix}))
         if manifest and manifest.get("segments_path"):
             assets.add(segments_file(manifest["segments_path"]))
+        if manifest:
+            for key, extensions in (("translation_path", {".md"}), ("translation_segments_path", {".json"})):
+                if manifest.get(key):
+                    assets.add(owned_file(manifest[key], extensions))
 
-        sidecars: list[tuple[Path, str]] = []
-        for stem in stems:
+        for stem in raw_stems or final_stems:
             for suffix in (".srt", ".vtt"):
                 assets.add(owned_file(str(job_dir / (stem + suffix)), {suffix}))
-            sidecar = owned_file(str(job_dir / (stem + "_manifest.json")), {".json"})
-            if not sidecar.exists():
-                continue
-            value = json.loads(sidecar.read_text(encoding="utf-8"))
-            if not isinstance(value, dict) or value.get("job_id") != job_id:
-                raise ValueError("文本产物登记不匹配")
-            for key in ("raw_path", "final_path"):
-                if value.get(key):
-                    assets.add(owned_file(value[key], {".md", ".txt"}))
-            if value.get("segments_path"):
-                assets.add(segments_file(value["segments_path"]))
-            value.update(raw_path="", final_path="", segments_path="", text_outputs_cleared=True)
-            sidecars.append((sidecar, json.dumps(value, ensure_ascii=False, indent=2) + "\n"))
-        # All roots, types and sidecars have been checked before the first move.
-        to_move = sorted({path for path in assets if path.exists()} | {path for path, _ in sidecars})
-        if not to_move:
-            yield
-            return
-        stage = Path(tempfile.mkdtemp(prefix=".text-delete-", dir=job_dir))
-        if stage.resolve().parent != job_dir:
-            raise ValueError("文本临时目录不可用")
+            assets.add(segments_file(str(job_dir / (stem + "_segments.json"))))
+            # A portable restore can retain stale absolute paths in this sidecar.
+            # Its filename is generated, and its contents never authorize deletion.
+            assets.add(owned_file(str(job_dir / (stem + "_manifest.json")), {".json"}))
+            for language in ("zh", "en"):
+                article, segments = translation_paths(job_dir / (stem + "_raw.md"), language)
+                assets.add(owned_file(str(article), {".md"}))
+                assets.add(owned_file(str(segments), {".json"}))
+            if job_dir.is_dir():
+                generated_translation = re.compile(
+                    re.escape(stem) + r"_译文_(?:zh|en)(?:\.(?:[a-f0-9]{24}|[a-f0-9]{32}))?\.(?:md|segments\.json)"
+                )
+                for path in job_dir.iterdir():
+                    if generated_translation.fullmatch(path.name):
+                        assets.add(owned_file(str(path), {".md", ".json"}))
+        if assets and job_dir.is_dir():
+            stems = {path.stem for path in assets}
+            for path in job_dir.iterdir():
+                if re.fullmatch(r".+\.foilpage-(?:[a-f0-9]{24}|[a-f0-9]{32})\.md", path.name):
+                    assets.add(owned_file(str(path), {".md"}))
+                temp = re.fullmatch(r"\.(.+)-[a-z0-9_]{8}\.tmp", path.name)
+                if temp and temp[1] in stems:
+                    assets.add(owned_file(str(path), {".tmp"}))
+        return {path for path in assets if path.is_file()}
+
+    @contextmanager
+    def _stage_library_removal(self, job_id: str, job_dir: Path, assets: set[Path]):
+        """Restore staged files if the database or an earlier move fails."""
+        stages: dict[Path, Path] = {}
         moved: list[tuple[Path, Path]] = []
         try:
-            for path in to_move:
-                backup = stage / path.name
+            for path in sorted(assets):
+                if path.parent not in stages:
+                    stages[path.parent] = Path(tempfile.mkdtemp(prefix=".text-delete-", dir=path.parent))
+                backup = stages[path.parent] / path.name
                 path.replace(backup)
                 moved.append((path, backup))
-            for path, content in sidecars:
-                self._atomic_write_text(path, content)
             yield
         except BaseException:
             failed = []
@@ -617,21 +710,141 @@ class AppController:
             if failed:
                 _LOG.error("文本删除回滚未完成，已保留恢复暂存（任务 %s）", job_id)
                 raise QueueStoreError("文本恢复未完成，请保留任务目录并重试")
-            stage.rmdir()
+            for stage in stages.values():
+                stage.rmdir()
             raise
         else:
+            for stage in stages.values():
+                try:
+                    for backup in stage.iterdir():
+                        try:
+                            backup.unlink(missing_ok=True)
+                        except PermissionError:
+                            attributes = getattr(backup.stat(), "st_file_attributes", 0)
+                            if not (attributes & stat.FILE_ATTRIBUTE_READONLY) or backup.stat().st_nlink != 1:
+                                raise
+                            backup.chmod(stat.S_IWRITE)
+                            backup.unlink(missing_ok=True)
+                    stage.rmdir()
+                except OSError:
+                    # This name distinguishes committed debris from a failed rollback.
+                    try:
+                        stage.rename(stage.with_name(f".deletion-cache-{job_id}-{uuid.uuid4().hex}"))
+                    except OSError:
+                        pass
+                    _LOG.warning("删除暂存尚未清理（任务 %s）", job_id)
             try:
-                for _, backup in moved:
-                    backup.unlink(missing_ok=True)
-                stage.rmdir()
+                job_dir.rmdir()
             except OSError:
-                # The DB and public paths are committed; never try to restore
-                # references now. Preserve any remaining exact originals.
-                _LOG.warning("文本产物暂存尚未清理，已保留受控恢复目录（任务 %s）", job_id)
+                pass  # Other files in the job directory belong to the user.
+
+    def _remove_job_text_outputs(self, job: dict, manifest: dict | None):
+        job_dir = self._job_output_directory(job)
+        return self._stage_library_removal(job["id"], job_dir, self._job_text_paths(job, manifest, job_dir))
+
+    def delete_library_items(self, job_ids: list[str], *, remove_records: bool) -> list[str]:
+        """Remove a library item's files and managed media, optionally its task record."""
+        from functools import partial
+
+        removed: list[str] = []
+        stage = partial(self._remove_library_item_files, remove_record=remove_records)
+        with self._writable_action():
+            for job_id in dict.fromkeys(job_ids):
+                try:
+                    if self.queue.remove_library_outputs(job_id, remove_record=remove_records, stage=stage):
+                        removed.append(job_id)
+                except (QueueStoreError, OSError, ValueError):
+                    continue
+        return removed
+
+    @contextmanager
+    def _remove_library_item_files(self, db, job: dict, manifest: dict | None, *, remove_record: bool):
+        job_dir = self._job_output_directory(job)
+        assets = self._job_text_paths(job, manifest, job_dir)
+        related, media, owned_files, shared_job = self._library_media_to_remove(db, job)
+        with self._stage_library_removal(job["id"], job_dir, assets | owned_files):
+            if media is not None:
+                db.execute("DELETE FROM media WHERE id=?", (media["id"],))
+                for row in db.execute("SELECT id, downloaded_path, cover_path FROM download_jobs WHERE media_id=?",
+                                      (media["id"],)).fetchall():
+                    if row["downloaded_path"] and _source_paths_equivalent(row["downloaded_path"], job["source_path"]):
+                        cover = Path(row["cover_path"]).expanduser().absolute() if row["cover_path"] else None
+                        db.execute("UPDATE download_jobs SET media_id=NULL, downloaded_path=NULL, cover_path=? WHERE id=?",
+                                   (None if cover in owned_files else row["cover_path"], row["id"]))
+                    else:
+                        db.execute("UPDATE download_jobs SET media_id=NULL WHERE id=?", (row["id"],))
+            if remove_record:
+                for row in related:
+                    if shared_job and row.get("downloaded_path") and _source_paths_equivalent(
+                        row["downloaded_path"], job["source_path"],
+                    ):
+                        db.execute("UPDATE download_jobs SET job_id=? WHERE id=?", (shared_job, row["id"]))
+                        continue
+                    db.execute(
+                        """INSERT OR IGNORE INTO cancelled_download_requests(client_request_id)
+                           SELECT client_request_id FROM download_requests WHERE download_id=?""",
+                        (row["id"],),
+                    )
+                    db.execute("DELETE FROM download_jobs WHERE id=?", (row["id"],))
+            yield
+
+    def is_managed_download(self, path: Path, media, row: dict) -> bool:
+        """Check that a download registration still owns this exact local media path."""
+        if row.get("media_id") != media["id"] or not row.get("downloaded_path"):
+            return False
+        registered = Path(row["downloaded_path"]).expanduser().absolute()
+        if registered != path or path.is_symlink() or path.resolve() != path:
+            return False
+        options = row.get("options") or {}
+        roots = [Path(self.settings["download_dir"]), Path(self.settings_store.base_dir) / "downloads"]
+        if options.get("managed_download_root"):
+            roots.append(Path(options["managed_download_root"]))
+        if options.get("mode") == "browser" and path.parent.name == "FoilPage":
+            roots.append(path.parent)
+        expected = options.get("download_content_sha256") or media.get("original_content_sha256")
+        return bool(expected and expected == media["content_sha256"]
+                    and any(root.expanduser().resolve() in path.parents for root in roots))
+
+    def _library_media_to_remove(self, db, job: dict):
+        from engine.media_store import _sha256
+
+        source = Path(job["source_path"]).expanduser().absolute()
+        rows = [DownloadStore._from_row(row) for row in db.execute("SELECT * FROM download_jobs")]
+        related = [row for row in rows if row.get("job_id") == job["id"]]
+        registrations = [
+            row for row in rows if row.get("downloaded_path") and
+            _source_paths_equivalent(row["downloaded_path"], str(source))
+        ]
+        terminal = {"done", "failed", "cancelled"}
+        if any(row["status"] not in terminal for row in related):
+            raise QueueStateError("视频仍在处理，请稍后再删除")
+        shared_job = next((
+            row["id"] for row in db.execute("SELECT id, source_path FROM jobs WHERE id<>? ORDER BY created_at DESC, id DESC",
+                                           (job["id"],))
+            if _source_paths_equivalent(row["source_path"], str(source))
+        ), None)
+        if shared_job or any(row["status"] not in terminal for row in registrations):
+            return related, None, set(), shared_job
+        for row in registrations:
+            if not row.get("media_id"):
+                continue
+            media = db.execute("SELECT * FROM media WHERE id=?", (row["media_id"],)).fetchone()
+            if (media is None or not _source_paths_equivalent(media["source_path"], str(source))
+                    or not self.is_managed_download(source, dict(media), row)):
+                continue
+            if source.exists() and (not source.is_file() or _sha256(source) != media["content_sha256"]):
+                continue
+            cover = source.with_suffix(".jpg")
+            owned_files = {source} if source.is_file() else set()
+            if (row.get("cover_path") and Path(row["cover_path"]).expanduser().absolute() == cover
+                    and cover.is_file() and not cover.is_symlink() and cover.resolve() == cover):
+                owned_files.add(cover)
+            return related, media, owned_files, None
+        return related, None, set(), None
 
     def delete_files(self, job_ids: list[str]) -> list[str]:
         """删除文件：移除文本产物文件夹与下载目录内视频，保留数据库记录。"""
-        with self.media_action_lock:
+        with self._writable_action():
             return self._delete_files_locked(job_ids)
 
     def _delete_files_locked(self, job_ids: list[str]) -> list[str]:
@@ -646,7 +859,7 @@ class AppController:
 
     def delete_tasks(self, job_ids: list[str], *, force: bool = True) -> list[str]:
         """删除任务记录，并连同转写产物文件夹与 FoilPage 下载目录内的源文件一并移除。"""
-        with self.media_action_lock:
+        with self._writable_action():
             return self._delete_tasks_locked(job_ids, force=force)
 
     def _delete_tasks_locked(self, job_ids: list[str], *, force: bool = True) -> list[str]:
@@ -663,7 +876,7 @@ class AppController:
         # 浏览器下载行若已关联到被删任务，一并移除，避免出现幻影任务。
         if deleted:
             removed_ids = set(deleted)
-            for download in self.downloads.list(limit=500):
+            for download in self.downloads.list(limit=None):
                 if download.get("job_id") in removed_ids:
                     try:
                         self.downloads.delete(download["id"], force=True)
@@ -675,35 +888,37 @@ class AppController:
 
     def delete_download_tasks(self, download_ids: list[str], *, force: bool = True) -> list[str]:
         """删除下载任务记录，并连同 FoilPage 下载目录内的文件一并移除。"""
-        deleted: list[str] = []
-        for download_id in download_ids:
-            try:
-                download = self.downloads.get(download_id)
-                if self.downloads.delete(download_id, force=force):
-                    if download is not None:
-                        self._safe_remove_downloaded_source(download.get("downloaded_path"))
-                        self._safe_remove_downloaded_source(download.get("cover_path"))
-                    deleted.append(download_id)
-            except Exception:
-                continue
-        return deleted
+        with self._writable_action():
+            deleted: list[str] = []
+            for download_id in download_ids:
+                try:
+                    download = self.downloads.get(download_id)
+                    if self.downloads.delete(download_id, force=force):
+                        if download is not None:
+                            self._safe_remove_downloaded_source(download.get("downloaded_path"))
+                            self._safe_remove_downloaded_source(download.get("cover_path"))
+                        deleted.append(download_id)
+                except Exception:
+                    continue
+            return deleted
 
     def delete_download_files(self, download_ids: list[str]) -> list[str]:
         """仅删除下载文件（视频），保留下载记录。"""
-        purged: list[str] = []
-        for download_id in download_ids:
-            try:
-                download = self.downloads.get(download_id)
-                if download is not None:
-                    self._safe_remove_downloaded_source(download.get("downloaded_path"))
-                    self._safe_remove_downloaded_source(download.get("cover_path"))
-                    purged.append(download_id)
-            except Exception:
-                continue
-        return purged
+        with self._writable_action():
+            purged: list[str] = []
+            for download_id in download_ids:
+                try:
+                    download = self.downloads.get(download_id)
+                    if download is not None:
+                        self._safe_remove_downloaded_source(download.get("downloaded_path"))
+                        self._safe_remove_downloaded_source(download.get("cover_path"))
+                        purged.append(download_id)
+                except Exception:
+                    continue
+            return purged
 
     def queue_download_for_transcription(self, download_id: str) -> QueueResult:
-        with self.media_action_lock:
+        with self._writable_action():
             return self._queue_download_for_transcription_locked(download_id)
 
     def _queue_download_for_transcription_locked(self, download_id: str) -> QueueResult:
@@ -745,7 +960,7 @@ class AppController:
         return result
 
     def enqueue_media(self, media_ids: list[str]) -> QueueResult:
-        with self.media_action_lock:
+        with self._writable_action():
             return self._enqueue_media_locked(media_ids)
 
     def _enqueue_media_locked(self, media_ids: list[str]) -> QueueResult:
@@ -781,33 +996,36 @@ class AppController:
         return result
 
     def cancel_jobs(self, job_ids: list[str]) -> None:
-        for job_id in job_ids:
-            self.queue.request_cancel(job_id)
+        with self._writable_action():
+            for job_id in job_ids:
+                self.queue.request_cancel(job_id)
 
     def cancel_download_tasks(self, download_ids: list[str]) -> list[str]:
         """Request cancellation for browser work that has not reached ASR."""
-        cancelled: list[str] = []
-        for download_id in download_ids:
-            try:
-                self.downloads.request_cancel(download_id)
-                cancelled.append(download_id)
-            except Exception:
-                continue
-        return cancelled
+        with self._writable_action():
+            cancelled: list[str] = []
+            for download_id in download_ids:
+                try:
+                    self.downloads.request_cancel(download_id)
+                    cancelled.append(download_id)
+                except Exception:
+                    continue
+            return cancelled
 
     def retry_download_tasks(self, download_ids: list[str]) -> list[str]:
         """Return recoverable browser downloads to the receiving state."""
-        retried: list[str] = []
-        for download_id in download_ids:
-            try:
-                self.downloads.retry(download_id)
-                retried.append(download_id)
-            except Exception:
-                continue
-        return retried
+        with self._writable_action():
+            retried: list[str] = []
+            for download_id in download_ids:
+                try:
+                    self.downloads.retry(download_id)
+                    retried.append(download_id)
+                except Exception:
+                    continue
+            return retried
 
     def requeue_jobs(self, job_ids: list[str]) -> list[str]:
-        with self.media_action_lock:
+        with self._writable_action():
             return self._requeue_jobs_locked(job_ids)
 
     def _requeue_jobs_locked(self, job_ids: list[str]) -> list[str]:
@@ -828,7 +1046,7 @@ class AppController:
             raise ValueError(f"未知的重新转写模式: {mode}")
         if editing_level and editing_level not in ("auto", "light", "balanced", "structured", "rewrite"):
             raise ValueError(f"未知的整理力度: {editing_level}")
-        with self.media_action_lock:
+        with self._writable_action():
             return self._retranscribe_jobs_locked(job_ids, mode=mode, editing_level=editing_level)
 
     def _retranscribe_jobs_locked(self, job_ids: list[str], *, mode: str = "default",
@@ -879,12 +1097,16 @@ class AppController:
         return result
 
     def save_settings(self, changes: dict) -> dict:
-        with self._settings_lock:
-            # R11：字段白名单——未知键不落盘，避免配置被污染（旧配置读取不受影响）
-            allowed = set(self.settings_store.defaults().keys())
-            changes = {k: v for k, v in (changes or {}).items() if k in allowed}
-            self.settings = self.settings_store.update(**changes)
-            return self.settings
+        with self._writable_action():
+            with self._settings_lock:
+                # R11：字段白名单——未知键不落盘，避免配置被污染（旧配置读取不受影响）
+                allowed = set(self.settings_store.defaults().keys())
+                changes = {k: v for k, v in (changes or {}).items() if k in allowed}
+                if any(key in changes and changes[key] != self.settings.get(key)
+                       for key in ("library_id", "database_path")):
+                    raise SettingsValidationError("资料库身份和数据库位置不能通过普通设置更改，请使用资料恢复入口")
+                self.settings = self.settings_store.update(**changes)
+                return self.settings
 
     def close(self) -> None:
         if not self.video_catalog.close(timeout=5):

@@ -57,6 +57,7 @@ class FakeController:
         self.queue.list_jobs.return_value = []
         self.media = mock.Mock()
         self.media.list_media.return_value = []
+        self.is_managed_download = mock.Mock(return_value=False)
         self.purged_outputs = []
         self.purged_downloads = []
 
@@ -237,6 +238,40 @@ def _row(kind, task_id, status="done", **extra):
            "source_path": "C:/x/video.mp4", "downloaded_path": "", "device": "cuda"}
     row.update(extra)
     return row
+
+
+def test_video_links_preserve_archived_and_repeated_transcriptions_without_title_matching(tmp_path):
+    first = tmp_path / "first" / "same.mp4"
+    second = tmp_path / "second" / "same.mp4"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"first synthetic media")
+    second.write_bytes(b"second synthetic media")
+    bridge, controller, _ = make_bridge()
+    controller.video_catalog = mock.Mock()
+    controller.video_catalog.request_scan.return_value = {"running": False}
+    controller.queue.list_jobs.return_value = [
+        {"id": "archived", "source_path": str(first), "status": "done", "archived": True},
+        {"id": "repeated", "source_path": str(first.parent / ".." / "first" / "same.mp4"), "status": "done"},
+    ]
+    controller.downloads.list.return_value = [
+        {"id": "download", "media_id": "first", "job_id": "archived", "status": "done", "title": "same"},
+    ]
+    controller.media.list_media.return_value = [
+        {"id": "first", "source_path": str(first), "filename": "same.mp4"},
+        {"id": "second", "source_path": str(second), "filename": "same.mp4"},
+    ]
+    bridge._media_preview = mock.Mock()
+    bridge._media_preview.urls.return_value = {}
+    videos = bridge.get_downloaded_videos()["items"]
+    assert set(videos[0]["task_ids"]) == {"job:archived", "job:repeated", "dl:download"}
+    assert videos[1]["task_ids"] == []
+    first.unlink()
+    missing = bridge.get_downloaded_videos()["items"][0]
+    assert missing["available"] is False
+    assert missing["source_path"] == str(first)
+    assert set(missing["task_ids"]) == set(videos[0]["task_ids"])
+    controller.queue.enqueue.assert_not_called()
 
 
 # ---------------- GPU 加速包（先生 2026-10-08 拆包） ----------------
@@ -535,6 +570,28 @@ def test_open_path_missing_file():
     bridge, _, _ = make_bridge()
     result = bridge.open_path("Z:/no/such/file.mp4")
     assert result["ok"] is False
+
+
+def test_reader_marks_only_utf8_documents_above_preview_limit_as_partial(tmp_path):
+    exact = "字" * 666_666 + "AB"
+    beyond = "字" * 666_666 + "尾"
+    path = tmp_path / "稿件.md"
+    rows = [_row("transcription", "a", status="done", final_path=str(path))]
+    bridge, _, _ = make_bridge(rows=rows, settings={"output_dir": str(tmp_path)})
+
+    path.write_text(exact, encoding="utf-8")
+    complete = bridge.get_reader("job:a", "final")
+    assert complete["ok"] and not complete["truncated"]
+    assert complete["size"] == 2_000_000
+    assert complete["text"] == exact and complete["revision"]
+
+    path.write_text(beyond, encoding="utf-8")
+    partial = bridge.get_reader("job:a", "final")
+    assert partial["ok"] and partial["truncated"]
+    assert partial["size"] == 2_000_001
+    assert partial["text"] == "字" * 666_666
+    assert partial["revision"] is None
+    assert partial["path"] == str(path)
 
 
 def test_open_path_wrong_kind():
@@ -961,8 +1018,11 @@ def test_check_update_network_failure_degrades_gracefully():
     assert "error" in result
 
 
-def test_data_reconcile_reports_health():
+def test_data_reconcile_reports_health(tmp_path):
     bridge, controller, _ = make_bridge()
+    controller.settings.update(output_dir=str(tmp_path / "output"), download_dir=str(tmp_path / "downloads"))
+    controller.settings_store = mock.Mock(base_dir=tmp_path)
+    controller.queue.manifest_file_paths.return_value = []
     controller.downloads.list.return_value = [{
         "id": "dl-1", "title": "悬空任务", "status": "awaiting_browser",
         "updated_at": "2020-01-01 00:00:00", "url": "https://example.com/v",
@@ -980,6 +1040,31 @@ def test_cleanup_orphans_delegates_to_controller():
     assert result["ok"] is True
     assert controller.purged_outputs == ["C:/out/orphan1"]
     assert controller.purged_downloads == ["C:/dl/orphan.mp4"]
+
+
+def test_library_files_deletion_reports_partial_result():
+    bridge, controller, _ = make_bridge()
+    controller.delete_library_items = mock.Mock(return_value=["first"])
+    result = bridge.delete_library_items(["job:first", "job:second", "job:first"], False)
+    controller.delete_library_items.assert_called_once_with(["first", "second"], remove_records=False)
+    assert result["ok"] is False
+    assert result["removed"] == ["first"]
+    assert result["error"]
+
+
+def test_library_deletion_waits_for_translation_to_finish():
+    bridge, controller, _ = make_bridge()
+    controller.delete_texts = mock.Mock(return_value=["first"])
+    controller.delete_library_items = mock.Mock(return_value=["first"])
+    bridge._translation.update(running=True, task_id="first")
+    for result in (
+        bridge.delete_texts(["job:first"]),
+        bridge.delete_library_items(["job:first"], True),
+    ):
+        assert result["ok"] is False
+        assert "翻译" in result["error"]
+    controller.delete_texts.assert_not_called()
+    controller.delete_library_items.assert_not_called()
 
 
 def test_pick_save_and_open_file_dialogs():
