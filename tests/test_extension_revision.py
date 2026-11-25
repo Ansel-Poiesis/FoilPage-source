@@ -4,6 +4,7 @@
 
 指纹只依赖目录内容的哈希：升版本号不再是热修前置；目录签名未变时走
 30s 缓存，/health 高频调用不重算。"""
+import os
 from pathlib import Path
 
 import app.local_api as local_api
@@ -16,6 +17,13 @@ def _make_extension_dir(tmp_path: Path) -> Path:
     (root / "background.js").write_text("console.log('a')", encoding="utf-8")
     (root / "icons" / "icon-16.png").write_bytes(b"png16")
     return root
+
+
+def _touch_later(path: Path) -> None:
+    """等长改写紧跟在刚建的文件之后，可能落在同一个修改时间刻度里，目录签名不变。
+    显式把修改时间推后 1 毫秒，模拟稍后发生的改写。"""
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
 
 
 def test_revision_is_stable_for_unchanged_content(tmp_path, monkeypatch):
@@ -31,6 +39,7 @@ def test_revision_changes_with_content_and_is_order_independent(tmp_path, monkey
     monkeypatch.setattr(local_api, "_extension_dir", lambda: root)
     first = local_api._bundled_extension_revision()
     (root / "background.js").write_text("console.log('b')", encoding="utf-8")
+    _touch_later(root / "background.js")
     assert local_api._bundled_extension_revision() != first
     (root / "extra.js").write_text("added", encoding="utf-8")
     third = local_api._bundled_extension_revision()
