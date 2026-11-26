@@ -1018,6 +1018,23 @@ def test_check_update_network_failure_degrades_gracefully():
     assert "error" in result
 
 
+def test_check_update_uses_source_release_when_legacy_announcements_are_rejected():
+    bridge, _, _ = make_bridge()
+    bridge._fetch_announcements = mock.Mock(side_effect=ValueError("invalid announcement url"))
+    bridge.get_product_notifications = mock.Mock(return_value={"updates": []})
+    response = mock.MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = json.dumps({
+        "tag_name": f"v{APP_VERSION}",
+        "html_url": f"https://github.com/Ansel-Poiesis/FoilPage-source/releases/tag/v{APP_VERSION}",
+    }).encode("utf-8")
+    with mock.patch("urllib.request.urlopen", return_value=response) as fetch:
+        result = bridge.check_update()
+    assert result["ok"] is True
+    assert result["latest"] == APP_VERSION and result["is_latest"] is True
+    assert fetch.call_args.args[0].full_url == "https://api.github.com/repos/Ansel-Poiesis/FoilPage-source/releases/latest"
+
+
 def test_data_reconcile_reports_health(tmp_path):
     bridge, controller, _ = make_bridge()
     controller.settings.update(output_dir=str(tmp_path / "output"), download_dir=str(tmp_path / "downloads"))

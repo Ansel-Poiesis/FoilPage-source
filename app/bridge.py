@@ -1434,7 +1434,12 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
         """Public binaries live separately from the private source repository."""
         from engine.product_events import release_url
         try:
-            self._fetch_announcements(self._notice_context()[0])
+            try:
+                self._fetch_announcements(self._notice_context()[0])
+            except ValueError:
+                # The shared service still serves 1.x migration notices whose
+                # old repository URLs are correctly rejected by 0.1.x clients.
+                log.warning('更新公告不兼容，继续查询当前源码发行渠道')
             updates = self.get_product_notifications()['updates']
             if updates:
                 newest = max(updates, key=lambda item: _parse_version(item['version']))
