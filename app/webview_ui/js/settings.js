@@ -565,8 +565,7 @@ window.Settings = (() => {
         read.disabled = false; read.focus({preventScroll:true});
         const modal = openModal("Agent 配置与修复指南", "", '<button id="agentGuideCopy" class="btn primary" type="button" aria-label="复制这份指南给 Agent">复制给 Agent</button><button id="agentGuideClose" class="btn ghost" type="button">关闭</button>');
         const article = document.createElement("article");
-        article.className = "reader-body";
-        article.style.cssText = "padding:0;max-width:none;font-family:var(--font-ui);font-size:14px;line-height:1.8;";
+        article.className = "reader-body guide-markdown-view";
         article.innerHTML = Markdown.render(result.markdown);
         modal.querySelector(".modal-body").appendChild(article);
         modal.querySelector("#agentGuideClose").onclick = closeModal;

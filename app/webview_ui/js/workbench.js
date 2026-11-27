@@ -424,6 +424,8 @@ window.Workbench = (() => {
   function selectTask(rows, currentId, event, checkbox) {
     const cur = rows.findIndex(task => task.task_id === currentId);
     if (cur < 0) return;
+    const beforeSize = AppState.selected.size;
+    const wasSelected = AppState.selected.has(currentId);
     document.getElementById('jobList').dataset.selectionInput = event.detail === 0 ? 'keyboard' : 'pointer';
     const anchor = rows.findIndex(task => task.task_id === AppState.anchorId);
     if (event.shiftKey && anchor >= 0) {
@@ -446,6 +448,10 @@ window.Workbench = (() => {
       AppState.anchorId = currentId;
       rangeBaseline = null;
       rangeAnchor = null;
+    }
+    const isNowSelected = AppState.selected.has(currentId);
+    if (isNowSelected !== wasSelected || AppState.selected.size !== beforeSize) {
+      window.AppSound?.playCheck(isNowSelected || AppState.selected.size > beforeSize);
     }
     render();
   }
@@ -617,7 +623,10 @@ window.Workbench = (() => {
     const tasks = AppState.tasks || [];
     const task = tasks.find((t) => t.task_id === selectedId) || null;
     if (!task) {
-      host.innerHTML = `<div class="empty"><span class="empty-symbol" aria-hidden="true">${AppIcons('tasks')}</span><div class="big">查看任务详情</div><div class="sub">单击选择，再次单击取消；勾选多项，批量处理。</div><p class="selection-shortcuts"><kbd>Ctrl+A</kbd> 全选当前列表 <span>·</span> <kbd>Esc</kbd> 清空</p></div>`;
+      host.innerHTML = `<div class="empty"><span class="empty-symbol" aria-hidden="true">${AppIcons('tasks')}</span><div class="big">查看任务详情</div><div class="sub">单击选择，再次单击取消；勾选多项，批量处理。</div><div class="inspector-empty-actions"><button class="btn ghost small" type="button" data-quick="links">粘贴链接</button><button class="btn ghost small" type="button" data-quick="import">导入媒体</button></div><p class="selection-shortcuts"><kbd>Ctrl+A</kbd> 全选当前列表 <span>·</span> <kbd>Esc</kbd> 清空</p></div>`;
+      host.querySelectorAll('[data-quick]').forEach(btn => {
+        btn.onclick = () => openQuickAdd(btn.dataset.quick);
+      });
       return;
     }
     const steps = pipeline(task);
@@ -966,33 +975,140 @@ window.Workbench = (() => {
     return (EDITING_LEVELS.find((item) => item.value === value) || {}).label || value;
   }
   function pickEditingLevel(onPick) {
-    let overlay = document.getElementById("editing-level-picker");
-    if (overlay) overlay.remove();
-    overlay = document.createElement("div");
-    overlay.id = "editing-level-picker";
-    overlay.style.cssText = "position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.38)";
-    const panel = document.createElement("div");
-    panel.style.cssText = "min-width:260px;padding:18px;border-radius:14px;background:var(--surface,var(--bg,#fff));box-shadow:0 18px 50px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:8px";
-    const title = document.createElement("div");
-    title.textContent = "选择整理力度";
-    title.style.cssText = "font-weight:700;margin-bottom:4px";
-    panel.appendChild(title);
-    const close = () => overlay.remove();
+    const mask = openModal(
+      "选择整理力度",
+      '<div class="task-action-list" id="editingLevelList"></div>',
+      '<button class="btn ghost" id="dlgCancel" type="button">取消</button>',
+    );
+    const list = mask.querySelector("#editingLevelList");
     EDITING_LEVELS.forEach((item) => {
       const btn = document.createElement("button");
+      btn.type = "button";
       btn.className = "btn ghost small";
       btn.textContent = item.label;
-      btn.onclick = () => { close(); onPick(item.value); };
-      panel.appendChild(btn);
+      btn.onclick = () => { closeModal(); onPick(item.value); };
+      list.appendChild(btn);
     });
-    const cancel = document.createElement("button");
-    cancel.className = "btn ghost small";
-    cancel.textContent = "取消";
-    cancel.onclick = close;
-    panel.appendChild(cancel);
-    overlay.onclick = (event) => { if (event.target === overlay) close(); };
-    overlay.appendChild(panel);
-    document.body.appendChild(overlay);
+    mask.querySelector("#dlgCancel").onclick = closeModal;
   }
-  return { render, enter, snapshot, refreshAll, __progressInternals: { stageLines, pipeline, percent, dataKey } };
+
+  function openQuickAdd(initialTab = "links") {
+    let tab = initialTab === "import" ? "import" : "links";
+    let busy = false;
+    const mask = openModal(
+      "添加内容",
+      `<div class="quick-add-tabs" role="tablist" aria-label="添加方式">
+         <button class="quick-add-tab" type="button" role="tab" data-tab="links">粘贴链接</button>
+         <button class="quick-add-tab" type="button" role="tab" data-tab="import">导入本地媒体</button>
+       </div>
+       <div class="quick-add-panel" data-panel="links">
+         <textarea id="quickLinkUrl" placeholder="粘贴 B 站、YouTube 或抖音链接（Ctrl+Enter 快速提交）" rows="3"></textarea>
+         <label class="quick-add-check"><input id="quickLinkTranscribe" type="checkbox" checked><span>下载后自动转写</span></label>
+       </div>
+       <div class="quick-add-panel" data-panel="import" hidden>
+         <div class="quick-add-import-box">
+           <p>选择本机视频或录音文件加入转写队列；原媒体保留在原位置。</p>
+           <div class="quick-add-import-actions">
+             <button class="btn primary small" type="button" id="quickPickFiles">选择文件</button>
+             <button class="btn ghost small" type="button" id="quickPickFolder">选择文件夹</button>
+           </div>
+         </div>
+       </div>
+       <p class="quick-add-status" id="quickAddStatus" role="status" aria-live="polite"></p>
+       <div class="quick-add-browser-row">
+         <span>想直接在视频页一键采集？</span>
+         <button class="btn ghost tiny" type="button" id="quickOpenBrowser">前往浏览器配对</button>
+       </div>`,
+      `<button class="btn ghost" id="dlgCancel" type="button">关闭</button>
+       <button class="btn primary" id="quickAddSubmit" type="button">加入任务</button>`,
+    );
+    const tabs = [...mask.querySelectorAll(".quick-add-tab")];
+    const panels = [...mask.querySelectorAll(".quick-add-panel")];
+    const urlInput = mask.querySelector("#quickLinkUrl");
+    const transcribeBox = mask.querySelector("#quickLinkTranscribe");
+    const statusEl = mask.querySelector("#quickAddStatus");
+    const submitBtn = mask.querySelector("#quickAddSubmit");
+    const cancelBtn = mask.querySelector("#dlgCancel");
+
+    const setStatus = (text, isError = false) => {
+      statusEl.textContent = text;
+      statusEl.classList.toggle("is-error", isError);
+    };
+    const paintTab = () => {
+      tabs.forEach((btn) => {
+        const active = btn.dataset.tab === tab;
+        btn.classList.toggle("is-active", active);
+        btn.setAttribute("aria-selected", String(active));
+      });
+      panels.forEach((p) => { p.hidden = p.dataset.panel !== tab; });
+      submitBtn.hidden = tab !== "links";
+      setStatus("");
+      if (tab === "links") urlInput.focus({ preventScroll: true });
+    };
+    tabs.forEach((btn) => {
+      btn.onclick = () => { if (!busy) { tab = btn.dataset.tab; paintTab(); } };
+    });
+    cancelBtn.onclick = closeModal;
+    mask.querySelector("#quickOpenBrowser").onclick = () => { closeModal(); switchView("browser"); };
+
+    const submitLink = async () => {
+      if (busy) return;
+      const raw = urlInput.value.trim();
+      if (!raw) { setStatus("请先粘贴视频链接", true); urlInput.focus(); return; }
+      busy = true;
+      submitBtn.disabled = true;
+      urlInput.disabled = true;
+      setStatus("正在提交…");
+      try {
+        const res = await AppApi.downloadFromUrl(raw, "", transcribeBox.checked);
+        if (!res?.ok) {
+          setStatus(res?.error || "提交失败，请检查链接后重试", true);
+          return;
+        }
+        closeModal();
+        toast("已加入任务队列");
+        refreshAll();
+      } catch (error) {
+        setStatus(error?.message || "提交失败，请重试", true);
+      } finally {
+        busy = false;
+        if (submitBtn.isConnected) submitBtn.disabled = false;
+        if (urlInput.isConnected) urlInput.disabled = false;
+      }
+    };
+    submitBtn.onclick = submitLink;
+    urlInput.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.isComposing) {
+        event.preventDefault();
+        submitLink();
+      }
+    });
+
+    const runImport = async (invoke) => {
+      if (busy) return;
+      busy = true;
+      setStatus("正在读取媒体，加入转写队列…");
+      mask.querySelectorAll("#quickPickFiles, #quickPickFolder").forEach((b) => { b.disabled = true; });
+      try {
+        const res = await invoke();
+        if (res?.cancelled) { setStatus(""); return; }
+        if (!res?.ok) { setStatus(res?.error || "导入未完成，请重试", true); return; }
+        const count = Array.isArray(res.enqueued) ? res.enqueued.length : (res.imported || 0);
+        closeModal();
+        toast(count ? `已加入 ${count} 项转写任务` : "本次未新增任务");
+        refreshAll();
+      } catch (_) {
+        setStatus("导入未完成，请检查文件后重试", true);
+      } finally {
+        busy = false;
+        mask.querySelectorAll("#quickPickFiles, #quickPickFolder").forEach((b) => { if (b.isConnected) b.disabled = false; });
+      }
+    };
+    mask.querySelector("#quickPickFiles").onclick = () => runImport(() => AppApi.pickImport());
+    mask.querySelector("#quickPickFolder").onclick = () => runImport(() => AppApi.pickFolderImport());
+
+    paintTab();
+  }
+
+  return { render, enter, snapshot, refreshAll, openQuickAdd, __progressInternals: { stageLines, pipeline, percent, dataKey } };
 })();

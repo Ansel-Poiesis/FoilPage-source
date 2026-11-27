@@ -249,21 +249,24 @@ test('a delayed video lookup never navigates away from a newly selected document
   } finally { await page.close(); }
 });
 
-test('video search and availability survive refresh and return, with compact missing-file rows', async () => {
+test('video availability filter survives refresh and return, with compact missing-file rows', async () => {
   const page = await open({width: 560, height: 500});
   try {
     await page.locator('[data-page=videos]').click(); await page.locator('.video-card').first().waitFor();
+    assert.equal(await page.locator('#videoSearch').count(), 0);
     await page.getByRole('button', {name: /^位置待恢复/}).click();
     assert.equal(await page.locator('.video-grid.is-missing-list .video-card').count(), 1);
     assert.equal(await page.locator('.video-path').textContent(), 'D:\\原目录\\course.mp4');
-    await page.locator('#videoSearch').fill('不存在');
-    await page.getByText('没有匹配的视频', {exact: true}).waitFor();
     await page.locator('#refreshVideos').click();
-    assert.equal(await page.locator('.video-card').count(), 0);
+    assert.equal(await page.locator('.video-grid.is-missing-list .video-card').count(), 1);
     await page.locator('[data-page=workbench]').click(); await page.locator('[data-page=videos]').click();
-    assert.equal(await page.locator('#videoSearch').inputValue(), '不存在');
+    assert.equal(await page.getByRole('button', {name: /^位置待恢复/}).getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('.video-grid.is-missing-list .video-card').count(), 1);
+    await page.evaluate(() => { __MOCK__.get_downloaded_videos = () => ({ok: true, items: __workflowVideos.filter(item => item.available === true)}); });
+    await page.locator('#refreshVideos').click();
+    await page.getByText('没有匹配的视频', {exact: true}).waitFor();
     await page.getByRole('button', {name: '查看全部视频', exact: true}).click();
-    assert.equal(await page.locator('.video-card').count(), 3);
+    assert.equal(await page.locator('.video-card').count(), 2);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(page.errors, []);
   } finally { await page.close(); }
@@ -405,7 +408,7 @@ test('video filters entered during initial reading apply to the eventual catalog
   try {
     await page.evaluate(() => { __MOCK__.get_downloaded_videos = () => new Promise(resolve => window.__finishCatalog = resolve); });
     await page.locator('[data-page=videos]').click();
-    await page.locator('#videoSearch').fill('移动'); await page.getByRole('button', {name: /^位置待恢复/}).click();
+    await page.getByRole('button', {name: /^位置待恢复/}).click();
     assert(await page.locator('#videosReadState').isVisible());
     await page.evaluate(() => __finishCatalog({ok: true, items: __workflowVideos}));
     await page.locator('.video-card[data-video-id=video-missing]').waitFor();

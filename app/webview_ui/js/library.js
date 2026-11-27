@@ -18,10 +18,9 @@ window.Library = (() => {
   let renderedReading = null, saveReadingTimer = null, savedContext = null, targetIds = null;
   let readingFrame = 0;
   let readerObserver = null;
-  let listSearchTimer = null, tagIndexRequest = 0;
+  let tagIndexRequest = 0;
   const readingSignatures = new WeakMap();
   let state = {
-    query: "",
     tagFilter: "",
     sortOrder: "",
     activeDoc: null,
@@ -228,20 +227,21 @@ window.Library = (() => {
   function renderListStatus() {
     const host = document.getElementById('libResults');
     if (!host) return;
+    const bar = document.getElementById('libResultsBar');
     const retry = document.getElementById('libRetry');
-    const searching = Boolean(state.query || state.tagFilter);
-    const excluded = searching && currentDoc() && !state.docs.some(doc => doc.task_id === state.selectedId);
-    const count = `${state.docs.length} 篇`;
+    const filtering = Boolean(state.tagFilter);
+    const excluded = filtering && currentDoc() && !state.docs.some(doc => doc.task_id === state.selectedId);
     const status = state.listLoading ? '正在查找文稿' : state.listError
       ? (state.docs.length ? '读取失败，显示上次结果' : '读取文本列表失败')
-      : excluded ? `${count} · 当前文稿不在结果中` : count;
-    host.classList.toggle('is-message', Boolean(state.listLoading || state.listError || excluded));
+      : excluded ? '当前文稿不在筛选结果中' : '';
+    if (bar) bar.hidden = !status && !state.listError;
+    host.classList.toggle('is-message', Boolean(status));
     if (host.dataset.statusText !== status) {
       host.dataset.statusText = status;
       host.textContent = status;
     }
     if (retry) {
-      if (!state.listError && document.activeElement === retry) document.getElementById('libSearch')?.focus();
+      if (!state.listError && document.activeElement === retry) document.getElementById('libTagFilter')?.focus();
       retry.hidden = !state.listError;
       retry.disabled = state.listLoading;
     }
@@ -257,12 +257,12 @@ window.Library = (() => {
     list.innerHTML = "";
     renderListStatus();
     if (!state.docs.length) {
-      const searching = Boolean(state.query || state.tagFilter);
-      const title = state.listError ? '读取文本失败' : searching ? '没有找到文本' : '还没有文稿';
-      list.innerHTML = `<div class="empty"><span class="empty-symbol" aria-hidden="true">${AppIcons('library')}</span><div class="big">${title}</div>${state.listError ? '' : searching ? '<button class="btn" type="button" id="clearEmptyFilter">清除筛选</button>' : '<button class="btn" type="button" id="importEmptyLibrary">导入媒体</button>'}</div>`;
+      const filtering = Boolean(state.tagFilter);
+      const title = state.listError ? '读取文本失败' : filtering ? '没有找到文本' : '还没有文稿';
+      list.innerHTML = `<div class="empty"><span class="empty-symbol" aria-hidden="true">${AppIcons('library')}</span><div class="big">${title}</div>${state.listError ? '' : filtering ? '<button class="btn" type="button" id="clearEmptyFilter">清除筛选</button>' : '<button class="btn" type="button" id="importEmptyLibrary">导入媒体</button>'}</div>`;
       list.querySelector('#clearEmptyFilter')?.addEventListener('click', clearFilters);
       list.querySelector('#importEmptyLibrary')?.addEventListener('click', () => switchView('import'));
-      if (focusedId) document.getElementById('libSearch')?.focus({preventScroll:true});
+      if (focusedId) document.getElementById('libTagFilter')?.focus({preventScroll:true});
       return;
     }
     state.docs.forEach((doc) => {
@@ -287,21 +287,20 @@ window.Library = (() => {
 
   function clearFilters() {
     targetIds = null;
-    state.query = ''; state.tagFilter = '';
-    const query = document.getElementById('libSearch'), tags = document.getElementById('libTagFilter');
-    query.value = ''; tags.value = '';
-    query.focus({preventScroll:true});
+    state.tagFilter = '';
+    const tags = document.getElementById('libTagFilter');
+    if (tags) {
+      tags.value = '';
+      tags.focus({preventScroll:true});
+    }
     reloadList();
   }
 
   function reloadList() {
-    clearTimeout(listSearchTimer); listSearchTimer = null;
     return loadDocs(false, true);
   }
 
   function bindListControls() {
-    clearTimeout(listSearchTimer); listSearchTimer = null;
-    const search = document.getElementById('libSearch');
     const tags = document.getElementById('libTagFilter');
     const sort = document.getElementById('libSort');
     const retry = document.createElement('button');
@@ -309,24 +308,7 @@ window.Library = (() => {
     retry.textContent = '重新读取'; retry.hidden = true;
     document.getElementById('libResults').after(retry);
     retry.onclick = () => { loadTagIndex(); loadDocs(); };
-    search.value = state.query;
     sort.value = listSortOrder();
-    let composing = false, deferredSearch = false;
-    search.oncompositionstart = () => {
-      composing = true;
-      deferredSearch = Boolean(listSearchTimer);
-      clearTimeout(listSearchTimer); listSearchTimer = null;
-    };
-    search.oncompositionend = () => {
-      composing = false;
-      scheduleSearch(deferredSearch);
-      deferredSearch = false;
-    };
-    search.oninput = event => { if (!composing && !event.isComposing) scheduleSearch(); };
-    search.onkeydown = event => {
-      if (event.key !== 'Enter' || composing || event.isComposing || !listSearchTimer) return;
-      event.preventDefault(); reloadList();
-    };
     tags.onchange = () => { targetIds = null; state.tagFilter = tags.value; reloadList(); };
     sort.onchange = () => {
       state.sortOrder = sort.value;
@@ -334,21 +316,6 @@ window.Library = (() => {
       renderDocList();
     };
     document.getElementById('libResetFilters').onclick = clearFilters;
-
-    function scheduleSearch(force = false) {
-      const query = search.value.trim();
-      if (!force && state.query === query) return;
-      state.query = query; targetIds = null;
-      ++docsRequest;
-      document.getElementById('libResetFilters').hidden = !query && !state.tagFilter;
-      state.listLoading = true;
-      renderListStatus();
-      clearTimeout(listSearchTimer);
-      listSearchTimer = setTimeout(() => {
-        listSearchTimer = null;
-        if (search.isConnected && AppState.currentView === 'library') loadDocs(false, true);
-      }, 220);
-    }
   }
 
   function renderTagEditor() {
@@ -458,12 +425,13 @@ window.Library = (() => {
       <div class="lib">
         <div class="lib-list" id="libList">
           <div class="lib-tools">
-            <div class="search-box"><span class="k" aria-hidden="true">⌕</span><input id="libSearch" aria-label="搜索文本" placeholder="搜索标题、标签或开头" spellcheck="false"></div>
             <div class="lib-facets">
-              <span id="libResults" class="lib-results" role="status"></span>
               <select id="libTagFilter" class="lib-tag-filter" title="按标签筛选" aria-label="按标签筛选"><option value="">全部标签</option></select>
               <select id="libSort" aria-label="文稿排序"><option value="newest">最近更新</option><option value="oldest">最早更新</option></select>
               <button id="libResetFilters" class="icon-btn" type="button" aria-label="清空文本筛选" title="清空文本筛选" hidden>${ICONS.close}</button>
+            </div>
+            <div class="lib-results-bar" id="libResultsBar" hidden>
+              <span id="libResults" class="lib-results" role="status"></span>
             </div>
           </div>
           <div class="doc-list" id="docList" role="list" aria-label="文本列表"></div>
@@ -532,7 +500,7 @@ window.Library = (() => {
     document.getElementById('readerBack').onclick = () => {
       saveReadingPosition(); host.querySelector('.lib').classList.remove('reading');
       reading.open = false; writeReadingState();
-      (host.querySelector('.doc.selected .doc-open') || document.getElementById('libSearch'))?.focus();
+      (host.querySelector('.doc.selected .doc-open') || document.getElementById('libTagFilter'))?.focus();
     };
     document.getElementById("copyReaderBtn").onclick = copyReaderText;
     document.getElementById("copyReaderPreview").onclick = copyReaderText;
@@ -563,7 +531,6 @@ window.Library = (() => {
     if (!read?.ok || read.has_subtitle_timeline === false) {
       throw new Error(read?.error || '这篇文稿没有转写时间轴，重新转写后可导出字幕');
     }
-    const rect = anchor.getBoundingClientRect();
     const menu = document.createElement("div");
     closeContextMenu();
     menu.className = "ctx-menu";
@@ -574,15 +541,14 @@ window.Library = (() => {
         <button class="ctx-item menu-item" type="button" data-fmt="vtt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 8-4 4 4 4"/><path d="m16 8 4 4-4 4"/></svg>导出 VTT（Web 字幕）</button>
       </div>`;
     document.body.appendChild(menu);
-    menu.style.left = Math.min(Math.max(rect.right - menu.offsetWidth, 8), window.innerWidth - menu.offsetWidth - 8) + "px";
-    menu.style.top = Math.min(Math.max(rect.bottom + 4, 8), window.innerHeight - menu.offsetHeight - 8) + "px";
+    positionMenu(menu, anchor);
     menu.querySelectorAll(".ctx-item").forEach((item) => {
       item.onclick = () => {
         closeContextMenu(true);
         exportSubtitle(doc, item.dataset.fmt);
       };
     });
-    bindMenuKeyboard(menu, anchor);
+    bindMenuKeyboard(menu, anchor, anchor);
   }
 
   async function exportSubtitle(doc, fmt) {
@@ -655,6 +621,24 @@ window.Library = (() => {
     };
   }
 
+  function positionMenu(menu, anchor, point) {
+    const pad = 8, gap = 6;
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    if (point) {
+      const x = point.clientX + mw + pad > window.innerWidth ? point.clientX - mw : point.clientX;
+      const y = point.clientY + mh + pad > window.innerHeight ? point.clientY - mh : point.clientY;
+      menu.style.left = Math.max(pad, Math.min(x, window.innerWidth - mw - pad)) + 'px';
+      menu.style.top = Math.max(pad, Math.min(y, window.innerHeight - mh - pad)) + 'px';
+      return;
+    }
+    const rect = anchor.getBoundingClientRect();
+    const preferBelow = rect.bottom + gap + mh <= window.innerHeight - pad || rect.top - gap - mh < pad;
+    const top = preferBelow ? rect.bottom + gap : rect.top - mh - gap;
+    const left = rect.right - mw;
+    menu.style.left = Math.max(pad, Math.min(left, window.innerWidth - mw - pad)) + 'px';
+    menu.style.top = Math.max(pad, Math.min(top, window.innerHeight - mh - pad)) + 'px';
+  }
+
   function closeContextMenu(restoreFocus) {
     const old = activeMenu;
     if (old) {
@@ -665,7 +649,7 @@ window.Library = (() => {
     }
   }
 
-  function bindMenuKeyboard(menu, returnFocus) {
+  function bindMenuKeyboard(menu, returnFocus, anchor = null) {
     menu.setAttribute("role", "menu");
     menu.querySelectorAll('.ctx-item').forEach(item => item.setAttribute('role', 'menuitem'));
     const items = [...menu.querySelectorAll('.ctx-item:not(:disabled)')];
@@ -682,10 +666,13 @@ window.Library = (() => {
     menuEvents = new AbortController();
     const signal = menuEvents.signal;
     document.addEventListener("keydown", onKey, {signal});
-    document.addEventListener('pointerdown', ev => { if (!menu.contains(ev.target)) closeContextMenu(); }, {capture:true,signal});
+    document.addEventListener('pointerdown', ev => {
+      if (!menu.contains(ev.target) && !(anchor && anchor.contains(ev.target))) closeContextMenu();
+    }, {capture:true,signal});
     window.addEventListener('resize', () => closeContextMenu(), {signal});
     document.addEventListener('scroll', ev => { if (!menu.contains(ev.target)) closeContextMenu(); }, {capture:true,signal});
     menu._returnFocus = returnFocus;
+    menu._anchor = anchor;
     activeMenu = menu;
     returnFocus?.closest('[aria-haspopup="menu"]')?.setAttribute('aria-expanded', 'true');
     items[0]?.focus();
@@ -696,6 +683,7 @@ window.Library = (() => {
   }
 
   function showContextMenu(doc, anchor, point) {
+    if (!point && activeMenu?._anchor === anchor) { closeContextMenu(true); return; }
     closeContextMenu();
     const menu = document.createElement('div');
     menu.className = 'ctx-menu doc-context-menu';
@@ -756,12 +744,8 @@ window.Library = (() => {
       }
     });
     document.body.appendChild(menu);
-    const rect = anchor.getBoundingClientRect();
-    const x = point?.clientX ?? rect.right - menu.offsetWidth;
-    const y = point?.clientY ?? rect.bottom + 4;
-    menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px';
-    menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + 'px';
-    bindMenuKeyboard(menu, anchor);
+    positionMenu(menu, anchor, point);
+    bindMenuKeyboard(menu, anchor, point ? null : anchor);
   }
 
   async function useDocumentFile(doc, action) {
@@ -796,10 +780,7 @@ window.Library = (() => {
     }
     menu.innerHTML = `<div class="menu-list">${items.join("")}</div>`;
     document.body.appendChild(menu);
-    const left = Math.min(Math.max(x, 8), window.innerWidth - menu.offsetWidth - 8);
-    const top = Math.min(Math.max(y, 8), window.innerHeight - menu.offsetHeight - 8);
-    menu.style.left = left + "px";
-    menu.style.top = top + "px";
+    positionMenu(menu, null, {clientX: x, clientY: y});
     menu.querySelectorAll(".ctx-item").forEach((item) => {
       item.onclick = (e) => {
         e.stopPropagation();
@@ -881,12 +862,12 @@ window.Library = (() => {
   async function loadDocs(light = false, keepReader = false) {
     const list = document.getElementById("docList");
     if (!list || AppState.currentView !== 'library' || (light && state.listLoading)) return;
-    const serial = ++docsRequest, query = state.query, filter = state.tagFilter;
-    const reset = document.getElementById('libResetFilters'); if (reset) reset.hidden = !query && !filter;
+    const serial = ++docsRequest, filter = state.tagFilter;
+    const reset = document.getElementById('libResetFilters'); if (reset) reset.hidden = !filter;
     if (!light) { state.listLoading = true; renderListStatus(); }
     let docs;
     try {
-      docs = await AppApi.documents(query, "全部");
+      docs = await AppApi.documents("", "全部");
       if (!Array.isArray(docs)) throw new Error('Invalid document list');
     } catch (_) {
       if (serial === docsRequest && AppState.currentView === 'library' && list.isConnected) {
@@ -904,8 +885,8 @@ window.Library = (() => {
     const matching = sortedDocs(applyTagFilter(docs, filter));
     const fingerprint = arr => JSON.stringify(arr.map(d => d && [d.task_id,d.title,d.status,d.updated_at,d.tags,d.has_final,d.has_raw,d.source_path,d.source_available,d.has_translation,d.translation_lang,d.translation_source_tab]));
     const previous = currentDoc();
-    // A title search cannot prove a document was removed. Keep the open record even when the results exclude it.
-    state.activeDoc = selection || ((query || state.editing) ? previous : null);
+    // A tag filter cannot prove a document was removed. Keep the open record even when the results exclude it.
+    state.activeDoc = selection || ((filter || state.editing) ? previous : null);
     if (light && repeat && fingerprint(matching) === fingerprint(state.docs)
         && fingerprint([state.activeDoc]) === fingerprint([previous])) return;
     state.docs = matching;
@@ -926,7 +907,7 @@ window.Library = (() => {
     const versionRemoved = current && ((state.tab === 'raw' && !current.has_raw) || (state.tab === 'final' && !current.has_final));
     const needReader = current && ((!keepReader && !state.readerReady) || versionRemoved);
     if (!state.editing && !current) {
-      if (matching.length && !query && !filter) chooseDocument(matching[0]);
+      if (matching.length && !filter) chooseDocument(matching[0]);
       else {
         state.selectedId = null; state.readerReady = false; state.readerText = ''; ++readerRequest;
         renderTabs(null); updateReaderActions();
@@ -1026,8 +1007,22 @@ window.Library = (() => {
       toggle.onclick = () => show(host.hidden);
       picker.onfocusout = event => { if (!picker.contains(event.relatedTarget)) show(false); };
       picker.onkeydown = event => {
-        if (event.key !== 'Escape' || host.hidden) return;
-        event.stopPropagation(); show(false); toggle.focus();
+        if (event.key === 'Escape' && !host.hidden) {
+          event.stopPropagation(); show(false); toggle.focus(); return;
+        }
+        const items = [...host.querySelectorAll('button')];
+        if (!items.length) return;
+        if (host.hidden && event.target === toggle && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+          event.preventDefault(); show(true);
+          (host.querySelector('.active') || items[0]).focus();
+          return;
+        }
+        if (host.hidden || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const index = items.indexOf(document.activeElement);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+          : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[next]?.focus();
       };
       for (const view of TRANSLATION_VIEWS) {
         const button = document.createElement('button');
@@ -1545,7 +1540,7 @@ window.Library = (() => {
       await loadDocs(!removed);
       if (!result?.ok || !removed) toast(result?.error || '删除未完成，请检查文件是否被占用后重试', 'error');
       else toast(result.message || action.done);
-      if (AppState.currentView === 'library' && document.activeElement === document.body) (document.querySelector('.doc.selected .doc-open') || document.getElementById('libSearch'))?.focus({preventScroll:true});
+      if (AppState.currentView === 'library' && document.activeElement === document.body) (document.querySelector('.doc.selected .doc-open') || document.getElementById('libTagFilter'))?.focus({preventScroll:true});
     } catch (_) { toast('删除未完成，请检查文件是否被占用后重试', 'error'); }
     finally { deleting.delete(id); }
   }
@@ -1603,6 +1598,10 @@ window.Library = (() => {
     renderTranslationStatus();
   }
 
+  function normalizeTitleText(value) {
+    return String(value || '').replace(/[\s\p{P}\p{S}]+/gu, '').toLowerCase();
+  }
+
   function replaceReaderContent(html) {
     const body = document.getElementById('readerBody');
     const heading = document.getElementById('readerHeading');
@@ -1610,12 +1609,31 @@ window.Library = (() => {
     body.insertAdjacentHTML('beforeend', html);
     const title = heading.querySelector('.reader-doc-title'), first = heading.nextElementSibling;
     const wasFocused = document.activeElement === title;
-    const repeatsTitle = first?.tagName === 'H1' && first.textContent.trim() === currentDoc()?.title?.trim();
-    if (repeatsTitle) {
+    const docTitle = currentDoc()?.title?.trim() || '';
+    const firstText = first?.tagName === 'H1' ? first.textContent.trim() : '';
+    const exactMatch = Boolean(firstText && docTitle && firstText === docTitle);
+    const normFirst = normalizeTitleText(firstText), normDoc = normalizeTitleText(docTitle);
+    const prefixOrDuplicate = Boolean(
+      firstText && normFirst && normDoc && (
+        normFirst === normDoc
+        || (normFirst.length >= 3 && normDoc.startsWith(normFirst))
+        || (normDoc.length >= 3 && normFirst.startsWith(normDoc))
+      )
+    );
+    if (exactMatch) {
       first.className = 'reader-doc-title';
       first.tabIndex = -1;
       first.dataset.i18nSkip = '';
       title.replaceWith(first);
+    } else if (prefixOrDuplicate) {
+      first.remove();
+      if (title.tagName !== 'H1') {
+        const nextTitle = document.createElement('h1');
+        nextTitle.className = title.className;
+        nextTitle.tabIndex = -1;
+        nextTitle.dataset.i18nSkip = '';
+        title.replaceWith(nextTitle);
+      }
     } else if (title.tagName !== 'H2') {
       const nextTitle = document.createElement('h2');
       nextTitle.className = title.className;
@@ -1725,7 +1743,7 @@ window.Library = (() => {
     saveReadingPosition();
     reading.open = Boolean(document.getElementById('readerBody')?.clientHeight);
     writeReadingState();
-    savedContext = {query: state.query, tagFilter: state.tagFilter, sortOrder: state.sortOrder,
+    savedContext = {tagFilter: state.tagFilter, sortOrder: state.sortOrder,
       selectedId: state.selectedId, activeDoc: currentDoc(),
       listScroll: document.getElementById('docList')?.scrollTop || 0,
       reading: reading.open};
@@ -1736,9 +1754,9 @@ window.Library = (() => {
     if (state.editing && document.querySelector('#readerBody .reader-editor')) { await refreshLight(); return; }
     renderedReading = null; state.comparing = false;
     if (context?.taskIds) {
-      targetIds = context.taskIds; state.query = ''; state.tagFilter = '';
+      targetIds = context.taskIds; state.tagFilter = '';
     } else if (context) {
-      targetIds = null; state.query = context.query || ''; state.tagFilter = context.tagFilter || '';
+      targetIds = null; state.tagFilter = context.tagFilter || '';
       state.selectedId = context.selectedId;
       state.activeDoc = context.activeDoc || null;
       state.sortOrder = context.sortOrder || '';
@@ -1753,7 +1771,7 @@ window.Library = (() => {
       pageObserver = new MutationObserver(() => {
         if (!host.classList.contains('active')) {
           ++docsRequest; ++readerRequest;
-          clearTimeout(listSearchTimer); listSearchTimer = null; state.listLoading = false;
+          state.listLoading = false;
           closeContextMenu();
         }
       });

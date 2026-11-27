@@ -137,8 +137,9 @@ fs.mkdirSync(output, {recursive:true});
       await page.evaluate(theme=>{AppState.settings.theme=theme;applyTheme();switchView('workbench');},theme);
       const css = await page.locator('.sidebar').evaluate(e=>({font:getComputedStyle(e).fontFamily,shadow:getComputedStyle(e).boxShadow,bg:getComputedStyle(e).backgroundColor}));
       assert.notEqual(css.shadow,'none',`shell depth resolves for ${theme}`);
-      assert.match(css.font,/^"LXGW WenKai Screen"/);
-      const navigationFonts = ['dark','paper'].includes(theme) ? await wenKaiGlyphs('.nav-row[data-page="library"]') : undefined;
+      assert.doesNotMatch(css.font,/^"LXGW WenKai Screen"/,'Operate UI chrome uses clean sans-serif');
+      assert.match(css.font,/Noto Sans SC|Microsoft YaHei UI|Segoe UI|sans-serif/,'Operate UI chrome resolves modern sans-serif stack');
+      const navigationFonts = ['dark','paper'].includes(theme) ? await page.locator('.nav-row[data-page="library"]').evaluate(n=>getComputedStyle(n).fontFamily) : undefined;
       const scrollbarContrast=await page.locator('#nav').evaluate(node=>{
         const canvas=document.createElement('canvas'); canvas.width=canvas.height=1;
         const context=canvas.getContext('2d',{willReadFrequently:true});
@@ -172,7 +173,8 @@ fs.mkdirSync(output, {recursive:true});
       await page.keyboard.press('Enter');
       await page.waitForSelector('.reader-body p');
       if (width === 1280) {
-        libraryFonts.directory = await wenKaiGlyphs('.doc-title');
+        libraryFonts.directory = await page.locator('.doc-title').first().evaluate(n=>getComputedStyle(n).fontFamily);
+        assert.doesNotMatch(libraryFonts.directory,/^"LXGW WenKai Screen"/,'catalog list uses clean sans-serif');
         libraryFonts.heading = await wenKaiGlyphs('.reader-doc-title');
         libraryFonts.body = await wenKaiGlyphs('#readerBody > p');
         await page.locator('#editReaderBtn').click();
@@ -209,7 +211,8 @@ fs.mkdirSync(output, {recursive:true});
       await page.locator('.nav-row[data-page="settings"]').click();
       await page.locator('.sitem').filter({hasText:'文本整理'}).click();
       if (width === 1280) {
-        headingFonts = await wenKaiGlyphs('#page-settings .set-group h3');
+        headingFonts = await page.locator('#page-settings .set-group h3').first().evaluate(n=>getComputedStyle(n).fontFamily);
+        assert.doesNotMatch(headingFonts,/^"LXGW WenKai Screen"/,'settings headings use clean sans-serif');
       }
       const titleDetails=page.locator('details').filter({has:page.locator('summary').filter({hasText:'标题模型与规则'})});
       await titleDetails.locator('summary').click();
@@ -269,7 +272,7 @@ fs.mkdirSync(output, {recursive:true});
       await page.keyboard.press('Escape');
     }
     assert.deepEqual(errors,[]);
-    fs.writeFileSync(path.join(output,'desktop-evidence.json'),JSON.stringify({widths:[1440,1280,960,640,560],themes:themeEvidence,headingFonts,libraryFonts,checks:['bundled WenKai glyphs in shell, settings and library','keyboard task selection','dialog focus trap + escape + return','native document actions','subtitle menu arrow keys','narrow title rules','narrow subscription inputs','reduced motion','integrated window title controls','all nine pages','video cards','guide and modal layering','1440x900 and 560x500 overflow'],errors},null,2));
+    fs.writeFileSync(path.join(output,'desktop-evidence.json'),JSON.stringify({widths:[1440,1280,960,640,560],themes:themeEvidence,headingFonts,libraryFonts,checks:['dual-voice typography: sans-serif shell + bundled WenKai reader','keyboard task selection','dialog focus trap + escape + return','native document actions','subtitle menu arrow keys','narrow title rules','narrow subscription inputs','reduced motion','integrated window title controls','all nine pages','video cards','guide and modal layering','1440x900 and 560x500 overflow'],errors},null,2));
     console.log('Desktop keyboard, 10 themes and advanced forms passed at 1280 / 960 / 640 / 560.');
   } finally { await browser.close(); }
 })().catch(e=>{console.error(e);process.exitCode=1;});

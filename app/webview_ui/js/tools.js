@@ -89,14 +89,17 @@ window.Tools = (() => {
     dropEvents?.abort(); dropEvents = null;
     const host = document.getElementById('page-' + key);
     if (key === 'links') {
-      host.innerHTML = `<div class="tool-page"><div class="tool-intro"><span class="tool-symbol">${AppIcons('link')}</span><h2>把链接变成收藏</h2></div>
-        <form id="linkForm" class="tool-card"><label for="linkUrl">视频链接</label><textarea id="linkUrl" rows="3" placeholder="粘贴 B 站、YouTube 或抖音链接" required>${esc(drafts.url)}</textarea>
+      host.innerHTML = `<div class="tool-page"><div class="tool-intro"><span class="tool-symbol">${AppIcons('link')}</span><div class="tool-intro-copy"><h2>粘贴链接下载</h2><p>支持 B 站、YouTube 与抖音链接，可同时加入本地转写队列。</p></div></div>
+        <form id="linkForm" class="tool-card"><label for="linkUrl">视频链接</label><textarea id="linkUrl" rows="3" placeholder="粘贴 B 站、YouTube 或抖音链接（Ctrl+Enter 快速提交）" required>${esc(drafts.url)}</textarea>
         <details class="tool-details"><summary>自定义标题</summary><input id="linkTitle" aria-label="自定义标题" value="${esc(drafts.title)}" placeholder="留空自动获取标题" maxlength="240"></details>
         <label class="check-row"><input id="linkTranscribe" type="checkbox" ${drafts.transcribe ? 'checked' : ''}>下载后转写</label>
         <div class="tool-footer"><p id="linkState" role="status" aria-live="polite"></p><button class="btn primary" type="submit">开始下载</button></div></form>
         <p class="tool-note">抖音建议从浏览器视频页添加，识别更稳定。</p></div>`;
       const form = host.querySelector('form');
       form.oninput = () => { drafts.url = host.querySelector('#linkUrl').value; drafts.title = host.querySelector('#linkTitle').value; drafts.transcribe = host.querySelector('#linkTranscribe').checked; linkMessage = ''; linkError = false; paintLinks(); };
+      host.querySelector('#linkUrl').addEventListener('keydown', e => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
+      });
       paintLinks();
       form.onsubmit = async e => {
         e.preventDefault(); if (linkBusy) return;
@@ -117,7 +120,7 @@ window.Tools = (() => {
       };
     } else if (key === 'import') {
       host.innerHTML = `<div class="tool-page">
-        <div class="tool-intro"><span class="tool-symbol">${AppIcons('import')}</span><h2>听过的，留下文字</h2></div>
+        <div class="tool-intro"><span class="tool-symbol">${AppIcons('import')}</span><div class="tool-intro-copy"><h2>导入本地音视频</h2><p>原媒体保留在原位置，加入转写队列后可在任务页查看进度。</p></div></div>
         <div id="mediaDropZone" class="tool-card import-card media-drop-zone" aria-label="媒体导入区域" aria-busy="false">
           <span class="import-art" aria-hidden="true">${AppIcons('import')}</span>
           <h3 class="import-drop-title">把视频或录音拖到这里</h3>

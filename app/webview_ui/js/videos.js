@@ -8,7 +8,7 @@ window.Videos = (() => {
   let scanTimer = null, scanGeneration = 0;
   const deleting = new Set();
   let currentItems = new Map();
-  let query = '', availability = 'all', savedScroll = 0, pendingContext = null;
+  let availability = 'all', savedScroll = 0, pendingContext = null;
   let locatedVideoId = null, locateFrame = 0;
   let catalogLoaded = false;
   const playIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg>';
@@ -186,6 +186,7 @@ window.Videos = (() => {
     };
   }
   function showMenu(item, anchor, point) {
+    if (!point && contextMenu && menuAnchor === anchor) { closeMenu(true); return; }
     closeMenu();
     menuAnchor = anchor; anchor.setAttribute("aria-expanded", "true");
     const menu = document.createElement("div"); contextMenu = menu;
@@ -212,9 +213,19 @@ window.Videos = (() => {
     });
     if (item.deletable !== true && item.deletion_note) { const note = document.createElement("div"); note.className = "video-menu-note"; note.textContent = item.deletion_note; menu.append(note); }
     document.body.append(menu);
+    const pad = 12, gap = 6;
     const r = anchor.getBoundingClientRect(), box = menu.getBoundingClientRect();
-    menu.style.left = Math.max(12,Math.min(point?.x ?? r.right-box.width,innerWidth-box.width-12)) + "px";
-    menu.style.top = Math.max(12,Math.min(point?.y ?? r.bottom+6,innerHeight-box.height-12)) + "px";
+    if (point) {
+      const x = point.x + box.width + pad > innerWidth ? point.x - box.width : point.x;
+      const y = point.y + box.height + pad > innerHeight ? point.y - box.height : point.y;
+      menu.style.left = Math.max(pad, Math.min(x, innerWidth - box.width - pad)) + "px";
+      menu.style.top = Math.max(pad, Math.min(y, innerHeight - box.height - pad)) + "px";
+    } else {
+      const preferBelow = r.bottom + gap + box.height <= innerHeight - pad || r.top - gap - box.height < pad;
+      const top = preferBelow ? r.bottom + gap : r.top - box.height - gap;
+      menu.style.left = Math.max(pad, Math.min(r.right - box.width, innerWidth - box.width - pad)) + "px";
+      menu.style.top = Math.max(pad, Math.min(top, innerHeight - box.height - pad)) + "px";
+    }
     const buttons = [...menu.querySelectorAll("button:not(:disabled)")];
     menuEvents = new AbortController(); const signal = menuEvents.signal;
     document.addEventListener("pointerdown", event => { if (!menu.contains(event.target) && !anchor.contains(event.target)) closeMenu(); }, {capture:true,signal});
@@ -280,8 +291,8 @@ window.Videos = (() => {
     closeMenu(); grid.replaceChildren();
     grid.classList.toggle('is-missing-list', availability === 'missing');
     if (!items.length) {
-      if (currentItems.size && (query || availability !== 'all')) {
-        grid.innerHTML = '<div class="empty"><div class="big">没有匹配的视频</div><div class="sub">调整关键词或切换可用性筛选。</div><button class="btn small" type="button">查看全部视频</button></div>';
+      if (currentItems.size && availability !== 'all') {
+        grid.innerHTML = '<div class="empty"><div class="big">没有匹配的视频</div><div class="sub">切换可用性筛选即可查看其他视频。</div><button class="btn small" type="button">查看全部视频</button></div>';
         grid.querySelector('button').onclick = resetFilters;
         return;
       }
@@ -420,10 +431,8 @@ window.Videos = (() => {
     const safeItems = items.filter(item => item && typeof item.id === "string");
     currentItems = new Map(safeItems.map(item=>[item.id,item]));
     if (activePlayer && currentItems.get(activePlayer.id)?.available !== true) stopPlayer();
-    const term = query.trim().toLocaleLowerCase();
-    const filtered = safeItems.filter(item => (!term || String(item.title || '').toLocaleLowerCase().includes(term))
-      && (availability === 'all' || (item.available === true) === (availability === 'available')));
-    const key = JSON.stringify([safeItems, query, availability]);
+    const filtered = safeItems.filter(item => availability === 'all' || (item.available === true) === (availability === 'available'));
+    const key = JSON.stringify([safeItems, availability]);
     if (key !== lastItemsKey || !document.querySelector('#videoGrid > *')) { lastItemsKey = key; cards(filtered); }
     const missing = safeItems.filter(item => item.available !== true).length;
     const counts = {all: safeItems.length, available: safeItems.length - missing, missing};
@@ -431,8 +440,7 @@ window.Videos = (() => {
       button.setAttribute('aria-pressed', String(button.dataset.videoFilter === availability));
       button.querySelector('span').textContent = counts[button.dataset.videoFilter];
     });
-    setStatus(safeItems.length ? (query || availability !== 'all' ? '显示 ' + filtered.length + ' / ' : '')
-      + safeItems.length + ' 个视频' + (missing ? '，' + missing + ' 个位置待恢复' : '') : "暂无视频");
+    setStatus(missing ? missing + ' 个位置待恢复' : '');
     if (pendingContext) {
       const target = pendingContext;
       pendingContext = null;
@@ -449,14 +457,13 @@ window.Videos = (() => {
     }
   }
   function resetFilters() {
-    query = ''; availability = 'all'; savedScroll = 0; pendingContext = null;
-    document.getElementById('videoSearch').value = '';
+    availability = 'all'; savedScroll = 0; pendingContext = null;
     applyItems([...currentItems.values()]);
     document.getElementById('videoGrid').scrollTop = 0;
   }
   function snapshot() {
     savedScroll = document.getElementById('videoGrid')?.scrollTop || 0;
-    return {query, availability, scrollTop: savedScroll};
+    return {availability, scrollTop: savedScroll};
   }
   function listState(message, failed = false) {
     const node = document.getElementById('videosReadState');
@@ -498,8 +505,8 @@ window.Videos = (() => {
   function render(context) {
     const host = document.getElementById("page-videos");
     stopLocating();
-    if (context?.videoId) { query = ''; availability = 'all'; }
-    else if (context) { query = context.query || ''; availability = context.availability || 'all'; }
+    if (context?.videoId) { availability = 'all'; }
+    else if (context) { availability = context.availability || 'all'; }
     pendingContext = context || {scrollTop: savedScroll};
     closeMenu(); stopPlayer(); stopScanPoll();
     if (!pageObserver) {
@@ -512,15 +519,9 @@ window.Videos = (() => {
     catalogLoaded = false;
     host.innerHTML = '<div class="videos-layout"><div class="videos-toolbar"><span id="videosStatus" class="videos-status" role="status" aria-live="polite"></span></div><div class="videos-content"><div id="videoGrid" class="video-grid" aria-label="已下载的视频"></div><div id="videosReadState" class="media-read-state" role="status" aria-live="polite" hidden><span class="media-read-symbol" aria-hidden="true">'+playIcon+'</span><h2>正在读取视频</h2><p>正在整理本地视频与封面</p><button class="btn small" type="button" hidden>重新读取</button></div></div></div>';
     const toolbar = host.querySelector('.videos-toolbar');
-    toolbar.insertAdjacentHTML('afterbegin', '<div class="video-browse-tools"><input id="videoSearch" type="search" placeholder="搜索视频标题" aria-label="搜索视频标题" spellcheck="false"><div class="video-filters" role="group" aria-label="视频可用性"><button type="button" data-video-filter="all">全部 <span></span></button><button type="button" data-video-filter="available">可播放 <span></span></button><button type="button" data-video-filter="missing">位置待恢复 <span></span></button></div></div>');
-    const search = document.getElementById('videoSearch'); search.value = query;
+    toolbar.insertAdjacentHTML('afterbegin', '<div class="video-browse-tools"><div class="video-filters" role="group" aria-label="视频可用性"><button type="button" data-video-filter="all">全部 <span></span></button><button type="button" data-video-filter="available">可播放 <span></span></button><button type="button" data-video-filter="missing">位置待恢复 <span></span></button></div></div>');
     const grid = document.getElementById('videoGrid');
     for (const event of ['wheel', 'pointerdown', 'keydown']) grid.addEventListener(event, stopLocating, {passive: true});
-    search.oninput = () => {
-      stopLocating();
-      query = search.value; pendingContext = null;
-      if (catalogLoaded) applyItems([...currentItems.values()]); document.getElementById('videoGrid').scrollTop = 0;
-    };
     toolbar.querySelectorAll('[data-video-filter]').forEach(button => {
       button.setAttribute('aria-pressed', String(button.dataset.videoFilter === availability));
       button.onclick = () => {
