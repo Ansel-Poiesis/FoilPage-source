@@ -654,6 +654,21 @@ def test_push_state_evaluates_js():
     assert "__onState(" in window.eval_scripts[0]
 
 
+def test_push_state_skips_unchanged_idle_payloads():
+    window = FakeWindow()
+    bridge, controller, _ = make_bridge(window=window)
+    bridge.push_state()
+    bridge.push_state()
+    assert len(window.eval_scripts) == 1
+    bridge.push_state(notifications=[{"title": "完成", "message": "done"}])
+    assert len(window.eval_scripts) == 2
+    bridge.push_state()
+    assert len(window.eval_scripts) == 2
+    controller.settings["theme"] = "paper"
+    bridge.push_state()
+    assert len(window.eval_scripts) == 3
+
+
 def test_import_files_enqueues(tmp_path):
     bridge, controller, _ = make_bridge(account_dir=tmp_path / "data")
     result = bridge.import_files(["C:/a.mp4"])

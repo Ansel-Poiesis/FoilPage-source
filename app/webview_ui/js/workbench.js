@@ -623,7 +623,7 @@ window.Workbench = (() => {
     const tasks = AppState.tasks || [];
     const task = tasks.find((t) => t.task_id === selectedId) || null;
     if (!task) {
-      host.innerHTML = `<div class="empty"><span class="empty-symbol" aria-hidden="true">${AppIcons('tasks')}</span><div class="big">查看任务详情</div><div class="sub">单击选择，再次单击取消；勾选多项，批量处理。</div><div class="inspector-empty-actions"><button class="btn ghost small" type="button" data-quick="links">粘贴链接</button><button class="btn ghost small" type="button" data-quick="import">导入媒体</button></div><p class="selection-shortcuts"><kbd>Ctrl+A</kbd> 全选当前列表 <span>·</span> <kbd>Esc</kbd> 清空</p></div>`;
+      host.innerHTML = `<div class="empty"><span class="empty-symbol" aria-hidden="true">${AppIcons('tasks')}</span><div class="big">查看任务详情</div><div class="sub">单击选择，再次单击取消；<br>勾选多项，批量处理。</div><div class="inspector-empty-actions"><button class="btn ghost small" type="button" data-quick="links">粘贴链接</button><button class="btn ghost small" type="button" data-quick="import">导入媒体</button></div><p class="selection-shortcuts"><kbd>Ctrl+A</kbd> 全选当前列表 <span>·</span> <kbd>Esc</kbd> 清空</p></div>`;
       host.querySelectorAll('[data-quick]').forEach(btn => {
         btn.onclick = () => openQuickAdd(btn.dataset.quick);
       });

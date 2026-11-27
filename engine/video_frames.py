@@ -72,6 +72,9 @@ def extract_frame_data_urls(
     *,
     ffmpeg_path: str = "",
     timeout_sec: float = 20.0,
+    max_width: int = 1280,
+    max_height: int | None = None,
+    quality: int = 5,
 ) -> list[dict[str, object]]:
     """Extract JPEG frames and return ``[{timestamp, data_url}]`` records.
 
@@ -86,6 +89,16 @@ def extract_frame_data_urls(
         ffmpeg = get_ffmpeg(ffmpeg_path)
     except Exception:
         return []
+    width = max(64, int(max_width))
+    q_value = max(2, min(31, int(quality)))
+    if max_height is not None:
+        height = max(64, int(max_height))
+        scale_filter = (
+            f"scale=w='min({width},iw)':h='min({height},ih)'"
+            ":force_original_aspect_ratio=decrease:force_divisible_by=2"
+        )
+    else:
+        scale_filter = f"scale={width}:-2"
     frames: list[dict[str, object]] = []
     for raw_timestamp in timestamps[:MAX_FRAME_COUNT]:
         try:
@@ -98,8 +111,8 @@ def extract_frame_data_urls(
             "-ss", f"{timestamp:.3f}",
             "-i", str(source),
             "-frames:v", "1",
-            "-vf", "scale=1280:-2",
-            "-q:v", "5",
+            "-vf", scale_filter,
+            "-q:v", str(q_value),
             "-f", "image2pipe",
             "-vcodec", "mjpeg",
             "pipe:1",

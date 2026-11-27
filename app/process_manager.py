@@ -16,6 +16,47 @@ from typing import Callable, Mapping, Sequence
 _STD_HANDLE_IDS = (-10 & 0xFFFFFFFF, -11 & 0xFFFFFFFF, -12 & 0xFFFFFFFF)
 
 
+def _signal_windows_worker_stop_event(pid: int) -> int | None:
+    """Create-or-open the PID-scoped Win32 Event and signal graceful stop.
+
+    Returns the open handle so the caller keeps the event object alive until
+    the worker observes it (avoiding any startup race before the worker opens
+    the same name). Caller must release it with ``_close_windows_stop_event``.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    name = f"Local\\FoilPageWorkerStop-PID-{pid}"
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateEventW.restype = wintypes.HANDLE
+    kernel.SetEvent.argtypes = [wintypes.HANDLE]
+    kernel.SetEvent.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateEventW(None, True, False, name)
+    if not handle:
+        return None
+    if not kernel.SetEvent(handle):
+        kernel.CloseHandle(handle)
+        return None
+    return int(handle)
+
+
+def _close_windows_stop_event(handle: int | None) -> None:
+    if not handle:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    kernel.CloseHandle(wintypes.HANDLE(handle))
+
+
 def _send_windows_stop_signal(process: subprocess.Popen[str]) -> None:
     """Deliver CTRL_BREAK from a windowed parent without showing a console.
 
@@ -114,15 +155,11 @@ class WorkerProcessManager:
     def _spawn_locked(self) -> bool:
         """在已持锁的前提下拉起进程与监控线程；不动退出意图与崩溃计数。"""
         creationflags = 0
-        startupinfo = None
         if os.name == "nt":
-            # CTRL_BREAK_EVENT requires the child to belong to a console
-            # process group. CREATE_NO_WINDOW makes that signal undeliverable,
-            # so hide the console via STARTUPINFO instead.
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
+            # 2026-11-27：改用 CREATE_NO_WINDOW + PID 命名 Win32 Event 优雅退出。
+            # 彻底杜绝 Windows 11 下 STARTUPINFO(SW_HIDE) 仍闪烁命令行窗口与
+            # 常驻 conhost.exe，也不再污染子进程 env 或触发 AttachConsole。
+            creationflags = subprocess.CREATE_NO_WINDOW
         self._process = subprocess.Popen(
             self.command,
             stdout=subprocess.PIPE,
@@ -132,7 +169,6 @@ class WorkerProcessManager:
             errors="replace",
             bufsize=1,
             creationflags=creationflags,
-            startupinfo=startupinfo,
             env=dict(self._environment) if self._environment is not None else None,
         )
         self._started_at = time.monotonic()
@@ -148,17 +184,16 @@ class WorkerProcessManager:
         if process is None or process.poll() is not None:
             self.state_callback("stopped")
             return False
+        stop_handle: int | None = None
         try:
             if os.name == "nt":
-                _send_windows_stop_signal(process)
+                stop_handle = _signal_windows_worker_stop_event(process.pid)
+                if not stop_handle:
+                    _send_windows_stop_signal(process)
             else:
                 process.send_signal(signal.SIGTERM)
             process.wait(timeout=timeout)
         except (OSError, SystemError, subprocess.TimeoutExpired):
-            # Python's Windows subprocess wrapper can surface an invalid
-            # process handle as SystemError while sending CTRL_BREAK_EVENT.
-            # Treat it like any other failed graceful stop and keep the app
-            # shutdown path moving.
             try:
                 process.terminate()
             except (OSError, SystemError):
@@ -174,6 +209,9 @@ class WorkerProcessManager:
                     process.wait(timeout=3)
                 except (OSError, SystemError, subprocess.TimeoutExpired):
                     pass
+        finally:
+            if stop_handle:
+                _close_windows_stop_event(stop_handle)
         self.state_callback("stopped")
         return True
 

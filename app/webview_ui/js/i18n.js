@@ -512,6 +512,9 @@ window.I18n = (() => {
   for(const [source,value] of Object.entries({
     '需处理':'Needs attention','完成度':'Progress','导入':'Import','未开始':'Not started',
     '未选择':'Nothing selected','查看任务详情':'View task details',
+    '单击选择，再次单击取消；':'Click to select, click again to deselect;',
+    '勾选多项，批量处理。':'Check multiple items for batch actions.',
+    '单击选择，再次单击取消；勾选多项，批量处理。':'Click to select, click again to deselect; check multiple items for batch actions.',
     '选择一项查看进度与文件；勾选多项，批量处理。':'Select a task to see progress and files, or select several for batch actions.',
     '把链接变成收藏':'Keep a video from its link','自定义标题':'Custom title','下载后转写':'Transcribe after download',
     '抖音建议从浏览器视频页添加，识别更稳定。':'For Douyin, submit the video from the paired browser extension for more reliable identification.',

@@ -23,7 +23,6 @@ datas = yt_datas + ejs_datas + [
     (os.path.join(ROOT, "docs", "release-security.md"), "docs"),
     (os.path.join(ROOT, "app", "skills"), "app/skills"),
     (os.path.join(ROOT, "app", "webview_ui"), "app/webview_ui"),
-    (os.path.join(ROOT, "assets", "fonts", "LXGWWenKaiScreen.ttf"), "assets/fonts"),
     (os.path.join(ROOT, "assets", "fonts", "OFL.txt"), "assets/fonts"),
     (os.path.join(ROOT, "assets", "icons", "foilpage.ico"), "assets/icons"),
     (os.path.join(ROOT, "assets", "icons", "foilpage.png"), "assets/icons"),
@@ -47,6 +46,7 @@ a = Analysis(
     excludes=[
         "torch", "tensorflow", "faster_whisper", "ctranslate2",
         "onnxruntime", "av", "flet", "numpy", "imageio_ffmpeg", "opencc",
+        "hf_xet",
         "PyInstaller", "pytest", "_pytest", "setuptools", "fontTools",
     ],
     win_no_prefer_redirects=False,
