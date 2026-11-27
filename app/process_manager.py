@@ -23,10 +23,12 @@ def _signal_windows_worker_stop_event(pid: int) -> int | None:
     the worker observes it (avoiding any startup race before the worker opens
     the same name). Caller must release it with ``_close_windows_stop_event``.
     """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
     import ctypes
     from ctypes import wintypes
 
-    name = f"Local\\FoilPageWorkerStop-PID-{int(pid)}"
+    name = f"Local\\FoilPageWorkerStop-PID-{pid}"
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
     kernel.CreateEventW.restype = wintypes.HANDLE
