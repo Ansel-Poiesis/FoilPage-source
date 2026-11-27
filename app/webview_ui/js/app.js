@@ -19,6 +19,88 @@ window.AppState = {
   filter: "全部",
 };
 
+/* 精致器物打勾微音效：Web Audio 即时合成陶瓷轻叩/勾笔确认音，零延迟、遵循无声设置。 */
+window.AppSound = (() => {
+  let ctx = null;
+  let lastAt = 0;
+  function getContext() {
+    if (ctx) return ctx;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    ctx = new AudioCtx();
+    return ctx;
+  }
+  function isMuted() {
+    return AppState.settings?.notification_sound_pack === "silent";
+  }
+  function playCheck(checked = true) {
+    if (isMuted()) return false;
+    const nowMs = performance.now();
+    if (nowMs - lastAt < 35) return false;
+    lastAt = nowMs;
+    try {
+      const audio = getContext();
+      if (!audio) return false;
+      if (audio.state === "suspended") audio.resume().catch(() => {});
+      const t0 = audio.currentTime;
+      const master = audio.createGain();
+      master.gain.setValueAtTime(1, t0);
+      master.connect(audio.destination);
+
+      if (checked) {
+        // 第一声：极短的纸笔/陶瓷触底轻叩（28ms）
+        const clickOsc = audio.createOscillator();
+        const clickGain = audio.createGain();
+        clickOsc.type = "triangle";
+        clickOsc.frequency.setValueAtTime(580, t0);
+        clickOsc.frequency.exponentialRampToValueAtTime(860, t0 + 0.026);
+        clickGain.gain.setValueAtTime(0.001, t0);
+        clickGain.gain.linearRampToValueAtTime(0.10, t0 + 0.004);
+        clickGain.gain.exponentialRampToValueAtTime(0.0008, t0 + 0.032);
+        clickOsc.connect(clickGain).connect(master);
+        clickOsc.start(t0);
+        clickOsc.stop(t0 + 0.035);
+
+        // 第二声：清亮上扬的玉石确认泛音（D6 → G6 轻提，约 75ms）
+        const chimeOsc = audio.createOscillator();
+        const chimeGain = audio.createGain();
+        chimeOsc.type = "sine";
+        chimeOsc.frequency.setValueAtTime(1174.66, t0 + 0.024);
+        chimeOsc.frequency.exponentialRampToValueAtTime(1567.98, t0 + 0.064);
+        chimeGain.gain.setValueAtTime(0.0008, t0 + 0.024);
+        chimeGain.gain.linearRampToValueAtTime(0.085, t0 + 0.032);
+        chimeGain.gain.exponentialRampToValueAtTime(0.0006, t0 + 0.105);
+        chimeOsc.connect(chimeGain).connect(master);
+        chimeOsc.start(t0 + 0.024);
+        chimeOsc.stop(t0 + 0.11);
+      } else {
+        // 取消勾选：轻柔低落的一声回弹轻嗒（45ms）
+        const offOsc = audio.createOscillator();
+        const offGain = audio.createGain();
+        offOsc.type = "sine";
+        offOsc.frequency.setValueAtTime(520, t0);
+        offOsc.frequency.exponentialRampToValueAtTime(340, t0 + 0.044);
+        offGain.gain.setValueAtTime(0.001, t0);
+        offGain.gain.linearRampToValueAtTime(0.06, t0 + 0.005);
+        offGain.gain.exponentialRampToValueAtTime(0.0006, t0 + 0.05);
+        offOsc.connect(offGain).connect(master);
+        offOsc.start(t0);
+        offOsc.stop(t0 + 0.055);
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  return { playCheck, isMuted };
+})();
+
+document.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!event.isTrusted || !target?.matches?.('input[type="checkbox"]:not(.job-check-input)')) return;
+  window.AppSound?.playCheck(Boolean(target.checked));
+});
+
 const PAGES = [
   { key: 'setup', label: '准备', title: '准备', icon: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.4 2.4 4.6-5"/></svg>` },
   { key: "workbench", label: "任务", title: "任务", icon: AppIcons('tasks') },
@@ -206,9 +288,19 @@ function applyTheme() {
   if (theme === "light") theme = "paper";
   if (theme === "system") theme = "dark";
   if (!KNOWN_THEMES.has(theme)) theme = "dark";
+  const accent = s.accent || "green";
+  const prevTheme = document.body.dataset.theme;
+  const prevAccent = document.body.dataset.accent;
+  const visualChanged = Boolean(prevTheme && (prevTheme !== theme || prevAccent !== accent));
+  const root = document.documentElement;
+  if (visualChanged) root.classList.add("theme-switching");
   document.body.dataset.theme = theme;
-  document.body.dataset.accent = s.accent || "green";
+  document.body.dataset.accent = accent;
   document.body.dataset.backgroundStyle = ['plain','glow','texture'].includes(s.background_style) ? s.background_style : 'glow';
+  if (visualChanged) {
+    void root.offsetWidth;
+    root.classList.remove("theme-switching");
+  }
   /* 通知原生标题栏随主题变色（浏览器 mock 下静默忽略） */
   try {
     if (window.AppApi && window.AppApi.inWebview) {
@@ -276,6 +368,7 @@ function switchView(key, navigation = null) {
     el.classList.toggle("active", el.dataset.page === key);
     if (el.dataset.page === key) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
   });
+  renderTopActions(key);
   if (key === "workbench") window.Workbench.enter(navigation?.target);
   else if (key === "videos") window.Videos.render(navigation?.target);
   else if (key === "library") window.Library.render(navigation?.target);
@@ -285,6 +378,27 @@ function switchView(key, navigation = null) {
   else if (key === "setup") window.Setup.render();
   else window.Tools.render(key);
   window.AccountAccess.sync();
+}
+
+function renderTopActions(viewKey) {
+  const host = document.getElementById("viewActions");
+  if (!host) return;
+  if (viewKey === "workbench" && window.AccountAccess?.allowed() && window.Workbench?.openQuickAdd) {
+    if (!host.querySelector("#quickAddBtn")) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = "quickAddBtn";
+      btn.className = "btn primary small top-quick-add";
+      btn.setAttribute("aria-label", "添加内容");
+      btn.title = "粘贴链接或导入本地媒体";
+      btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="quick-add-label">添加内容</span>`;
+      btn.onclick = () => window.Workbench.openQuickAdd();
+      host.replaceChildren(btn);
+      syncWindowDragRegion();
+    }
+  } else if (host.childElementCount) {
+    host.replaceChildren();
+  }
 }
 
 function renderWorkerCard() {

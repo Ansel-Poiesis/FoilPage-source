@@ -150,3 +150,32 @@ test('modal editing keeps Ctrl+A and Escape local instead of changing the task s
     assert.deepEqual(page.errors, []);
   } finally { await page.close(); }
 });
+
+test('checkbox interactions play tactile check sound and respect silent notification pack', async () => {
+  const page = await open();
+  try {
+    await page.evaluate(() => {
+      window.__checkSounds = [];
+      const orig = window.AppSound.playCheck;
+      window.AppSound.playCheck = (checked) => {
+        const played = orig(checked);
+        window.__checkSounds.push({checked, played});
+        return played;
+      };
+    });
+    const checkbox = page.locator('.job-check-input').first();
+    await checkbox.click();
+    await page.waitForTimeout(50);
+    await checkbox.click();
+    await page.waitForTimeout(50);
+    await page.evaluate(() => { AppState.settings.notification_sound_pack = 'silent'; });
+    await checkbox.click();
+    const events = await page.evaluate(() => window.__checkSounds);
+    assert.equal(events.length, 3);
+    assert.equal(events[0].checked, true);
+    assert.equal(events[1].checked, false);
+    assert.equal(events[2].checked, true);
+    assert.equal(events[2].played, false);
+    assert.deepEqual(page.errors, []);
+  } finally { await page.close(); }
+});

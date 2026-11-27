@@ -55,7 +55,7 @@ window.Subscription = (() => {
     input.id = field;
     input.setAttribute('aria-label', label);
     input.oninput = () => connectionDrafts.set(field, input.value);
-    input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); input.onchange(); } };
+    input.onkeydown = event => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); input.onchange(); } };
     return input;
   }
   function leave() {

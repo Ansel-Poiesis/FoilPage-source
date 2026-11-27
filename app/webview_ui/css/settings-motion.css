@@ -2,32 +2,31 @@
 
 /* Ordinary commands settle on release. Navigation keeps its hit areas still. */
 button.btn {
-  transition: background-color 100ms ease-out, color 100ms ease-out,
-    border-color 100ms ease-out, box-shadow 120ms var(--ease-out),
+  transition: background-color 110ms var(--ease-out), color 110ms var(--ease-out),
+    border-color 110ms var(--ease-out), box-shadow 120ms var(--ease-out),
     transform 125ms var(--ease-out);
 }
 @media (hover: hover) and (pointer: fine) {
   button.btn:not(:disabled):not([aria-disabled="true"]):hover {
-    border-color: color-mix(in srgb, currentColor 32%, var(--border));
+    border-color: color-mix(in srgb, currentColor 28%, var(--border-hover));
   }
   .settings-nav .sitem:not(.active):hover {
     background-color: var(--hover);
     color: var(--text);
   }
   .settings-pane .toggle:not(:disabled):hover {
-    border-color: color-mix(in srgb, var(--text) 48%, var(--border));
+    border-color: color-mix(in srgb, var(--text) 42%, var(--border-hover));
   }
   .settings-pane .accent-swatch:not(:disabled):hover {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--text) 22%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--text) 20%, transparent);
   }
 }
 button.btn:not(:disabled):not([aria-disabled="true"]):active {
-  box-shadow: var(--neo-inset);
   transition-duration: 55ms;
 }
 .settings-nav .sitem {
   border: 1px solid transparent;
-  transition: background-color 90ms ease-out, color 90ms ease-out;
+  transition: background-color 100ms var(--ease-out), color 100ms var(--ease-out);
 }
 .settings-nav .sitem:not(:disabled):active {
   background-color: var(--primary-dim);

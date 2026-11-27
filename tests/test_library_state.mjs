@@ -17,6 +17,7 @@ async function open(options={}, runtime=browser){
     window.__docs=[{task_id:'a',title:'文本甲',status:'done',has_final:true,has_raw:true,source_path:'fixture.mp4',tags:['甲']},{task_id:'b',title:'文本乙',status:'done',has_final:true,has_raw:true,tags:['乙']}];
     window.__texts={a:'# 文本甲',b:'# 文本乙'};
     __MOCK__.get_documents=query=>structuredClone(__docs.filter(d=>!query||d.title.includes(query)));
+    __MOCK__.get_tag_index=()=>[{tag:'甲',count:1},{tag:'乙',count:1}];
     __MOCK__.get_reader=(id,tab)=>({ok:true,tab:tab==='source'?'source':tab,text:__texts[id],title:'原视频',path:'fixture.mp4',revision:'fixture-revision-'+id});
     __MOCK__.update_reader_text=(id,tab,text)=>{__texts[id]=text;return {ok:true};};
     __MOCK__.set_job_tags=(id,tags)=>{__docs.find(d=>d.task_id===id).tags=tags;return {ok:true};};
@@ -149,39 +150,32 @@ test('raw-only documents select and save their available text version',async()=>
     await p.waitForFunction(()=>window.__saved);assert.deepEqual(await p.evaluate(()=>__saved),['b','raw','# 修改原稿','raw-revision']);assert.deepEqual(p.errors,[]);
   }finally{await p.close();}
 });
-test('out of order search responses never replace the latest filtered list',async()=>{
+test('out of order filter responses never replace the latest filtered list',async()=>{
   const p=await open();try{
-    await p.evaluate(()=>{__MOCK__.get_documents=query=>query==='甲'?new Promise(resolve=>window.__oldSearch=()=>resolve([__docs[0]])):[__docs[1]];});
-    await p.locator('#libSearch').fill('甲');await p.waitForFunction(()=>window.__oldSearch);await p.locator('#libSearch').fill('乙');
-    await p.getByText('1 篇 · 当前文稿不在结果中',{exact:true}).waitFor();
-    await p.evaluate(async()=>{__oldSearch();await new Promise(resolve=>requestAnimationFrame(resolve));});
+    await p.evaluate(()=>{
+      let calls=0;
+      __MOCK__.get_documents=()=>++calls===1
+        ?new Promise(resolve=>window.__oldFilter=()=>resolve(structuredClone(__docs)))
+        :structuredClone(__docs);
+    });
+    await p.locator('#libTagFilter').selectOption('甲');await p.waitForFunction(()=>window.__oldFilter);
+    await p.locator('#libTagFilter').selectOption('乙');
+    await p.getByText('当前文稿不在筛选结果中',{exact:true}).waitFor();
+    await p.evaluate(async()=>{__oldFilter();await new Promise(resolve=>requestAnimationFrame(resolve));});
     assert.deepEqual(await p.locator('.doc-title').allTextContents(),['文本乙']);assert.deepEqual(p.errors,[]);
   }finally{await p.close();}
 });
-test('document search waits for Chinese composition to commit and keeps the entered input',async()=>{
+test('idle library hides noisy document count and menu trigger toggles cleanly on reclick',async()=>{
   const p=await open();try{
-    const search=p.locator('#libSearch');
-    await p.evaluate(()=>{
-      const documents=__MOCK__.get_documents;
-      window.__searchQueries=[];
-      __MOCK__.get_documents=query=>{__searchQueries.push(query);return documents(query);};
-      const search=document.getElementById('libSearch');
-      search.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
-      search.value='yi';
-      search.dispatchEvent(new InputEvent('input',{bubbles:true,data:'yi',isComposing:true}));
-      search.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,isComposing:true}));
-    });
-    await p.waitForTimeout(300);
-    assert.deepEqual(await p.evaluate(()=>__searchQueries),[]);
-    await p.evaluate(()=>{
-      const search=document.getElementById('libSearch');
-      search.value='  乙  ';
-      search.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:'乙'}));
-      search.dispatchEvent(new InputEvent('input',{bubbles:true,data:'乙'}));
-    });
-    await p.getByText('1 篇 · 当前文稿不在结果中',{exact:true}).waitFor();
-    assert.deepEqual(await p.evaluate(()=>__searchQueries),['乙']);
-    assert.equal(await search.inputValue(),'  乙  ');
+    assert.equal(await p.locator('#libResultsBar').isHidden(),true);
+    assert.equal(await p.locator('#libSearch').count(),0);
+    await p.locator('#readerMenuBtn').click();
+    await p.waitForSelector('.doc-context-menu');
+    assert.equal(await p.locator('#readerMenuBtn').getAttribute('aria-expanded'),'true');
+    await p.locator('#readerMenuBtn').click();
+    assert.equal(await p.locator('.doc-context-menu').count(),0);
+    assert.equal(await p.locator('#readerMenuBtn').getAttribute('aria-expanded'),'false');
+    assert(await p.locator('#readerMenuBtn').evaluate(node=>node===document.activeElement));
     assert.deepEqual(p.errors,[]);
   }finally{await p.close();}
 });
@@ -265,27 +259,29 @@ test('keyboard document menu returns focus and is cleaned when leaving library',
     await doc(p,'b').click({button:'right'});await p.locator('[data-page=videos]').click();assert.equal(await p.locator('.ctx-menu').count(),0);assert.deepEqual(p.errors,[]);
   }finally{await p.close();}
 });
-test('empty document search preserves the current view and offers to clear filters',async()=>{
+test('empty document filter preserves the current view and offers to clear filters',async()=>{
   const p=await open();try{
-    await p.locator('#libSearch').fill('没有匹配');await p.getByText('没有找到文本',{exact:true}).waitFor();
+    await p.evaluate(()=>{document.getElementById('libTagFilter').add(new Option('无匹配标签','无匹配标签'));});
+    await p.locator('#libTagFilter').selectOption('无匹配标签');await p.getByText('没有找到文本',{exact:true}).waitFor();
     assert.equal(await p.evaluate(()=>Library.currentTaskId()),'a');
     assert.equal(await p.locator('.reader-doc-title').textContent(),'文本甲');
     assert(await p.locator('#editReaderBtn').isEnabled());assert(await p.locator('#copyReaderBtn').isEnabled());
-    await p.locator('#clearEmptyFilter').click();await p.getByText('2 篇',{exact:true}).waitFor();
-    assert.equal(await p.locator('#libSearch').inputValue(),'');assert.deepEqual(p.errors,[]);
+    await p.locator('#clearEmptyFilter').click();await p.waitForFunction(()=>document.querySelectorAll('.doc').length===2);
+    assert.equal(await p.locator('#libTagFilter').inputValue(),'');
+    assert.equal(await p.locator('#libResultsBar').isHidden(),true);assert.deepEqual(p.errors,[]);
   }finally{await p.close();}
 });
-test('failed document search keeps the last results and can replay the requested query',async()=>{
+test('failed document reload keeps the last results and can replay the active filter',async()=>{
   const p=await open();try{
     await p.evaluate(()=>{
       const documents=__MOCK__.get_documents;
       window.__failSearch=true;
       __MOCK__.get_documents=query=>{if(__failSearch)throw new Error('mock query failure');return documents(query);};
     });
-    await p.locator('#libSearch').fill('乙');await p.getByText('读取失败，显示上次结果',{exact:true}).waitFor();
+    await p.locator('#libTagFilter').selectOption('乙');await p.getByText('读取失败，显示上次结果',{exact:true}).waitFor();
     assert.deepEqual(await p.locator('.doc-title').allTextContents(),['文本甲','文本乙']);
     await p.evaluate(()=>{__failSearch=false;});await p.locator('#libRetry').click();
-    await p.getByText('1 篇 · 当前文稿不在结果中',{exact:true}).waitFor();
+    await p.getByText('当前文稿不在筛选结果中',{exact:true}).waitFor();
     assert.deepEqual(await p.locator('.doc-title').allTextContents(),['文本乙']);
     assert.equal(await p.evaluate(()=>Library.currentTaskId()),'a');assert.deepEqual(p.errors,[]);
   }finally{await p.close();}
@@ -296,10 +292,10 @@ test('document filtering preserves the draft and opening a different result uses
     await p.locator('[data-page=workbench]').click();await p.locator('#discardChanges').waitFor();await p.locator('#dlgCancel').click();
     assert.equal(await p.evaluate(()=>AppState.currentView),'library');assert.equal(await p.locator('.reader-editor').inputValue(),'# 未保存');
     await p.locator('[data-page=library]').click();assert.equal(await p.locator('.reader-editor').inputValue(),'# 未保存');assert.equal(await p.locator('.modal').count(),0);
-    await p.locator('#libSearch').fill('乙');await p.getByText('1 篇 · 当前文稿不在结果中',{exact:true}).waitFor();
+    await p.locator('#libTagFilter').selectOption('乙');await p.getByText('当前文稿不在筛选结果中',{exact:true}).waitFor();
     assert.equal(await p.locator('.modal').count(),0);assert.equal(await p.locator('.reader-editor').inputValue(),'# 未保存');
     await doc(p,'b').click();await p.locator('#dlgCancel').click();
-    assert.equal(await p.locator('#libSearch').inputValue(),'乙');assert.equal(await p.locator('.reader-editor').inputValue(),'# 未保存');
+    assert.equal(await p.locator('#libTagFilter').inputValue(),'乙');assert.equal(await p.locator('.reader-editor').inputValue(),'# 未保存');
     await p.locator('[data-page=workbench]').click();await p.locator('#discardChanges').click();assert.equal(await p.evaluate(()=>AppState.currentView),'workbench');assert.deepEqual(p.errors,[]);
   }finally{await p.close();}
 });
@@ -449,10 +445,10 @@ test('a legacy document without a subtitle timeline explains the issue before op
 });
 test('matching document filters never discard a draft and clearing them keeps the current row',async()=>{
   const p=await open();try{
-    await p.locator('#editReaderBtn').click();await p.locator('.reader-editor').fill('# 临时草稿');await p.locator('#libSearch').fill('甲');
-    await p.getByText('1 篇',{exact:true}).waitFor();
+    await p.locator('#editReaderBtn').click();await p.locator('.reader-editor').fill('# 临时草稿');await p.locator('#libTagFilter').selectOption('甲');
+    await p.waitForFunction(()=>document.querySelectorAll('.doc').length===1);
     assert.equal(await p.locator('.reader-editor').inputValue(),'# 临时草稿');assert.equal(await p.locator('.modal').count(),0);
-    await p.locator('#libResetFilters').click();await p.getByText('2 篇',{exact:true}).waitFor();
+    await p.locator('#libResetFilters').click();await p.waitForFunction(()=>document.querySelectorAll('.doc').length===2);
     assert.equal(await doc(p,'a').getAttribute('aria-current'),'true');
     assert.equal(await p.locator('.reader-editor').inputValue(),'# 临时草稿');assert.deepEqual(p.errors,[]);
   }finally{await p.close();}

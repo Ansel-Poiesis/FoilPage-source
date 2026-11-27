@@ -316,8 +316,12 @@ window.I18n = (() => {
     '等待':'Waiting','暂停':'Pause','继续':'Resume','开始':'Start','处理中':'Processing',
     '暂无任务':'No tasks yet','暂无文本':'No documents yet','暂无文稿':'No documents yet',
     '搜索文本':'Search documents','搜索任务':'Search tasks','搜索视频':'Search videos',
-    '全部标签':'All tags','文本列表':'Documents','清空文本筛选':'Clear document filters',
-    '搜索标题、标签或开头':'Search title, tags, or beginning','文稿排序':'Sort documents',
+    '按标签筛选':'Filter by tag','全部标签':'All tags','文本列表':'Documents','清空文本筛选':'Clear document filters',
+    '当前文稿不在筛选结果中':'Current document is outside filtered results',
+    '切换可用性筛选即可查看其他视频。':'Switch availability filter to view other videos.',
+    '查看全部视频':'Show all videos','添加内容':'Add content','粘贴链接下载':'Download from link',
+    '导入本地音视频':'Import local media','粘贴链接':'Paste link','导入本地媒体':'Import local media',
+    '加入任务':'Add to queue','前往浏览器配对':'Pair browser','文稿排序':'Sort documents',
     '最近更新':'Newest first','最早更新':'Oldest first','仅原始转写':'Transcript only',
     '没有找到文本':'No matching documents','还没有文稿':'No documents yet','清除筛选':'Clear filters',
     '重新读取':'Reload','正在查找文稿':'Searching documents','读取文本失败':'Unable to read documents',
@@ -549,9 +553,10 @@ window.I18n = (() => {
       return parts.join(' · ');
     }
     const tags=trimmed.match(/^标签（(\d+)）$/);
-    const documents=trimmed.match(/^(\d+) 篇( · 当前文稿不在结果中)?$/);
-    if(documents)return `${documents[1]} ${documents[1]==='1'?'document':'documents'}${documents[2]?' · Current document is outside these results':''}`;
-    return tags ? 'Tags: '+tags[1] : text;
+    if(tags)return 'Tags: '+tags[1];
+    const missingVideos=trimmed.match(/^(\d+) 个位置待恢复$/);
+    if(missingVideos)return `${missingVideos[1]} ${missingVideos[1]==='1'?'missing file':'missing files'}`;
+    return text;
   }
   function translate(root=document.body) {
     if (!root) return;
