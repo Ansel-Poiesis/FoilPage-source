@@ -65,6 +65,7 @@ def _probe_default_route_tunnel() -> str:
     try:
         completed = subprocess.run(
             _find_net_route_command, capture_output=True, timeout=_PROBE_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError):
         return ""

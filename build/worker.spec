@@ -63,7 +63,7 @@ a = Analysis(
     hookspath=[],
     runtime_hooks=[],
     excludes=[
-        "torch", "tensorflow", "numba",
+        "torch", "tensorflow", "numba", "hf_xet",
         # 拆包模式下连自动依赖分析也不得把 NVIDIA 库带回来（bindepend 会
         # 顺着 ctranslate2 的 DLL 依赖找进 site-packages/nvidia）。
         *(() if BUNDLE_CUDA else ("nvidia", "nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc")),
@@ -87,6 +87,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=True,
+    hide_console="hide-early",
     version=os.path.join(ROOT, "build", "version_info_worker.txt"),
 )
 

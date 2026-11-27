@@ -444,6 +444,7 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
         self._product_sync_busy = False
         self._product_sync_at = 0.0
         self._announcement_sync_at = 0.0
+        self._last_push_digest: str | None = None
 
 
     # ---------------------------------------------------------------- state
@@ -495,6 +496,7 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
 
     def get_bootstrap(self) -> dict:
         with self._lock:
+            self._last_push_digest = None
             rows = self.controller.task_rows()
             return {
                 "settings": self._frontend_settings_view(),
@@ -3118,20 +3120,33 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
         try:
             with self._lock:
                 rows = self.controller.task_rows()
-                payload = {
+                state_payload = {
                     "tasks": self._tasks(rows),
                     "summary": self._summary(rows),
                     "worker": self._worker_state(),
-                    "notifications": notifications or [],
                     "product_notifications": self.get_product_notifications(),
                     "window_chrome": self.get_window_chrome(),
                     "launch_context": dict(self._launch_context()),
                     "account_access": self._frontend_settings_view()["account_access"],
                     "agent_settings_revision": self._settings_revision(),
+                }
+                digest = hashlib.sha256(
+                    json.dumps(state_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                pending_notifications = notifications or []
+                if not pending_notifications and digest == getattr(self, "_last_push_digest", None):
+                    return
+                payload = {
+                    **state_payload,
+                    "notifications": pending_notifications,
                     "ts": int(__import__("time").time() * 1000),
                 }
-            js = "window.__onState(" + json.dumps(payload, ensure_ascii=False) + ");"
+                js = "window.__onState(" + json.dumps(payload, ensure_ascii=False) + ");"
             window.evaluate_js(js)
+            with self._lock:
+                self._last_push_digest = digest
         except Exception:
-            # Window may be tearing down; ignore transient pushes.
+            # Window may be tearing down; ignore transient pushes and force fresh push next time.
+            with self._lock:
+                self._last_push_digest = None
             pass

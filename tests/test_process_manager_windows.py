@@ -79,13 +79,6 @@ std=lambda:[ctypes.windll.kernel32.GetStdHandle(n) for n in (-10,-11,-12)]
 result["std_at_start"]=std()
 manager.start()
 process=manager._process
-original_signal=process.send_signal
-def observed_signal(value):
-    console=ctypes.windll.kernel32.GetConsoleWindow()
-    result["attached_console"]=console
-    result["console_visible"]=bool(ctypes.windll.user32.IsWindowVisible(console))
-    return original_signal(value)
-process.send_signal=observed_signal
 try:
     result["ready"]=ready.wait(5)
 finally:
@@ -115,13 +108,41 @@ Path({str(report)!r}).write_text(json.dumps(result,ensure_ascii=False),encoding=
     assert result["ready"] and not result["running"], result
     assert result["exit_code"] == 0, result
     assert result["parent_console_before"] == result["parent_console_after"] == 0, result
-    assert result["attached_console"] and not result["console_visible"], result
     assert any("[worker] 已停止" in line for line in result["logs"]), result
-    # 2026-11-25 实机缺陷：AttachConsole 覆盖了父进程的标准句柄，停止 Worker 一次之后
-    # 重新启动与 GPU 探测都报 WinError 6，只能重启应用。标准句柄必须原样恢复。
     assert result["std_after_stop"] == result["std_at_start"], result
     assert result["spawn_after_stop"] == "ok", result
     assert result["restarted"] is True and result["restart_ready"], result
+
+
+def test_worker_spawn_uses_create_no_window(monkeypatch):
+    from app.process_manager import WorkerProcessManager
+
+    captured = {}
+
+    class DummyProc:
+        pid = 999
+        stdout = []
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return DummyProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    manager = WorkerProcessManager([sys.executable, "-c", "pass"], auto_restart=False)
+    try:
+        assert manager.start() is True
+        assert captured["kwargs"]["creationflags"] == subprocess.CREATE_NO_WINDOW
+        assert "startupinfo" not in captured["kwargs"]
+        assert captured["kwargs"]["env"] is None
+    finally:
+        manager.stop(timeout=1)
 
 
 def test_crash_restarts_back_off_then_give_up():

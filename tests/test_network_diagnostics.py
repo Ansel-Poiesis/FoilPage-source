@@ -26,8 +26,15 @@ def _fake_probe_run(alias: str, *, returncode: int = 0):
 
 def test_probe_reports_vpn_interface_alias(monkeypatch) -> None:
     reset_vpn_probe_cache_for_tests()
-    monkeypatch.setattr(subprocess, "run", _fake_probe_run("WindscribeWireguard\r\n"))
+    captured = {}
+
+    def run(cmd, **kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(stdout=b"WindscribeWireguard\r\n", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
     assert active_vpn_tunnel() == "WindscribeWireguard"
+    assert captured.get("creationflags") == getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def test_probe_silent_for_physical_adapter(monkeypatch) -> None:

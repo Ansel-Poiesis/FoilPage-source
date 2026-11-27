@@ -32,3 +32,20 @@ def test_extract_frame_data_urls_is_bounded_and_fail_soft(tmp_path: Path) -> Non
     assert frames[0]["timestamp"] == 0.0
     assert str(frames[0]["data_url"]).startswith("data:image/jpeg;base64,")
     assert run.call_count == 3
+
+
+def test_extract_frame_data_urls_supports_thumbnail_bounds(tmp_path: Path) -> None:
+    source = tmp_path / "portrait.mp4"
+    source.write_bytes(b"placeholder")
+    completed = mock.Mock(returncode=0, stdout=b"jpeg-bytes", stderr=b"")
+    with mock.patch("engine.video_frames.get_ffmpeg", return_value="ffmpeg"), mock.patch(
+        "engine.video_frames.subprocess.run", return_value=completed
+    ) as run:
+        frames = extract_frame_data_urls(
+            source, [1.0], timeout_sec=1, max_width=480, max_height=720, quality=6
+        )
+    assert len(frames) == 1
+    cmd = run.call_args.args[0]
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "min(480,iw)" in vf and "min(720,ih)" in vf
+    assert cmd[cmd.index("-q:v") + 1] == "6"

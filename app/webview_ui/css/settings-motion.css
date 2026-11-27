@@ -3,8 +3,8 @@
 /* Ordinary commands settle on release. Navigation keeps its hit areas still. */
 button.btn {
   transition: background-color 110ms var(--ease-out), color 110ms var(--ease-out),
-    border-color 110ms var(--ease-out), box-shadow 120ms var(--ease-out),
-    transform 125ms var(--ease-out);
+    border-color 110ms var(--ease-out), box-shadow 85ms var(--ease-out),
+    transform 85ms var(--ease-out);
 }
 @media (hover: hover) and (pointer: fine) {
   button.btn:not(:disabled):not([aria-disabled="true"]):hover {
@@ -45,7 +45,7 @@ button.btn:not(:disabled):not([aria-disabled="true"]):active {
 .settings-pane .toggle:disabled:not([aria-busy="true"]) { opacity: .55; }
 @media (prefers-reduced-motion: no-preference) {
   body:not([data-animations="off"]) button.btn:not(:disabled):not([aria-disabled="true"]):active {
-    transform: translateY(1px) scale(.985);
+    transform: translateY(1px);
   }
   body:not([data-animations="off"]) .settings-pane .toggle:not(:disabled):active::after {
     scale: .88;

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Ansel
+﻿# Copyright (c) 2026 Ansel
 # SPDX-License-Identifier: MPL-2.0
 [CmdletBinding()]
 param(
@@ -195,6 +195,10 @@ try {
             $dest = Join-Path $gpuStage ("nvidia\" + $component)
             New-Item -ItemType Directory -Path $dest -Force | Out-Null
             Copy-Item -LiteralPath $binDir -Destination $dest -Recurse -ErrorAction Stop
+        }
+        $gpuPackPrecompiled = Join-Path $gpuStage 'nvidia\cudnn\bin\cudnn_engines_precompiled64_9.dll'
+        if (Test-Path -LiteralPath $gpuPackPrecompiled) {
+            Remove-Item -LiteralPath $gpuPackPrecompiled -Force -ErrorAction Stop
         }
         $gpuPack = Join-Path $projectRoot ("dist_installer\FoilPage-GPU-Pack-$appVersion.zip")
         Assert-ReleaseTarget -Target $gpuPack -Boundary (Join-Path $projectRoot 'dist_installer')

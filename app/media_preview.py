@@ -192,7 +192,7 @@ class MediaPreviewServer:
 
     def cover(self, item, source: Path) -> Path | None:
         stat = source.stat()
-        fingerprint = hashlib.sha256(f"{item['id']}:{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()
+        fingerprint = hashlib.sha256(f"v2:{item['id']}:{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()
         target = self.cache_dir / f"{fingerprint}.jpg"
         with self._lock:
             lock = self._covers.setdefault(fingerprint, threading.Lock())
@@ -202,8 +202,17 @@ class MediaPreviewServer:
             if fingerprint in self._failed_covers:
                 return None
             with self._decode_slots:
-                frames = extract_frame_data_urls(source, [min(1.0, float(item.get('duration_sec') or 0) * .05)],
-                                                 ffmpeg_path=self.ffmpeg_path, timeout_sec=10)
+                # 缩略图仅用于视频墙卡片（列宽 ~240–320px），限制在 480×720 内，
+                # 避免竖屏 1280×2276 封面在 WebView2 GPU/渲染进程里占 ~11MB/张。
+                frames = extract_frame_data_urls(
+                    source,
+                    [min(1.0, float(item.get('duration_sec') or 0) * .05)],
+                    ffmpeg_path=self.ffmpeg_path,
+                    timeout_sec=10,
+                    max_width=480,
+                    max_height=720,
+                    quality=6,
+                )
             if not frames:
                 self._failed_covers.add(fingerprint)
                 return None

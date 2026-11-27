@@ -25,7 +25,6 @@ import os
 import signal
 import sys
 import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Mapping
@@ -111,6 +110,7 @@ class Worker:
         # 多条作业；claim_next 的原子抢占保证不会重复领取。
         self.concurrency = max(1, int(concurrency))
         self._stop = False
+        self._stop_event = threading.Event()
         self.account_waiting = False
 
     def _account_ready(self) -> bool:
@@ -424,6 +424,7 @@ class Worker:
 
     def run_forever(self) -> None:
         self._install_signal_handlers()
+        self._start_stop_watchers()
         print(
             f"[worker] 启动 id={self.worker_id} 并发={self.concurrency}，Ctrl+C 停止",
             flush=True,
@@ -433,7 +434,7 @@ class Worker:
             return
         while not self._stop:
             if not self.step():
-                time.sleep(self.poll)
+                self._stop_event.wait(self.poll)
         print("[worker] 已停止", flush=True)
 
     def _run_forever_concurrent(self) -> None:
@@ -469,18 +470,61 @@ class Worker:
                 self.store.recover_stale_jobs(self.lease_timeout)
                 if not self._account_ready():
                     release()
-                    time.sleep(self.poll)
+                    self._stop_event.wait(self.poll)
                     continue
                 job = self.store.claim_next(self.worker_id)
                 if job is None:
                     release()
-                    time.sleep(self.poll)
+                    self._stop_event.wait(self.poll)
                     continue
                 pool.submit(run_and_release, job)
         print("[worker] 已停止", flush=True)
 
     def _request_stop(self) -> None:
         self._stop = True
+        self._stop_event.set()
+
+    def _start_stop_watchers(self) -> None:
+        """Listen for parent-managed stop signals without needing a console window."""
+        if os.name != "nt":
+            return
+        # On Windows, venv launchers (.venv\Scripts\python.exe) spawn the real
+        # interpreter as a child process, so process.pid in the parent equals
+        # either our own PID (frozen EXE) or our immediate launcher PID (venv).
+        pids = dict.fromkeys((os.getpid(), os.getppid()))
+        event_names = [f"Local\\FoilPageWorkerStop-PID-{pid}" for pid in pids if pid > 0]
+        if not event_names:
+            return
+
+        def _watch_windows_event() -> None:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+            kernel.CreateEventW.restype = wintypes.HANDLE
+            kernel.WaitForMultipleObjects.argtypes = [
+                wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.BOOL, wintypes.DWORD,
+            ]
+            kernel.WaitForMultipleObjects.restype = wintypes.DWORD
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle.restype = wintypes.BOOL
+            handles = [
+                handle for name in event_names
+                if (handle := kernel.CreateEventW(None, True, False, name))
+            ]
+            if not handles:
+                return
+            try:
+                array = (wintypes.HANDLE * len(handles))(*handles)
+                # bWaitAll=False, dwMilliseconds=INFINITE (0xFFFFFFFF)
+                kernel.WaitForMultipleObjects(len(handles), array, False, 0xFFFFFFFF)
+            finally:
+                for handle in handles:
+                    kernel.CloseHandle(handle)
+            self._request_stop()
+
+        threading.Thread(target=_watch_windows_event, name="worker-stop-event", daemon=True).start()
 
     def _install_signal_handlers(self) -> None:
         signals = [signal.SIGINT, signal.SIGTERM]

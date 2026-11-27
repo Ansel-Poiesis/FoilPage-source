@@ -315,7 +315,7 @@ window.Videos = (() => {
       coverNote.textContent = "暂无封面";
       coverNote.setAttribute("aria-hidden", "true"); coverNote.hidden = !!thumbnail || item.available !== true;
       if (thumbnail) {
-        const image = document.createElement("img"); image.src = thumbnail; image.alt = ""; image.loading = "lazy";
+        const image = document.createElement("img"); image.src = thumbnail; image.alt = ""; image.loading = "lazy"; image.decoding = "async";
         // 列归属在初配时定死，图片后载只影响列的自然高度，不重排
         // （重排会挪卡丢焦点）。
         image.onload = () => { image.classList.add("is-loaded"); settleLocatedVideo(); };
@@ -440,7 +440,7 @@ window.Videos = (() => {
       button.setAttribute('aria-pressed', String(button.dataset.videoFilter === availability));
       button.querySelector('span').textContent = counts[button.dataset.videoFilter];
     });
-    setStatus(missing ? missing + ' 个位置待恢复' : '');
+    setStatus('');
     if (pendingContext) {
       const target = pendingContext;
       pendingContext = null;
@@ -549,6 +549,13 @@ window.Videos = (() => {
   function leave() {
     if (document.getElementById("refreshVideos")?.closest("#viewActions"))
       document.getElementById("viewActions")?.replaceChildren();
+    if (gridObserver) { gridObserver.disconnect(); gridObserver = null; }
+    cancelAnimationFrame(masonryFrame); masonryFrame = 0;
+    masonryCards = [];
+    currentItems = new Map();
+    lastItemsKey = '';
+    catalogLoaded = false;
+    document.getElementById("videoGrid")?.replaceChildren();
   }
   function refreshLight() {
     const key = (AppState.tasks || []).map(task => [task.task_id,task.status,task.display_title,task.downloaded_path].join("|")).join(";");

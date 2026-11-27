@@ -287,7 +287,17 @@ class WebDesktopApp:
         self._notification_thread.start()
         threading.Thread(target=self._ci_runner_wakeup_once, daemon=True).start()
         log.info("webview.start entering")
-        webview.start(self._fix_native_window, debug=debug)
+        storage_path = None
+        if not self.demo:
+            webview_cache = validate_storage_path(Path(self.settings_store.base_dir) / "cache" / "webview2")
+            webview_cache.mkdir(parents=True, exist_ok=True)
+            storage_path = str(webview_cache)
+        webview.start(
+            self._fix_native_window,
+            debug=debug,
+            private_mode=self.demo,
+            storage_path=storage_path,
+        )
         log.info("webview.start returned")
 
     def _ci_runner_wakeup_once(self) -> None:

@@ -41,6 +41,9 @@ Type: files; Name: "{app}\browser-extension\page-hook.js"
 Type: files; Name: "{app}\browser-extension\browser-session.js"
 Type: filesandordirs; Name: "{app}\browser-extension\fonts\fonts"
 Type: filesandordirs; Name: "{app}\browser-extension\icons\icons"
+; Slimming: WebView2 exclusively loads app/webview_ui/assets/fonts/LXGWWenKaiScreen.woff2.
+Type: files; Name: "{app}\_internal\assets\fonts\LXGWWenKaiScreen.ttf"
+Type: files; Name: "{app}\_internal\assets\fonts\LXGWWenKaiScreen.woff2"
 
 [Code]
 var
