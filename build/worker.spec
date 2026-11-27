@@ -86,8 +86,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
-    hide_console="hide-early",
+    console=False,
     version=os.path.join(ROOT, "build", "version_info_worker.txt"),
 )
 

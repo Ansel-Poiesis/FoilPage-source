@@ -35,6 +35,10 @@ _APP = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_APP))
 
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
