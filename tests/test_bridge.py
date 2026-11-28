@@ -669,6 +669,80 @@ def test_push_state_skips_unchanged_idle_payloads():
     assert len(window.eval_scripts) == 3
 
 
+def test_idle_polling_reuses_db_change_token_and_invalidates_on_write(tmp_path):
+    from app.controller import AppController
+    from engine.settings import SettingsStore
+    from test_queue_store import _job
+
+    store = SettingsStore(base_dir=tmp_path / "data")
+    controller = AppController(store)
+    window = FakeWindow()
+    try:
+        bridge = Bridge(controller, FakeWorker(), store, window_provider=lambda: window, on_quit=lambda: None)
+        task_calls = 0
+        notif_calls = 0
+        orig_task_rows = controller.task_rows
+        orig_job_rows = controller.job_rows
+
+        def counted_task_rows(*args, **kwargs):
+            nonlocal task_calls
+            task_calls += 1
+            return orig_task_rows(*args, **kwargs)
+
+        def counted_job_rows(*args, **kwargs):
+            nonlocal notif_calls
+            notif_calls += 1
+            return orig_job_rows(*args, **kwargs)
+
+        controller.task_rows = counted_task_rows
+        controller.job_rows = counted_job_rows
+
+        # First idle poll warms both caches; subsequent idle polls hit zero table scans.
+        bridge.push_state()
+        bridge.push_state()
+        assert task_calls == 1
+        assert len(window.eval_scripts) == 1
+
+        first_notif = bridge.get_notification_tasks()
+        second_notif = bridge.get_notification_tasks()
+        assert notif_calls == 1
+        assert first_notif == second_notif == []
+
+        # Local write via QueueStore must invalidate both caches immediately.
+        controller.queue.enqueue(_job("idle-cache-job"))
+        bridge.push_state()
+        assert task_calls == 2
+        assert len(window.eval_scripts) == 2
+
+        after_write_notif = bridge.get_notification_tasks()
+        assert notif_calls == 2
+        assert [row["task_id"] for row in after_write_notif] == ["job:idle-cache-job"]
+    finally:
+        controller.close()
+
+
+def test_external_worker_write_invalidates_db_change_token(tmp_path):
+    from contextlib import closing
+    from app.controller import AppController
+    from engine.queue_store import QueueStore
+    from engine.settings import SettingsStore
+    from test_queue_store import _job
+
+    store = SettingsStore(base_dir=tmp_path / "data")
+    controller = AppController(store)
+    try:
+        t0 = controller.db_change_token()
+        assert isinstance(t0, tuple) and len(t0) == 3
+        assert controller.db_change_token() == t0
+        with closing(QueueStore(controller.settings["database_path"])) as worker_q:
+            worker_q.enqueue(_job("worker-written"))
+        t1 = controller.db_change_token()
+        assert t1 != t0
+        assert controller.db_change_token() == t1
+    finally:
+        controller.close()
+
+
 def test_import_files_enqueues(tmp_path):
     bridge, controller, _ = make_bridge(account_dir=tmp_path / "data")
     result = bridge.import_files(["C:/a.mp4"])

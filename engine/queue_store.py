@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created
     ON jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_created_id
+    ON jobs(created_at, id);
 
 CREATE TABLE IF NOT EXISTS manifests (
     job_id         TEXT PRIMARY KEY,
@@ -350,14 +352,21 @@ class QueueStore:
             ]
             if foreign_keys != [("jobs", "job_id", "id", "NO ACTION", "NO ACTION", "NONE")]:
                 return False
-            index = next((row for row in self._conn.execute("PRAGMA index_list(jobs)")
-                          if row["name"] == "idx_jobs_status_created"), None)
-            if index is None or index["unique"] != 0 or index["partial"] != 0 or index["origin"] != "c":
-                return False
-            index_columns = [(row["name"], row["desc"], row["coll"], row["cid"] >= 0)
-                             for row in self._conn.execute("PRAGMA index_xinfo(idx_jobs_status_created)")
-                             if row["key"]]
-            return index_columns == [("status", 0, "BINARY", True), ("created_at", 0, "BINARY", True)]
+            indexes = {row["name"]: row for row in self._conn.execute("PRAGMA index_list(jobs)")}
+            expected_indexes = (
+                ("idx_jobs_status_created", [("status", 0, "BINARY", True), ("created_at", 0, "BINARY", True)]),
+                ("idx_jobs_created_id", [("created_at", 0, "BINARY", True), ("id", 0, "BINARY", True)]),
+            )
+            for index_name, expected_columns in expected_indexes:
+                index = indexes.get(index_name)
+                if index is None or index["unique"] != 0 or index["partial"] != 0 or index["origin"] != "c":
+                    return False
+                index_columns = [(row["name"], row["desc"], row["coll"], row["cid"] >= 0)
+                                 for row in self._conn.execute(f"PRAGMA index_xinfo({index_name})")
+                                 if row["key"]]
+                if index_columns != expected_columns:
+                    return False
+            return True
         finally:
             self._conn.rollback()
 
