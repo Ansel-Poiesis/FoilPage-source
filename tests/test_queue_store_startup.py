@@ -113,6 +113,32 @@ def test_missing_status_index_repairs_even_when_user_version_is_current(tmp_path
     assert any(sql.strip().upper().startswith('BEGIN IMMEDIATE') for sql in statements)
 
 
+def test_created_id_and_download_requested_indexes_avoid_temp_btree(tmp_path):
+    from engine.download_store import DownloadStore
+
+    database = str(tmp_path / 'indexed.db')
+    with closing(queue_store.QueueStore(database)) as q:
+        q.enqueue(_job('idx-order-1'))
+        plan = ' '.join(
+            row['detail']
+            for row in q._conn.execute('EXPLAIN QUERY PLAN SELECT * FROM jobs ORDER BY created_at, id').fetchall()
+        )
+        assert 'idx_jobs_created_id' in plan
+        assert 'TEMP B-TREE' not in plan.upper()
+        q._conn.execute('DROP INDEX idx_jobs_created_id')
+    with closing(queue_store.QueueStore(database)) as repaired:
+        assert repaired._schema_is_current()
+    with closing(DownloadStore(database)) as dl:
+        plan = ' '.join(
+            row['detail']
+            for row in dl._conn.execute(
+                'EXPLAIN QUERY PLAN SELECT * FROM download_jobs ORDER BY requested_at DESC, id DESC'
+            ).fetchall()
+        )
+        assert 'idx_download_jobs_requested_id' in plan
+        assert 'TEMP B-TREE' not in plan.upper()
+
+
 @pytest.mark.parametrize('definition', [
     'CREATE INDEX idx_jobs_status_created ON jobs(created_at,status)',
     'CREATE INDEX idx_jobs_status_created ON jobs(status,created_at DESC)',

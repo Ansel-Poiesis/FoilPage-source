@@ -57,6 +57,10 @@ class AppController:
         self.media = MediaStore(self.settings["database_path"])
         self.queue = QueueStore(self.settings["database_path"])
         self.downloads = DownloadStore(self.settings["database_path"])
+        db_setting = str(self.settings.get("database_path") or "")
+        self._shared_db_connections = bool(
+            db_setting and db_setting != ":memory:" and not db_setting.startswith("file::memory:")
+        )
         try:
             library_id = bind_library_identity(
                 self.settings["database_path"], self.settings.get("library_id", ""),
@@ -227,23 +231,51 @@ class AppController:
         with self._writable_action():
             return self.media.clear_media()
 
-    def job_rows(self, include_archived: bool = False) -> list[dict]:
-        """Return jobs with a stable human title, including pre-migration jobs.
+    def db_change_token(self) -> tuple[int, int, int] | None:
+        """Lightweight SQLite change stamp across the three distinct DB connections.
 
-        Archived jobs are hidden from the workbench by default; the library
-        reads them via ``include_archived=True`` so cleared results survive.
+        In SQLite WAL mode, PRAGMA data_version increments on every *other*
+        connection after any committed write (local or external Worker/Agent).
+        Reading all three distinct connections therefore detects every commit
+        without scanning any tables. Returns None for in-memory or mocked stores.
         """
+        if not getattr(self, "_shared_db_connections", False):
+            return None
+        stores = (self.queue, self.downloads, self.media)
+        conns = [getattr(store, "_conn", None) for store in stores]
+        if any(not isinstance(conn, sqlite3.Connection) for conn in conns):
+            return None
+        if len({id(conn) for conn in conns}) < 2:
+            return None
+        versions: list[int] = []
+        for store, conn in zip(stores, conns):
+            lock = getattr(store, "_lock", None)
+            if lock is not None:
+                with lock:
+                    versions.append(int(conn.execute("PRAGMA data_version").fetchone()[0]))
+            else:
+                versions.append(int(conn.execute("PRAGMA data_version").fetchone()[0]))
+        return (versions[0], versions[1], versions[2])
+
+    @staticmethod
+    def _assemble_job_rows(
+        jobs: list[dict],
+        media_items: list[dict],
+        download_rows: list[dict],
+        *,
+        include_archived: bool = False,
+    ) -> list[dict]:
         media_names = {
             item["source_path"]: Path(item["filename"]).stem
-            for item in self.media.list_media()
+            for item in media_items
         }
         download_names = {
             item["job_id"]: item["title"]
-            for item in self.downloads.list(limit=None)
+            for item in download_rows
             if item.get("job_id") and item.get("title")
         }
         rows = []
-        for job in self.queue.list_jobs():
+        for job in jobs:
             if job.get("archived") and not include_archived:
                 continue
             row = dict(job)
@@ -255,6 +287,19 @@ class AppController:
             rows.append(row)
         return rows
 
+    def job_rows(self, include_archived: bool = False) -> list[dict]:
+        """Return jobs with a stable human title, including pre-migration jobs.
+
+        Archived jobs are hidden from the workbench by default; the library
+        reads them via ``include_archived=True`` so cleared results survive.
+        """
+        return self._assemble_job_rows(
+            self.queue.list_jobs(),
+            self.media.list_media(),
+            self.downloads.list(limit=None),
+            include_archived=include_archived,
+        )
+
     def task_rows(self, include_archived: bool = False) -> list[dict]:
         """Combine visible browser and transcription work without duplicate rows.
 
@@ -263,18 +308,20 @@ class AppController:
         workbench; the job itself is skipped unless ``include_archived``.
         """
         rows: list[dict] = []
-        linked_jobs: set[str] = set()
-        for job in self.queue.list_jobs():
-            linked_jobs.add(job["id"])
+        all_jobs = self.queue.list_jobs()
+        linked_jobs: set[str] = {job["id"] for job in all_jobs}
         # TASK-8.17：转写行从关联下载行继承封面（下载行被并入隐藏后，封面
         # 仍要在同一张任务卡上展示）。
         download_rows = self.downloads.list(limit=None)
+        media_items = self.media.list_media()
         linked_covers = {
             item["job_id"]: item.get("cover_path")
             for item in download_rows
             if item.get("job_id") and item.get("cover_path")
         }
-        for job in self.job_rows(include_archived=include_archived):
+        for job in self._assemble_job_rows(
+            all_jobs, media_items, download_rows, include_archived=include_archived
+        ):
             row = dict(job)
             row.update({
                 "kind": "transcription",

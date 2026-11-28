@@ -584,7 +584,7 @@ class WebDesktopApp:
             pass
 
     def _arm_quit_watchdog(self) -> None:
-        """先生 2026-11-16：退出兜底看门狗（只武装一次）。
+        r"""先生 2026-11-16：退出兜底看门狗（只武装一次）。
 
         清理链任何一环卡死——_close_lock 被轮询饿死、GUI 线程被长 RPC
         占住导致 destroy 排队、pystray 非 daemon 托盘线程悬挂——都会让

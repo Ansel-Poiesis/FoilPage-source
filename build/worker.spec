@@ -64,6 +64,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         "torch", "tensorflow", "numba", "hf_xet",
+        "PIL", "Pillow",
         # 拆包模式下连自动依赖分析也不得把 NVIDIA 库带回来（bindepend 会
         # 顺着 ctranslate2 的 DLL 依赖找进 site-packages/nvidia）。
         *(() if BUNDLE_CUDA else ("nvidia", "nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc")),

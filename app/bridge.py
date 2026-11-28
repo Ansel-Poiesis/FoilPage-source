@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 ACTIVE_STATUSES = {"queued", "running", "retryable", "received", "resolving", "awaiting_browser", "downloading", "imported", "transcribing"}
 TERMINAL_STATUSES = {"done", "failed", "cancelled"}
 
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 RELEASE_CHANNEL = "formal"
 UPDATE_URL = "https://api.github.com/repos/Ansel-Poiesis/FoilPage-source/releases/latest"
 
@@ -445,6 +445,10 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
         self._product_sync_at = 0.0
         self._announcement_sync_at = 0.0
         self._last_push_digest: str | None = None
+        self._cached_tasks_token: tuple[int, int, int] | None = None
+        self._cached_tasks_view: tuple[list[dict], dict] | None = None
+        self._cached_notification_token: tuple[int, int, int] | None = None
+        self._cached_notification_rows: list[dict] | None = None
 
 
     # ---------------------------------------------------------------- state
@@ -494,9 +498,20 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
         view["agent_settings_revision"] = self._settings_revision()
         return view
 
+    def _db_change_token(self) -> tuple[int, int, int] | None:
+        token_fn = getattr(self.controller, "db_change_token", None)
+        if not callable(token_fn):
+            return None
+        token = token_fn()
+        if isinstance(token, tuple) and len(token) == 3 and all(isinstance(v, int) for v in token):
+            return token
+        return None
+
     def get_bootstrap(self) -> dict:
         with self._lock:
             self._last_push_digest = None
+            self._cached_tasks_token = None
+            self._cached_tasks_view = None
             rows = self.controller.task_rows()
             return {
                 "settings": self._frontend_settings_view(),
@@ -516,6 +531,13 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
     def get_notification_tasks(self) -> list[dict]:
         """Include linked downloads so their completion is not hidden by ASR."""
         with self._lock:
+            token = self._db_change_token()
+            if (
+                token is not None
+                and token == self._cached_notification_token
+                and self._cached_notification_rows is not None
+            ):
+                return self._cached_notification_rows
             rows = []
             for job in self.controller.job_rows(include_archived=True):
                 rows.append({
@@ -528,7 +550,7 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
                         "original_source_title", "optimized_source_title",
                     ) if name in job},
                 })
-            for download in self.controller.downloads.list(limit=500):
+            for download in self.controller.downloads.list(limit=None):
                 downloaded = bool(download.get("downloaded_path"))
                 rows.append({
                     "task_id": f"dl:{download['id']}", "kind": "download",
@@ -538,6 +560,9 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
                     # 下载进度里程碑 toast 依赖该字段；缺失则只报开始/终态。
                     "progress": download.get("progress"),
                 })
+            if token is not None:
+                self._cached_notification_token = token
+                self._cached_notification_rows = rows
             return rows
 
     def get_summary(self) -> dict:
@@ -3119,10 +3144,23 @@ class Bridge(AccountBridgeMixin, PostprocessBridgeMixin):
             return
         try:
             with self._lock:
-                rows = self.controller.task_rows()
+                token = self._db_change_token()
+                if (
+                    token is not None
+                    and token == self._cached_tasks_token
+                    and self._cached_tasks_view is not None
+                ):
+                    tasks_out, summary_out = self._cached_tasks_view
+                else:
+                    rows = self.controller.task_rows()
+                    tasks_out = self._tasks(rows)
+                    summary_out = self._summary(rows)
+                    if token is not None:
+                        self._cached_tasks_token = token
+                        self._cached_tasks_view = (tasks_out, summary_out)
                 state_payload = {
-                    "tasks": self._tasks(rows),
-                    "summary": self._summary(rows),
+                    "tasks": tasks_out,
+                    "summary": summary_out,
                     "worker": self._worker_state(),
                     "product_notifications": self.get_product_notifications(),
                     "window_chrome": self.get_window_chrome(),

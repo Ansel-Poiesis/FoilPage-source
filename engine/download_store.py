@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS download_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_download_jobs_status_requested
     ON download_jobs(status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_download_jobs_requested_id
+    ON download_jobs(requested_at DESC, id DESC);
 CREATE TABLE IF NOT EXISTS download_requests (
     client_request_id TEXT PRIMARY KEY,
     download_id TEXT NOT NULL REFERENCES download_jobs(id) ON DELETE CASCADE
